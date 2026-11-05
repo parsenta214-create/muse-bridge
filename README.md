@@ -1478,6 +1478,12 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     not scroll X's timeline, so DPAD is not a usable scroll
     method for X; swipe stays the scroll method. The bridge
     side works as designed — the limitation is X's behaviour.
+    Retried 05:54 at Saardeim's request ("もう一回"): the
+    first retry went to the Muse app (he had switched to the
+    chat to send the message), so it was redone properly on
+    X — DPAD_DOWN x5 again, texts identical before/after,
+    focus stayed None this time. Same verdict, confirmed
+    twice.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
