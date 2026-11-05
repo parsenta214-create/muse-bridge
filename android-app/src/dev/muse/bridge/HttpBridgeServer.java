@@ -727,9 +727,15 @@ public class HttpBridgeServer {
             } catch (Exception ignored) {
             }
         } catch (org.json.JSONException e) {
+            // A-5 fix: carry the specific message (unknown field, too
+            // many actions, unsupported version) instead of a fixed
+            // "invalid JSON" — a genuine parse failure still has the
+            // parser's own message in e.getMessage().
             status = 400;
             try {
-                sendJson(conn.getOutputStream(), status, errorJson("invalid JSON"));
+                String msg = e.getMessage();
+                sendJson(conn.getOutputStream(), status, errorJson(
+                        msg == null || msg.isEmpty() ? "invalid JSON" : msg));
             } catch (Exception ignored) {
             }
         } catch (ServiceUnavailable e) {

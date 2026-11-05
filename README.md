@@ -992,6 +992,17 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     read at activity open and can be stale; /state is the live
     check (200 = connected, 503 = not). If /state 503s after the
     fix, toggle the accessibility service off and on in settings.
+52. A-5 second live finding (2026-11-06 03:50, v1.9.2,
+    versionCode 12): the outer JSONException catch sent a fixed
+    "invalid JSON", discarding the specific message — so the A-4
+    "unknown field" and the A-5 "too many actions" rejections both
+    came back as "invalid JSON" (status 400 was right, the message
+    was wrong). Fix: send e.getMessage(), falling back to
+    "invalid JSON" only when it is empty. Also confirmed: an
+    oversized body is rejected by closing the connection, so over
+    the slow tunnel the client may see a connection reset instead
+    of reading the 413 JSON — the reset IS the rejection, and the
+    A-5 check accepts either 413 or the reset as proof.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
