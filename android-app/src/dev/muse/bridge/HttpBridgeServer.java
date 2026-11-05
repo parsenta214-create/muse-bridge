@@ -205,8 +205,13 @@ public class HttpBridgeServer {
         // A-2: this thread only accepts. HTTP handling runs on the
         // bounded worker pool; the connection slot is released when
         // the worker finishes (or immediately when we shed the load).
+        // A-5 fix: accept threads are started while the server is
+        // still STARTING, so the loop must run in STARTING too — the
+        // old "RUNNING only" condition made the thread exit at once
+        // (the socket stayed bound but deaf, and start() still
+        // reported running). It now runs until STOPPING/STOPPED.
         final ThreadPoolExecutor pool = workers;
-        while (state == ServerState.RUNNING) {
+        while (state == ServerState.RUNNING || state == ServerState.STARTING) {
             try {
                 final Socket conn = ss.accept();
                 if (pool == null || pool.isShutdown()) {
@@ -246,7 +251,7 @@ public class HttpBridgeServer {
                     sendOverload(conn);
                 }
             } catch (Exception e) {
-                if (state == ServerState.RUNNING) {
+                if (state == ServerState.RUNNING || state == ServerState.STARTING) {
                     Log.w(TAG, "accept failed: " + e.getMessage());
                 }
             }

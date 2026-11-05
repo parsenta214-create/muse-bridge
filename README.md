@@ -975,6 +975,23 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     errors, A-2 flood/503, A-3 snapshot fields, A-4 replay/409)
     is the remaining A-5 step and needs the final v1.9 APK
     installed on the phone.
+51. A-5 live bug found and fixed (2026-11-06 03:45, v1.9.1,
+    versionCode 11): the A-2 accept threads were born dead. start()
+    spawns them while state is STARTING, but acceptLoop only ran
+    while state == RUNNING, so each thread exited at once — the
+    socket stayed bound (start() reported running, the app showed
+    "Bridge: running") but no thread ever accepted, and every
+    request timed out. The A-2 build had never run on a real phone
+    before this (it was an intermediate build), so the bug only
+    surfaced at the A-5 phone verification. Fix: the loop runs in
+    STARTING or RUNNING (until STOPPING/STOPPED). Verified by the
+    symptom (bound but deaf, /health timeout, raw tunnel to
+    :8080 silent) and the code read. Note: the app's MainActivity
+    status can say "Accessibility service: NOT enabled" while the
+    system settings list shows Muse Bridge ON — the status text is
+    read at activity open and can be stale; /state is the live
+    check (200 = connected, 503 = not). If /state 503s after the
+    fix, toggle the accessibility service off and on in settings.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
