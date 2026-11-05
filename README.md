@@ -1003,6 +1003,23 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     the slow tunnel the client may see a connection reset instead
     of reading the 413 JSON — the reset IS the rejection, and the
     A-5 check accepts either 413 or the reset as proof.
+53. A-5 phone verification PASSED (2026-11-06 03:55, v1.9.2,
+    versionCode 12): 11/11 checks on the real phone — /health
+    1.9.2/12 with accessibility enabled; /state snapshot fields
+    (snapshot_id == revision, snapshot_valid, snapshot_stable);
+    bad token -> 401; oversized body rejected (413 sent, client
+    may see a reset instead — accepted as proof); batch wait ->
+    completed with payload_hash; re-send -> replayed; same id +
+    different content -> 409; 21 actions -> 400 "batch has too
+    many actions (max 20): 21"; unknown field -> 400 "unknown
+    field: bogus" (the v1.9.2 message fix confirmed live);
+    click_node with a stale tree_hash -> 409; 24 concurrent
+    /health all 200 and the server stayed alive. Extra positive
+    click test: HOME -> click_node on the "MUSE用" folder (n57)
+    returned ok with snapshot_id 8, the folder opened (tree_hash
+    moved, contents F-Droid/Tailscale/Termux/Muse Bridge), then
+    BACK + HOME restored the home screen. Phase B is complete
+    (A-1..A-5, decisions 46-53).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
