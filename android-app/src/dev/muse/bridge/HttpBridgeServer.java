@@ -7,6 +7,12 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.os.BatteryManager;
+import android.os.PowerManager;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -500,6 +506,7 @@ public class HttpBridgeServer {
                                     ? JSONObject.NULL : st.focusedId)
                             .put("ime_visible", st.imeVisible)
                             .put("event_seq", st.eventSeq)
+                            .put("device", deviceState())
                             .put("truncated", st.truncated));
                 }
             } else if ("/logs".equals(path)) {
@@ -849,6 +856,122 @@ public class HttpBridgeServer {
                 .build();
         nm.notify(UPDATE_NOTIFICATION_ID, notification);
         return true;
+    }
+
+    /**
+     * Device condition (decision 62, v1.9.6): battery, network
+     * transport, and interactivity, read on the worker thread (not
+     * the a11y main thread). Best effort only — unreadable values
+     * fall back to -1 / false / "unknown" and never fail /state.
+     * battery_pct=-1 marks "unknown": charging=false alone means
+     * "not charging" only when battery_pct >= 0.
+     */
+    private JSONObject deviceState() {
+        int batteryPct = -1;
+        boolean charging = false;
+        try {
+            IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+            Intent battery = context.registerReceiver(null, filter);
+            if (battery != null) {
+                int level = battery.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = battery.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                if (level >= 0 && scale > 0) {
+                    batteryPct = Math.round(level * 100f / scale);
+                    if (batteryPct < 0) {
+                        batteryPct = 0;
+                    }
+                    if (batteryPct > 100) {
+                        batteryPct = 100;
+                    }
+                }
+                int plugged = battery.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0);
+                charging = plugged != 0;
+            }
+        } catch (Exception ignored) {
+            // Best effort: leave the fallbacks.
+        }
+        String network = networkTransport();
+        boolean interactive = false;
+        try {
+            PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
+            if (pm != null) {
+                interactive = pm.isInteractive();
+            }
+        } catch (Exception ignored) {
+            // Best effort: leave the fallback.
+        }
+        try {
+            return new JSONObject()
+                    .put("battery_pct", batteryPct)
+                    .put("charging", charging)
+                    .put("network", network)
+                    .put("interactive", interactive);
+        } catch (org.json.JSONException e) {
+            // Unreachable for these put() calls, but never fail /state.
+            return new JSONObject();
+        }
+    }
+
+    /**
+     * The default network's transport type (not internet
+     * reachability). When the default network is a VPN, use its
+     * underlying network's transport (wifi > mobile > other):
+     * the phone's Tailscale VPN is the default network, so
+     * without this the field would almost always read "other".
+     */
+    private String networkTransport() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager)
+                    context.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) {
+                return "unknown";
+            }
+            Network active = cm.getActiveNetwork();
+            if (active == null) {
+                return "none";
+            }
+            NetworkCapabilities caps = cm.getNetworkCapabilities(active);
+            if (caps == null) {
+                return "unknown";
+            }
+            return transportOf(caps, cm);
+        } catch (Exception ignored) {
+            return "unknown";
+        }
+    }
+
+    private String transportOf(NetworkCapabilities caps, ConnectivityManager cm) {
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+            return "wifi";
+        }
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+            return "mobile";
+        }
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+            // A VPN rides on an underlying network: scan the other
+            // networks for it (getUnderlyingNetworks is a system API
+            // and not callable here). Prefer wifi, then mobile.
+            try {
+                String best = "other";
+                for (Network n : cm.getAllNetworks()) {
+                    NetworkCapabilities uc = cm.getNetworkCapabilities(n);
+                    if (uc == null
+                            || uc.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
+                        continue;
+                    }
+                    if (uc.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                        return "wifi";
+                    }
+                    if (uc.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) {
+                        best = "mobile";
+                    }
+                }
+                return best;
+            } catch (Exception ignored) {
+                // Best effort: fall through to "other".
+            }
+        }
+        return "other";
     }
 
     private static void requireService(BridgeAccessibilityService svc) throws ServiceUnavailable {

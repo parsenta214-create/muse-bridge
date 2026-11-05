@@ -1302,7 +1302,17 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     cron stays as-is). Tests: mock /state carries the device
     object; assert the four keys and their values; PoC
     parse_state still passes with the extra key (additivity
-    proof, in the PoC's own tests).
+    proof, in the PoC's own tests). Implemented 2026-11-06
+    (v1.9.6 / code 16): deviceState() in HttpBridgeServer,
+    read in the /state handler on the worker thread. Lesson
+    found while building: NetworkCapabilities.
+    getUnderlyingNetworks() is a SYSTEM API — it is not in the
+    public android.jar, so a normal app cannot call it. The
+    VPN-underlying lookup instead scans
+    ConnectivityManager.getAllNetworks() for a non-VPN network
+    (wifi first, then mobile). APK 58,055 bytes, sha256
+    0c240b83…; mock /state carries the device object, 59 tests
+    pass in the bridge files.
 63. Reading the phone's notifications (2026-11-06, client
     improvement 6, GPT-reviewed in CONS-20261106-013, v1.9.7
     / code 17): new BridgeNotificationListener

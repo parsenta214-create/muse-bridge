@@ -195,6 +195,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
                                          "snapshot_valid": True,
                                          "snapshot_stable": stable,
                                          "event_seq": 42,
+                                         "device": {"battery_pct": 87, "charging": True,
+                                                    "network": "wifi", "interactive": True},
                                          "app_version": "1.9.5",
                                          "app_version_code": 15,
 "nodes": nodes,
@@ -865,3 +867,19 @@ def test_click_text_422_node_not_clickable_raises(mock_app):
     posts = [r for r in MockAppHandler.requests
              if r[0] == "POST" and r[1] == "/click_node"]
     assert len(posts) == 1
+
+
+# --------------------------------------------------------------------------
+# Decision 62: device state in /state (v1.9.6).
+# --------------------------------------------------------------------------
+
+def test_app_state_device_object(mock_app):
+    """Decision 62: /state carries the nested device object with the
+    four frozen fields (battery_pct, charging, network, interactive)."""
+    adapter = ab.AndroidAdapter()
+    state = adapter.get_current_state()
+    device = state["device"]
+    assert device == {"battery_pct": 87, "charging": True,
+                      "network": "wifi", "interactive": True}
+    # No new client method: the dict flows through get_current_state().
+    assert not hasattr(adapter, "device")
