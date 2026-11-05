@@ -479,9 +479,21 @@ class AndroidAdapter:
                 detail = exc.read().decode("utf-8", "replace")
             except Exception:  # noqa: BLE001 - keep the original status
                 detail = ""
+            # A-1 (v1.9): the bridge now rejects bad input with its own
+            # statuses; the hint must not blame the token for those.
+            if exc.code == 401:
+                hint = "wrong token, or the token changed on the phone"
+            elif exc.code == 503:
+                hint = ("accessibility service not enabled, or the bridge "
+                        "is overloaded")
+            elif exc.code in (400, 408, 413, 431):
+                hint = ("request rejected by the bridge input validation "
+                        "(bad request, timeout, or too large)")
+            else:
+                hint = "unexpected bridge error"
             raise TransportError(
                 f"app returned HTTP {exc.code} for {method} {path}: {detail} "
-                "(wrong token, or the accessibility service is not enabled)") from exc
+                f"({hint})") from exc
         except Exception as exc:  # noqa: BLE001 - report the failure
             raise TransportError(
                 f"cannot reach the app at {APP_URL}: {exc}") from exc

@@ -70,6 +70,15 @@ public class HttpBridgeServer {
         String currentToken();
     }
 
+    // A-1 (v1.9): input-validation limits and per-phase deadlines.
+    // These are initial design values (Codex Phase A); tune them from
+    // measured load, not from first principles.
+    private static final int MAX_HEADER_BYTES = 8 * 1024;
+    private static final int MAX_BODY_BYTES = 256 * 1024;
+    private static final int HEADER_TIMEOUT_MS = 5000;
+    private static final int BODY_TIMEOUT_MS = 10000;
+    private static final long TOTAL_TIMEOUT_MS = 45000;
+
     private final int port;
     private final TokenProvider tokens;
     private final Context context;
@@ -162,18 +171,28 @@ public class HttpBridgeServer {
         String method = "?";
         String path = "?";
         int status = 500;
+        // A-1 (v1.9): per-request monotonic deadline; each phase gets
+        // the smaller of its own timeout and the remaining total time.
+        long deadline = android.os.SystemClock.elapsedRealtime() + TOTAL_TIMEOUT_MS;
         try {
-            conn.setSoTimeout(15000);
             InputStream in = conn.getInputStream();
             OutputStream out = conn.getOutputStream();
 
+            // Phase 1: headers, capped at MAX_HEADER_BYTES (over -> 431),
+            // deadline HEADER_TIMEOUT_MS (timeout -> 408).
+            setPhaseTimeout(conn, HEADER_TIMEOUT_MS, deadline);
             String head = readHead(in);
             if (head == null || head.isEmpty()) {
                 return;
             }
             String[] lines = head.split("\r\n");
             String[] req = lines[0].split(" ");
-            if (req.length < 2) {
+            if (req.length != 3
+                    || !("GET".equals(req[0]) || "POST".equals(req[0]))
+                    || !req[1].startsWith("/")
+                    || !("HTTP/1.0".equals(req[2]) || "HTTP/1.1".equals(req[2]))) {
+                status = 400;
+                sendJson(out, status, errorJson("bad request line"));
                 return;
             }
             method = req[0];
@@ -182,34 +201,81 @@ public class HttpBridgeServer {
             path = (q >= 0) ? target.substring(0, q) : target;
             String query = (q >= 0) ? target.substring(q + 1) : "";
             String token = null;
-            int contentLength = 0;
+            Long contentLength = null;
+            boolean sawTransferEncoding = false;
             for (int i = 1; i < lines.length; i++) {
                 String line = lines[i];
                 int colon = line.indexOf(':');
-                if (colon < 0) {
-                    continue;
+                if (colon <= 0) {
+                    status = 400;
+                    sendJson(out, status, errorJson("bad header line"));
+                    return;
                 }
                 String name = line.substring(0, colon).trim();
                 String value = line.substring(colon + 1).trim();
                 if ("X-Bridge-Token".equalsIgnoreCase(name)) {
+                    if (token != null) {
+                        status = 400;
+                        sendJson(out, status, errorJson("duplicate X-Bridge-Token"));
+                        return;
+                    }
                     token = value;
                 } else if ("Content-Length".equalsIgnoreCase(name)) {
-                    try {
-                        contentLength = Integer.parseInt(value);
-                    } catch (NumberFormatException ignored) {
+                    if (contentLength != null) {
+                        status = 400;
+                        sendJson(out, status, errorJson("duplicate Content-Length"));
+                        return;
                     }
+                    try {
+                        contentLength = Long.parseLong(value);
+                    } catch (NumberFormatException e) {
+                        status = 400;
+                        sendJson(out, status, errorJson("bad Content-Length"));
+                        return;
+                    }
+                } else if ("Transfer-Encoding".equalsIgnoreCase(name)) {
+                    sawTransferEncoding = true;
                 }
             }
-            byte[] body = new byte[0];
-            if (contentLength > 0 && contentLength <= 1024 * 1024) {
-                body = in.readNBytes(contentLength);
+            if (sawTransferEncoding) {
+                status = 400;
+                sendJson(out, status, errorJson("Transfer-Encoding not supported"));
+                return;
             }
 
+            // Phase 2: token check BEFORE the body is read, so an
+            // unauthenticated peer cannot make us consume a body.
             String expected = tokens.currentToken();
             if (expected == null || !expected.equals(token)) {
                 status = 401;
-                sendJson(out, status, new JSONObject().put("ok", false).put("error", "unauthorized"));
+                sendJson(out, status, errorJson("unauthorized"));
                 return;
+            }
+
+            // Phase 3: Content-Length validation.
+            long cl = contentLength == null ? 0 : contentLength.longValue();
+            if (cl < 0) {
+                status = 400;
+                sendJson(out, status, errorJson("negative Content-Length"));
+                return;
+            }
+            if (cl > MAX_BODY_BYTES) {
+                status = 413;
+                sendJson(out, status, errorJson("body too large"));
+                return;
+            }
+
+            // Phase 4: body, capped at MAX_BODY_BYTES, deadline
+            // BODY_TIMEOUT_MS (timeout -> 408, short body -> 400).
+            byte[] body = new byte[0];
+            if (cl > 0) {
+                setPhaseTimeout(conn, BODY_TIMEOUT_MS, deadline);
+                body = in.readNBytes((int) cl);
+                if (body.length != cl) {
+                    status = 400;
+                    sendJson(out, status, errorJson("short body"));
+                    return;
+                }
             }
 
             BridgeAccessibilityService svc = BridgeAccessibilityService.getInstance();
@@ -490,6 +556,24 @@ public class HttpBridgeServer {
                 status = 404;
                 sendJson(out, status, new JSONObject().put("ok", false).put("error", "not found"));
             }
+        } catch (HeaderTooLarge e) {
+            status = 431;
+            try {
+                sendJson(conn.getOutputStream(), status, errorJson("header too large"));
+            } catch (Exception ignored) {
+            }
+        } catch (java.net.SocketTimeoutException e) {
+            status = 408;
+            try {
+                sendJson(conn.getOutputStream(), status, errorJson("request timeout"));
+            } catch (Exception ignored) {
+            }
+        } catch (org.json.JSONException e) {
+            status = 400;
+            try {
+                sendJson(conn.getOutputStream(), status, errorJson("invalid JSON"));
+            } catch (Exception ignored) {
+            }
         } catch (ServiceUnavailable e) {
             status = 503;
             try {
@@ -558,12 +642,40 @@ public class HttpBridgeServer {
         }
     }
 
+    private static class HeaderTooLarge extends Exception {
+        HeaderTooLarge() {
+            super("header too large");
+        }
+    }
+
+    private static JSONObject errorJson(String message) throws org.json.JSONException {
+        return new JSONObject().put("ok", false).put("error", message);
+    }
+
+    private static long remainingMs(long deadline) {
+        long rem = deadline - android.os.SystemClock.elapsedRealtime();
+        return rem < 0 ? 0 : rem;
+    }
+
+    private static void setPhaseTimeout(Socket conn, int phaseMs, long deadline)
+            throws java.net.SocketException {
+        long rem = remainingMs(deadline);
+        int ms = (int) Math.min((long) phaseMs, rem);
+        if (ms <= 0) {
+            ms = 1;
+        }
+        conn.setSoTimeout(ms);
+    }
+
     private String readHead(InputStream in) throws Exception {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         int prev = -1;
         int b;
         while ((b = in.read()) != -1) {
             bos.write(b);
+            if (bos.size() > MAX_HEADER_BYTES) {
+                throw new HeaderTooLarge();
+            }
             if (prev == '\r' && b == '\n') {
                 byte[] bytes = bos.toByteArray();
                 int n = bytes.length;
@@ -573,9 +685,6 @@ public class HttpBridgeServer {
                 }
             }
             prev = b;
-            if (bos.size() > 65536) {
-                break;
-            }
         }
         return bos.toString("ISO-8859-1");
     }
@@ -650,9 +759,13 @@ public class HttpBridgeServer {
     private String reason(int status) {
         switch (status) {
             case 200: return "OK";
+            case 400: return "Bad Request";
             case 401: return "Unauthorized";
             case 404: return "Not Found";
+            case 408: return "Request Timeout";
+            case 413: return "Content Too Large";
             case 422: return "Unprocessable Entity";
+            case 431: return "Request Header Fields Too Large";
             case 500: return "Internal Server Error";
             case 503: return "Service Unavailable";
             default: return "";

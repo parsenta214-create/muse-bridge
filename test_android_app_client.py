@@ -62,8 +62,15 @@ class MockAppHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self._send_json(200, {"ok": True, "service": "muse-bridge",
                                          "version": 1, "accessibility": True,
-                                         "app_version": "1.8",
-                                         "app_version_code": 9})
+                                         "app_version": "1.9",
+                                         "app_version_code": 10})
+        if self.path.startswith("/state?"):
+            # A-1 (v1.9): simulated bridge input-validation rejections.
+            import urllib.parse
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            err = query.get("err", [None])[0]
+            if err in ("400", "408", "413", "431", "503"):
+                return self._send_json(int(err), {"ok": False, "error": "simulated"})
         if self.path == "/capture_screen" or self.path.startswith("/capture_screen?"):
             import urllib.parse
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -92,8 +99,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
                                          "package": "com.example", "texts": ["Hi"],
                                          "revision": 7, "tree_hash": 123456,
                                          "event_seq": 42,
-                                         "app_version": "1.8",
-                                         "app_version_code": 9,
+                                         "app_version": "1.9",
+                                         "app_version_code": 10,
                                          "nodes": [
                                              {"id": "n0", "parent": None, "class": "android.widget.FrameLayout",
                                               "text": "", "desc": "", "bounds": {"left": 0, "top": 0, "right": 1080, "bottom": 2340},
@@ -325,24 +332,50 @@ def test_app_state_event_seq_v16(mock_app):
     assert state["event_seq"] == 42
 
 
-def test_app_state_app_version_v18(mock_app):
-    """v1.8: /state and /health carry the installed app version, so
+def test_app_state_app_version_v19(mock_app):
+    """v1.9: /state and /health carry the installed app version, so
     the VM can tell which build is on the phone without guessing
     from behaviour. The version comes from the APK itself (aapt2
     --version-name/--version-code), never a hardcoded constant."""
     adapter = ab.AndroidAdapter(transport="app")
     state = adapter.get_current_state()
-    assert state["app_version"] == "1.8"
-    assert state["app_version_code"] == 9
+    assert state["app_version"] == "1.9"
+    assert state["app_version_code"] == 10
     import urllib.request
     req = urllib.request.Request(
         f"{ab.APP_URL}/health", headers={"X-Bridge-Token": MOCK_TOKEN})
     with urllib.request.urlopen(req, timeout=10) as resp:
         health = json.loads(resp.read().decode("utf-8"))
-    assert health["app_version"] == "1.8"
-    assert health["app_version_code"] == 9
+    assert health["app_version"] == "1.9"
+    assert health["app_version_code"] == 10
     # The old protocol version field is untouched.
     assert health["version"] == 1
+
+
+@pytest.mark.parametrize("code", ["400", "408", "413", "431"])
+def test_app_http_input_errors_classified_v19(mock_app, code):
+    """A-1 (v1.9): bridge input-validation rejections (400/408/413/
+    431) reach the caller as TransportError with the input-validation
+    hint, never blamed on the token."""
+    adapter = ab.AndroidAdapter(transport="app")
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter._app_request("GET", f"/state?err={code}")
+    msg = str(excinfo.value)
+    assert f"HTTP {code}" in msg
+    assert "input validation" in msg
+    assert "wrong token" not in msg
+
+
+def test_app_503_hint_mentions_overload_v19(mock_app):
+    """A-1 (v1.9): a 503 names the accessibility service or the
+    overload, not the token."""
+    adapter = ab.AndroidAdapter(transport="app")
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter._app_request("GET", "/state?err=503")
+    msg = str(excinfo.value)
+    assert "HTTP 503" in msg
+    assert "overloaded" in msg
+    assert "wrong token" not in msg
 
 
 def test_app_events_returns_history(mock_app):

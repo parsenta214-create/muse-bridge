@@ -865,6 +865,19 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     OK, 60 tests pass (new test_app_state_app_version_v18 asserts
     both endpoints through the mock). Phone verification PENDING:
     user installs v1.8, Muse checks /state app_version.
+46. Phase B approved (2026-11-06 03:10 +07, user chose "推奨通りで
+    Phase Bへ進む"): implement the Codex Phase A design
+    (CONS-20261106-011) in order A-1 HTTP input validation → A-2
+    Executor separation → A-3 Accessibility execution model → A-4
+    batch idempotency → A-5 integration check. The three human
+    decisions are settled as recommended: (1) NodeInfo execution
+    context = service main thread as baseline (HandlerThread only
+    as a verified alternative); (2) batch cache TTL = 10 min +
+    tombstone for expired IDs; (3) batch result persistence =
+    memory only (no exactly-once across process restarts — a
+    stated design constraint). New frozen decisions are needed
+    for: node_id/snapshot validity, batch TTL, post-restart
+    resend, 503 responses, Accessibility serialization.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
