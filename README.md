@@ -361,6 +361,11 @@ project; change them only with a new explicit decision.
 
 ### Phase 4 notes (Android ADB bridge, 2026-11-05, first step)
 
+Historical note (decision 60, 2026-11-06): the rish and adb
+transports described in this section were deleted; the app transport
+is the only route. The build/SDK/app notes in this section are still
+current.
+
 - `android_bridge.py` — the Android adapter with the common execution
   interface (`capture_screen`, `get_current_state`, `click`, `swipe`,
   `type_text`, `press_key`) shared by the Playwright and Android
@@ -1155,7 +1160,17 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     (not in this decision): the health cron
     (bridge_health_check.py) duplicates the /health probe with
     its own timeout=15 and no retry — it should call check_app()
-    instead.
+    instead. Implemented 2026-11-06: _call_with_bridge_retry now
+    returns (result, attempts, total_seconds) and takes
+    max_attempts + a stats dict (so last_call is recorded even
+    on failure); non-retryable calls go through it with
+    max_attempts=1, so every call is timed the same way. 6 new
+    tests; the timeout-env validation test covers the
+    _timeout_env helper directly. Also fixed while implementing:
+    retry.py's status regex did not know 422 (it only matched
+    400/401/403/404/409/429/500/502/503/504) — extended to the
+    full A-1 set (408/410/413/422/431 added) so extract_status
+    works for every bridge status.
 60. Dead transport cleanup (2026-11-06, client improvement 3,
     GPT-reviewed in CONS-20261106-012): the adapter is app-only.
     Deleted from android_bridge.py: the transport parameter
@@ -1187,7 +1202,11 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     test_app_phase2_actions_need_app_transport,
     test_app_events_needs_app_transport, and
     test_actions_allowed_flag_only_enables_explicit_calls
-    (rewritten against the app path).
+    (rewritten against the app path). Implemented 2026-11-06:
+    adb_tunnel.py deleted from the repo (commit fdb2dbe6) and
+    removed from the manifest (29 entries); the manifest and the
+    staged copy are in sync. Tests: 48 passed (incl. the two new
+    no-transport-argument tests).
 61. High-level operation helper (2026-11-06, client improvement
     4, GPT-reviewed in CONS-20261106-012, conditional):
     wait_for_text first, validate on a real screen, then
@@ -1230,6 +1249,14 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     409-then-success, 422-node-still-present-raises. Order:
     (a) -> (b) -> (c, wait_for_text first). Guiding principle
     (GPT): preventing double execution beats convenience.
+    Implemented 2026-11-06: 10 new tests (58 in the bridge
+    files, 91 in the whole computer-use-preview suite, all
+    passing). Live validation on the real phone the same day:
+    HOME -> wait_for_text("MUSE用") found node n57 on the first
+    poll -> click_text("MUSE用") opened the folder (F-Droid,
+    Tailscale, Termux, Muse Bridge visible) -> BACK + HOME
+    restored the home screen -> wait_for_text("ないもの")
+    raised TimeoutError after 3.0 s (2 polls). No CLI in v1.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
@@ -1246,9 +1273,9 @@ both unavailable, so Shizuku/ADB cannot start). Steps:
    token shown in the app. Tell Muse the address and the token via
    the secure entry, never in plain chat.
 6. Muse then runs `android_bridge.py check` and the read-only pass
-   with `--transport app`.
+   (no transport flag — the app is the only route now, decision 60).
 
-### What the user must do on the phone (Termux/rish route, before the verification pass)
+### What the user must do on the phone (Termux/rish route, historical — decision 60 deleted the rish/adb transports)
 
 1. Open Tailscale on the Galaxy A55 5G and check it shows Connected.
 2. Open Termux and start sshd if it is not running (`sshd`; check with

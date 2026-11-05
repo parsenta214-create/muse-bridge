@@ -7,25 +7,22 @@ Three layers, following the GPT Phase 4 design (CONS-20261105-008):
      unless it was explicitly invoked with --allow-actions and an explicit
      action on the command line. The default mode is read-only.
 
-Transports (in priority order):
-  - termux-rish (primary): SSH into Termux on the phone over the Tailscale
-    tunnel proxy, then run commands through rish (Shizuku shell). No adb
-    binary is needed on this VM, and SSH is the path whose reachability was
-    already proven (2026-11-01). Needs on the phone: Tailscale connected,
-    Termux sshd running, Shizuku started, rish installed in Termux.
-  - adb (secondary): local adb binary + a local TCP forwarder (adb_tunnel.py)
-    that relays 127.0.0.1:5555 through the tunnel proxy to the phone's
-    wireless-debugging port. Needs on the phone: wireless debugging enabled
-    and paired. Needs on this VM: `apt install adb` (not yet installed).
-  - app (bridge app): the phone's Muse Bridge app (android-app/) serves
-    HTTP on its Tailscale address; no ADB, USB, or wireless debugging
-    needed. Needs on the phone: the APK installed, the accessibility
-    service enabled, the bridge started. The runtime token comes from
-    ANDROID_APP_TOKEN (from the environment; when stored, only in .env
-    chmod 600, git-ignored — see README decision 29).
+Transport (decision 60): the phone's Muse Bridge app (android-app/)
+is the ONLY route. It serves HTTP on its Tailscale address; no ADB,
+USB, or wireless debugging is needed. Needs on the phone: the APK
+installed, the accessibility service enabled, the bridge started. The
+runtime token comes from ANDROID_APP_TOKEN (from the environment; when
+stored, only in .env chmod 600, git-ignored — see README decision 29).
+The rish and adb transports were deleted (decision 60): rish does not
+exist on the phone and adb was never verified (no adb binary on this
+VM, wireless debugging unavailable), so neither was a real fallback.
+If the accessibility service breaks, no screenshot/tap path remains —
+that is a documented design constraint, not an oversight.
 
-The phone is reached ONLY over the private Tailscale network. The ADB port
-is never exposed to the internet.
+The phone is reached ONLY over the private Tailscale network. The
+Termux SSH channel (run_ssh / check_ssh) is separate infrastructure
+for pushing APKs and running Termux commands — it is not a screen
+transport.
 
 Usage:
   python3 android_bridge.py check
@@ -69,8 +66,6 @@ import retry  # Local sibling (retry.py): backoff math only; the bridge
 PHONE_IP = os.environ.get("ANDROID_PHONE_IP", "")
 TERMUX_USER = os.environ.get("ANDROID_TERMUX_USER", "")
 TERMUX_SSH_PORT = int(os.environ.get("ANDROID_TERMUX_SSH_PORT", "8022"))
-ADB_PORT = int(os.environ.get("ANDROID_ADB_PORT", "5555"))
-ADB_FORWARD_PORT = int(os.environ.get("ANDROID_ADB_FORWARD_PORT", "5555"))
 TUNNEL_PROXY_HOST = os.environ.get("TUNNEL_PROXY_HOST", "hatch-egress-proxy")
 TUNNEL_PROXY_PORT = int(os.environ.get("TUNNEL_PROXY_PORT", "3130"))
 # Bridge app transport (Phase 4, app): the phone's Muse Bridge app serves
@@ -179,6 +174,42 @@ APP_RETRY_BASE_DELAY_S = 1.0
 APP_RETRYABLE_STATUS = {500, 502, 503, 504}
 
 
+# --------------------------------------------------------------------------
+# Timeouts and per-call measurement (client improvement 2, decision 59).
+# --------------------------------------------------------------------------
+# One named place for client timeouts. The batch timeout is 60 s
+# because the server may take up to 45 s total for a 20-action
+# batch — the client must never give up before the server answers
+# (a re-send would then return "running" instead of a result).
+# Note: urllib's timeout is per socket operation (connect/read),
+# not a total deadline — a slow-drip response can run longer than
+# these values in total. That is a known limitation, not a
+# violation of the design goal (the client still waits at least
+# this long per operation).
+# Env overrides are validated at import: a non-numeric value, a
+# value <= 0, or a value > 300 s raises ValueError immediately —
+# never silently fall back to the defaults.
+def _timeout_env(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"{name} must be a number of seconds (got {raw!r})") from None
+    if not 0 < value <= 300:
+        raise ValueError(
+            f"{name} must be > 0 and <= 300 seconds (got {value})")
+    return value
+
+
+APP_TIMEOUT_READ_S = _timeout_env("ANDROID_APP_TIMEOUT_READ_S", 30.0)
+APP_TIMEOUT_BATCH_S = _timeout_env("ANDROID_APP_TIMEOUT_BATCH_S", 60.0)
+APP_TIMEOUT_HEALTH_S = _timeout_env("ANDROID_APP_TIMEOUT_HEALTH_S", 15.0)
+APP_SLOW_CALL_S = 10.0
+
+
 def _is_retryable_bridge_error(exc: BaseException) -> bool:
     """True when a bridge call failed transiently and may be retried."""
     status = retry.extract_status(exc)
@@ -197,31 +228,55 @@ def _is_retryable_bridge_error(exc: BaseException) -> bool:
     return False
 
 
-def _call_with_bridge_retry(fn, method: str, path: str):
-    """Call fn(), retrying transient bridge failures (APP_MAX_ATTEMPTS).
+def _call_with_bridge_retry(fn, method: str, path: str,
+                            max_attempts: int = APP_MAX_ATTEMPTS,
+                            stats: dict | None = None):
+    """Call fn(), retrying transient bridge failures (max_attempts).
 
-    The delay reuses retry.py's full-jitter backoff. Each retry is
-    noted on stderr (method + path + status or error type only —
-    never the token, and never a request body).
+    Returns (result, attempts, total_seconds). When stats is given,
+    it is filled with {"attempts", "seconds"} on every exit —
+    including failure — so the caller can record the call even
+    when it raises. The delay reuses retry.py's full-jitter
+    backoff. Each retry is noted on stderr (method + path + status
+    or error type only — never the token, and never a request
+    body). A single attempt slower than APP_SLOW_CALL_S is also
+    noted on stderr (per attempt, not the retry total).
+    max_attempts=1 means "run exactly once" — the non-retryable
+    calls go through here too, so every call is timed the same way.
     """
     last_error = None
-    for attempt in range(1, APP_MAX_ATTEMPTS + 1):
+    total = 0.0
+    for attempt in range(1, max_attempts + 1):
+        start = time.monotonic()
         try:
-            return fn()
+            result = fn()
         except Exception as exc:  # noqa: BLE001 - classify, then re-raise
             last_error = exc
-            if not _is_retryable_bridge_error(exc) or attempt == APP_MAX_ATTEMPTS:
-                raise
-            status = retry.extract_status(exc)
-            cause = exc
-            while getattr(cause, "__cause__", None) is not None:
-                cause = cause.__cause__
-            reason = f"HTTP {status}" if status is not None else type(cause).__name__
-            delay = retry.backoff_delay_s(attempt, base_delay_s=APP_RETRY_BASE_DELAY_S)
-            print(f"bridge: retry {attempt}/{APP_MAX_ATTEMPTS} for "
-                  f"{method} {path} after {reason} "
-                  f"(sleep {delay:.1f}s)", file=sys.stderr)
-            time.sleep(delay)
+            error = exc
+        else:
+            error = None
+        elapsed = time.monotonic() - start
+        total += elapsed
+        if elapsed > APP_SLOW_CALL_S:
+            print(f"bridge: slow call {method} {path} took {elapsed:.1f}s "
+                  f"(attempt {attempt})", file=sys.stderr)
+        if stats is not None:
+            stats["attempts"] = attempt
+            stats["seconds"] = round(total, 3)
+        if error is None:
+            return result, attempt, total
+        if not _is_retryable_bridge_error(error) or attempt == max_attempts:
+            raise error
+        status = retry.extract_status(error)
+        cause = error
+        while getattr(cause, "__cause__", None) is not None:
+            cause = cause.__cause__
+        reason = f"HTTP {status}" if status is not None else type(cause).__name__
+        delay = retry.backoff_delay_s(attempt, base_delay_s=APP_RETRY_BASE_DELAY_S)
+        print(f"bridge: retry {attempt}/{max_attempts} for "
+              f"{method} {path} after {reason} "
+              f"(sleep {delay:.1f}s)", file=sys.stderr)
+        time.sleep(delay)
     raise last_error  # Unreachable; keeps the control flow explicit.
 
 
@@ -266,19 +321,6 @@ def check_ssh() -> dict:
         err = result.stderr.decode("utf-8", "replace").strip()
         return {"ok": False, "detail": f"ssh exited {result.returncode}: {err[:200]}"}
     return {"ok": True, "detail": "ssh to Termux works"}
-
-
-def check_adb() -> dict:
-    """Report ADB transport prerequisites (no install, no phone action)."""
-    import shutil
-
-    adb = shutil.which("adb")
-    if not adb:
-        return {
-            "ok": False,
-            "detail": "adb is not installed on this VM (apt package 'adb' 1:34.0.4-1build3 is available; not installed yet)",
-        }
-    return {"ok": None, "detail": "adb binary present; phone wireless-debugging state still unknown"}
 
 
 def _tunnel_proxy_url() -> str | None:
@@ -333,21 +375,65 @@ def check_app() -> dict:
     def probe():
         req = urllib.request.Request(
             f"{APP_URL}/health", headers={"X-Bridge-Token": APP_TOKEN})
-        with _app_opener().open(req, timeout=15) as resp:
+        with _app_opener().open(req, timeout=APP_TIMEOUT_HEALTH_S) as resp:
             return json.loads(resp.read().decode("utf-8"))
 
+    # Decision 59: the probe is timed (seconds, incl. retries) and
+    # retried like any other read.
+    probe_start = time.monotonic()
     try:
-        data = _call_with_bridge_retry(probe, "GET", "/health")
+        data, _attempts, _total = _call_with_bridge_retry(probe, "GET", "/health")
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "detail": f"app returned HTTP {exc.code} (wrong token?)"}
+        return {"ok": False, "detail": f"app returned HTTP {exc.code} (wrong token?)",
+                "seconds": round(time.monotonic() - probe_start, 3)}
     except Exception as exc:  # noqa: BLE001 - report the probe failure
-        return {"ok": False, "detail": f"cannot reach the app at {APP_URL}: {exc}"}
+        return {"ok": False, "detail": f"cannot reach the app at {APP_URL}: {exc}",
+                "seconds": round(time.monotonic() - probe_start, 3)}
+    seconds = round(time.monotonic() - probe_start, 3)
     if data.get("ok") and data.get("accessibility"):
-        return {"ok": True, "detail": "app reachable, accessibility service enabled"}
+        return {"ok": True, "detail": "app reachable, accessibility service enabled",
+                "seconds": seconds}
     if data.get("ok"):
         return {"ok": None,
-                "detail": "app reachable but the accessibility service is not enabled on the phone"}
-    return {"ok": False, "detail": f"app health check failed: {data}"}
+                "detail": "app reachable but the accessibility service is not enabled on the phone",
+                "seconds": seconds}
+    return {"ok": False, "detail": f"app health check failed: {data}",
+            "seconds": seconds}
+
+
+# --------------------------------------------------------------------------
+# High-level helper validation (decision 61).
+# --------------------------------------------------------------------------
+
+def _validate_wait_args(timeout_s: float, poll_s: float, match: str) -> None:
+    """Validate wait_for_text / click_text arguments (fail fast)."""
+    if match not in ("exact", "contains"):
+        raise ValueError(f"match must be 'exact' or 'contains' (got {match!r})")
+    if not 0 < timeout_s <= 60:
+        raise ValueError(f"timeout_s must be > 0 and <= 60 (got {timeout_s})")
+    if not poll_s >= 1.0:
+        raise ValueError(f"poll_s must be >= 1.0 (got {poll_s})")
+
+
+def _match_text_node(nodes: list, text: str, match: str) -> dict | None:
+    """First node whose "text" matches (exact or substring); text only."""
+    for node in nodes:
+        node_text = node.get("text")
+        if match == "exact" and node_text == text:
+            return node
+        if (match == "contains" and isinstance(node_text, str)
+                and text in node_text):
+            return node
+    return None
+
+
+def _is_stale_click_error(exc: BaseException) -> bool:
+    """True when the server refused a click before acting on it:
+    HTTP 409 (stale tree_hash) or the snapshot guard's stale error.
+    A re-find by text is safe then — the click never executed."""
+    if retry.extract_status(exc) == 409:
+        return True
+    return "stale snapshot" in str(exc)
 
 
 # --------------------------------------------------------------------------
@@ -363,14 +449,14 @@ class AndroidAdapter:
     explicit action on the command line.
     """
 
-    def __init__(self, transport: str = "termux-rish", actions_enabled: bool = False):
-        if transport not in ("termux-rish", "adb", "app"):
-            raise ValueError(f"unknown transport: {transport}")
-        self.transport = transport
+    def __init__(self, actions_enabled: bool = False):
         self.actions_enabled = actions_enabled
         # A-3 (v1.9): the most recent /state, so node actions can tell
         # whether that snapshot was stable before acting on it.
         self._last_state: dict | None = None
+        # Decision 59: the latest logical call's measurement
+        # (cleared when a call starts, filled when it finishes).
+        self.last_call: dict | None = None
 
     # -- snapshot guard (A-3) ------------------------------------------------
     def _ensure_fresh_snapshot(self, tree_hash: int) -> int:
@@ -397,26 +483,16 @@ class AndroidAdapter:
                        quality: int = 80) -> bytes:
         """Return a screenshot of the phone screen.
 
-        App transport (v1.2): half-scale JPEG by default — a full-res
-        PNG of a photo wallpaper is ~2 MB and costs ~2 s of transfer
-        over the tunnel, while 540x1170 JPEG is ~0.3 MB and still
-        readable. Pass scale=1.0, format="png" for full quality.
-        The rish/adb transports always return a full-res PNG and
-        ignore these parameters.
+        Half-scale JPEG by default (v1.2) — a full-res PNG of a photo
+        wallpaper is ~2 MB and costs ~2 s of transfer over the tunnel,
+        while 540x1170 JPEG is ~0.3 MB and still readable. Pass
+        scale=1.0, format="png" for full quality.
         """
-        if self.transport == "termux-rish":
-            return self._capture_screen_rish()
-        if self.transport == "app":
-            return self._capture_screen_app(scale, format, quality)
-        return self._capture_screen_adb()
+        return self._capture_screen_app(scale, format, quality)
 
     def get_current_state(self) -> dict:
         """Return screen size and, when available, the foreground app."""
-        if self.transport == "termux-rish":
-            return self._state_rish()
-        if self.transport == "app":
-            return self._state_app()
-        return self._state_adb()
+        return self._state_app()
 
     # -- gated actions -------------------------------------------------------
     def _require_actions(self, what: str):
@@ -428,51 +504,38 @@ class AndroidAdapter:
 
     def click(self, x: int, y: int) -> dict:
         self._require_actions(f"click({x}, {y})")
-        if self.transport == "app":
-            return self._app_post("/click", {"x": x, "y": y})
-        return self._run_input(f"input tap {x} {y}")
+        return self._app_post("/click", {"x": x, "y": y})
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
         self._require_actions(f"swipe({x1}, {y1} -> {x2}, {y2})")
-        if self.transport == "app":
-            return self._app_post("/swipe", {
-                "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": duration_ms})
-        return self._run_input(f"input swipe {x1} {y1} {x2} {y2} {duration_ms}")
+        return self._app_post("/swipe", {
+            "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": duration_ms})
 
     def type_text(self, text: str) -> dict:
         self._require_actions(f"type_text({text!r})")
-        if self.transport == "app":
-            return self._app_post("/type_text", {"text": text})
-        escaped = text.replace(" ", "%s").replace("'", "")
-        return self._run_input(f"input text {escaped}")
+        return self._app_post("/type_text", {"text": text})
 
     def press_key(self, key: str) -> dict:
         """key is a keyevent name or code, e.g. 'BACK', 'HOME', '4', '3'."""
         self._require_actions(f"press_key({key})")
-        if self.transport == "app":
-            app_key = {"3": "HOME", "4": "BACK"}.get(key, key)
-            return self._app_post("/press_key", {"key": app_key})
-        return self._run_input(f"input keyevent {key}")
+        app_key = {"3": "HOME", "4": "BACK"}.get(key, key)
+        return self._app_post("/press_key", {"key": app_key})
 
     def click_node(self, node_id: str, tree_hash: int) -> dict:
-        """Click a node by id (Phase 2, app transport only)."""
+        """Click a node by id (Phase 2)."""
         self._require_actions(f"click_node({node_id})")
-        if self.transport != "app":
-            raise TransportError("click_node is only available on the app transport")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/click_node", {"node_id": node_id, "tree_hash": tree_hash})
 
     def type_node(self, node_id: str, tree_hash: int, text: str) -> dict:
-        """Set text on an editable node by id (Phase 2, app transport only)."""
+        """Set text on an editable node by id (Phase 2)."""
         self._require_actions(f"type_node({node_id}, {text!r})")
-        if self.transport != "app":
-            raise TransportError("type_node is only available on the app transport")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/type_node",
                               {"node_id": node_id, "tree_hash": tree_hash, "text": text})
 
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
-        """Run several actions in one request (Phase 2, app transport only).
+        """Run several actions in one request (Phase 2).
 
         actions is a list of dicts, each with action_id, type, and the
         fields its type needs. A re-sent batch_id returns the cached
@@ -486,8 +549,6 @@ class AndroidAdapter:
         (expired: use a NEW batch_id). At most 20 actions per batch.
         """
         self._require_actions(f"batch({batch_id}, {len(actions)} actions)")
-        if self.transport != "app":
-            raise TransportError("batch is only available on the app transport")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/batch", {
             "batch_id": batch_id, "protocol_version": 1,
@@ -500,12 +561,10 @@ class AndroidAdapter:
         (tap opens Downloads). Returns ok:false when notifications
         are not permitted on the phone.
         """
-        if self.transport != "app":
-            raise TransportError("notify is only available on the app transport")
         return self._app_post("/notify", {"title": title, "text": text})
 
     def logs(self, limit: int = 100) -> dict:
-        """Return the bridge's debug log (v1.9.3, app transport only).
+        """Return the bridge's debug log (v1.9.3).
 
         Pull-based: the phone never pushes logs anywhere. The log
         holds key events only (server start/stop, bind results,
@@ -513,65 +572,136 @@ class AndroidAdapter:
         request bodies, node text, or tokens. `lines` is the current
         run; `previous_lines` is the previous run's tail.
         """
-        if self.transport != "app":
-            raise TransportError("logs is only available on the app transport")
         return self._app_request("GET", f"/logs?limit={limit}")
 
     def events(self, since: int = 0, limit: int = 100) -> dict:
         """Return the bridge's recorded accessibility-event history
         (Phase 3, v1.6). Read-only (no --allow-actions gate): it only
-        reports what happened on the phone. App transport only.
+        reports what happened on the phone.
 
         `since` is the last seq the caller has seen; the server
         returns events after it. `dropped` true means the buffer
         evicted events the caller never saw — refetch /state.
         """
-        if self.transport != "app":
-            raise TransportError("events is only available on the app transport")
         import urllib.parse
         params = urllib.parse.urlencode({"since": since, "limit": limit})
         result = self._app_request("GET", f"/events?{params}")
         result["transport"] = "app"
         return result
 
-    # -- termux-rish transport ----------------------------------------------
-    def _rish(self, inner: str, timeout: int = 60) -> subprocess.CompletedProcess:
-        result = run_ssh(f"rish -c '{inner}'", timeout=timeout)
-        if result.returncode != 0:
-            err = result.stderr.decode("utf-8", "replace").strip()
-            raise TransportError(
-                f"rish failed (exit {result.returncode}): {err[:300]} "
-                "(is Shizuku started on the phone?)"
-            )
-        return result
+    # -- high-level helpers (decision 61) -----------------------------------
+    def wait_for_text(self, text: str, *, timeout_s: float = 15.0,
+                      poll_s: float = 1.5, match: str = "exact") -> dict:
+        """Wait until a node with the given text appears (read-only).
 
-    def _capture_screen_rish(self) -> bytes:
-        tmp = "/data/data/com.termux/files/home/.muse-screen.png"
-        self._rish(f"screencap -p {tmp}")
-        result = run_ssh(f"cat {tmp} && rm -f {tmp}", timeout=60)
-        data = result.stdout
-        if not data.startswith(PNG_MAGIC):
-            raise TransportError(
-                f"screenshot did not come back as PNG ({len(data)} bytes, "
-                f"starts with {data[:16]!r}); is Shizuku/rish working?"
-            )
-        return data
+        Polls GET /state. Returns the node dict only, with
+        "tree_hash" added (the tree_hash of the state it was found
+        in), so the caller can act on it without re-fetching.
+        match is "exact" (node["text"] == text) or "contains"
+        (substring); text only, never desc; first match in tree
+        order. timeout_s is the overall deadline on a monotonic
+        clock (default 15.0, max 60.0); poll_s is the interval
+        between polls (default 1.5, min 1.0 — each poll costs
+        ~0.75-1 s over the tunnel, so below 1.0 s is pointless).
+        Out of range -> ValueError. A single poll can take longer
+        than poll_s because GETs retry (decision 58); the deadline
+        is what bounds the total — never start a new poll after it.
+        On timeout -> TimeoutError (not TransportError). A failed
+        GET raises at once (it is not "not ready yet").
+        """
+        _validate_wait_args(timeout_s, poll_s, match)
+        deadline = time.monotonic() + timeout_s
+        return self._find_text_node(text, deadline, poll_s, match, timeout_s)
 
-    def _state_rish(self) -> dict:
-        state: dict = {"transport": "termux-rish"}
-        try:
-            size = self._rish("wm size").stdout.decode("utf-8", "replace").strip()
-            state["screen_size"] = size
-        except TransportError as exc:
-            state["screen_size_error"] = str(exc)[:200]
-        try:
-            app = self._rish(
-                "dumpsys activity activities | grep -m1 mResumedActivity"
-            ).stdout.decode("utf-8", "replace").strip()
-            state["foreground_app"] = app
-        except TransportError as exc:
-            state["foreground_app_error"] = str(exc)[:200]
-        return state
+    def click_text(self, text: str, *, timeout_s: float = 15.0,
+                   poll_s: float = 1.5, match: str = "exact") -> dict:
+        """Wait for a node with the given text, then click it once.
+
+        Gated by _require_actions. Returns the click result dict
+        plus "node_id" and "attempts" (the number of click_node
+        calls). timeout_s bounds the WAIT only; the click itself is
+        a separate call with the 30 s read timeout (worst case
+        60 + 30 = 90 s). The click runs exactly once per found node
+        and is never retried (decision 58) — if the server refused
+        before acting (409, or a stale snapshot), the helper
+        re-finds the node by text and clicks the (possibly new) node
+        id instead. A click whose outcome is unknown (a transport
+        error) is never re-sent: it raises at once.
+        """
+        self._require_actions(f"click_text({text!r})")
+        _validate_wait_args(timeout_s, poll_s, match)
+        deadline = time.monotonic() + timeout_s
+        attempts = 0
+        while True:
+            node = self._find_text_node(text, deadline, poll_s, match, timeout_s)
+            attempts += 1
+            try:
+                result = self.click_node(node["id"], node["tree_hash"])
+            except TransportError as exc:
+                if _is_stale_click_error(exc):
+                    # The server refused before acting — re-find.
+                    continue
+                if retry.extract_status(exc) == 422:
+                    # The server refused the click. Fetch a fresh
+                    # state: node gone -> re-find; node present ->
+                    # walk it + ancestors; if any is clickable and
+                    # enabled, the 422 was a race -> re-find; if
+                    # none is, the node exists but cannot be clicked.
+                    if self._node_clickable_after_422(node["id"]):
+                        continue
+                    raise TransportError(
+                        f"click_text: node with text {text!r} exists but "
+                        "cannot be clicked (no clickable, enabled node "
+                        "or ancestor)") from exc
+                raise
+            result["node_id"] = node["id"]
+            result["attempts"] = attempts
+            return result
+
+    def _find_text_node(self, text: str, deadline: float, poll_s: float,
+                        match: str, timeout_s: float) -> dict:
+        """Poll /state until a node matches; TimeoutError at the deadline."""
+        polls = 0
+        while True:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    f"no node with text {text!r} found within {timeout_s}s "
+                    f"({polls} polls)")
+            state = self.get_current_state()
+            polls += 1
+            node = _match_text_node(state.get("nodes", []), text, match)
+            if node is not None:
+                found = dict(node)
+                found["tree_hash"] = state.get("tree_hash")
+                return found
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"no node with text {text!r} found within {timeout_s}s "
+                    f"({polls} polls)")
+            time.sleep(min(poll_s, remaining))
+
+    def _node_clickable_after_422(self, node_id: str) -> bool:
+        """True when a 422 click may be retried (re-find); False when
+        the node exists but cannot be clicked.
+
+        Fetches a fresh /state (a failed GET raises at once). The
+        node is gone -> True (re-find). Present -> walk it and its
+        ancestors; any clickable + enabled node means the 422 was a
+        race -> True; none -> False.
+        """
+        state = self.get_current_state()
+        by_id = {n.get("id"): n for n in state.get("nodes", [])}
+        node = by_id.get(node_id)
+        if node is None:
+            return True
+        current = node
+        while current is not None:
+            if current.get("clickable") and current.get("enabled"):
+                return True
+            parent = current.get("parent")
+            current = by_id.get(parent) if parent else None
+        return False
 
     # -- bridge-app transport ----------------------------------------------
     def _app_request(self, method: str, path: str, payload: dict | None = None,
@@ -583,15 +713,37 @@ class AndroidAdapter:
         Reads (GET) and POST /batch retry transient failures (see the
         retry policy above the TransportError class); every other POST
         runs exactly once, so an action is never double-executed.
+        Decision 59: after every call, self.last_call holds
+        {"method", "path", "seconds" (wall incl. retries),
+        "attempts", "ok", "status" (None when unavailable), "error"
+        (str or None, no confidential info)}; it is cleared when a
+        call starts. No timing keys are added to returned dicts.
         """
         retryable = (method == "GET") or (method == "POST" and path == "/batch")
-        if not retryable:
-            return self._app_request_once(method, path, payload,
-                                          expect_png, expect_image)
-        return _call_with_bridge_retry(
-            lambda: self._app_request_once(method, path, payload,
-                                           expect_png, expect_image),
-            method, path)
+        max_attempts = APP_MAX_ATTEMPTS if retryable else 1
+        self.last_call = None
+        stats: dict = {}
+        try:
+            result, attempts, total = _call_with_bridge_retry(
+                lambda: self._app_request_once(method, path, payload,
+                                               expect_png, expect_image),
+                method, path, max_attempts, stats)
+        except Exception as exc:  # noqa: BLE001 - record, then re-raise
+            status = retry.extract_status(exc)
+            self.last_call = {
+                "method": method, "path": path,
+                "seconds": stats.get("seconds", 0.0),
+                "attempts": stats.get("attempts", 1),
+                "ok": False, "status": status,
+                "error": str(exc)[:200],
+            }
+            raise
+        self.last_call = {
+            "method": method, "path": path,
+            "seconds": round(total, 3), "attempts": attempts,
+            "ok": True, "status": 200, "error": None,
+        }
+        return result
 
     def _app_request_once(self, method: str, path: str,
                           payload: dict | None = None,
@@ -613,8 +765,13 @@ class AndroidAdapter:
             f"{APP_URL}{path}", data=body, method=method,
             headers={"X-Bridge-Token": APP_TOKEN,
                      "Content-Type": "application/json"})
+        # Decision 59: the batch timeout is 60 s (the server may take
+        # up to 45 s); every other call gets the 30 s read timeout.
+        timeout = (APP_TIMEOUT_BATCH_S
+                   if (method == "POST" and path == "/batch")
+                   else APP_TIMEOUT_READ_S)
         try:
-            with _app_opener().open(req, timeout=30) as resp:
+            with _app_opener().open(req, timeout=timeout) as resp:
                 data = resp.read()
         except urllib.error.HTTPError as exc:
             try:
@@ -675,63 +832,6 @@ class AndroidAdapter:
         result["transport"] = "app"
         return result
 
-    def _run_input(self, input_cmd: str) -> dict:
-        if self.transport == "termux-rish":
-            self._rish(input_cmd)
-            return {"ok": True, "transport": "termux-rish", "command": input_cmd}
-        import shutil
-
-        adb = shutil.which("adb")
-        if not adb:
-            raise TransportError("adb is not installed on this VM")
-        target = f"127.0.0.1:{ADB_FORWARD_PORT}"
-        result = subprocess.run(
-            [adb, "-s", target, "shell", input_cmd],
-            capture_output=True, timeout=60,
-        )
-        if result.returncode != 0:
-            raise TransportError(
-                f"adb shell failed (exit {result.returncode}): "
-                f"{result.stderr.decode('utf-8', 'replace')[:300]}"
-            )
-        return {"ok": True, "transport": "adb", "command": input_cmd}
-
-    # -- adb transport -------------------------------------------------------
-    def _capture_screen_adb(self) -> bytes:
-        import shutil
-
-        adb = shutil.which("adb")
-        if not adb:
-            raise TransportError("adb is not installed on this VM")
-        target = f"127.0.0.1:{ADB_FORWARD_PORT}"
-        result = subprocess.run(
-            [adb, "-s", target, "exec-out", "screencap", "-p"],
-            capture_output=True, timeout=60,
-        )
-        data = result.stdout
-        if not data.startswith(PNG_MAGIC):
-            raise TransportError(
-                f"adb screencap did not return PNG ({len(data)} bytes); "
-                "is the phone connected (adb connect 127.0.0.1:5555)?"
-            )
-        return data
-
-    def _state_adb(self) -> dict:
-        import shutil
-
-        adb = shutil.which("adb")
-        if not adb:
-            raise TransportError("adb is not installed on this VM")
-        target = f"127.0.0.1:{ADB_FORWARD_PORT}"
-        state: dict = {"transport": "adb"}
-        size = subprocess.run(
-            [adb, "-s", target, "shell", "wm", "size"],
-            capture_output=True, timeout=30,
-        )
-        state["screen_size"] = size.stdout.decode("utf-8", "replace").strip()
-        return state
-
-
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
@@ -759,8 +859,6 @@ def main(argv=None) -> int:
         "check", "screenshot", "state", "tap", "swipe", "type", "key", "notify",
         "click-node", "type-node", "batch", "events", "_proxy",
     ])
-    parser.add_argument("--transport", default=os.environ.get("ANDROID_TRANSPORT", "termux-rish"),
-                        choices=["termux-rish", "adb", "app"])
     parser.add_argument("--out", default="/tmp/android-screen.png")
     parser.add_argument("--x", type=int, default=0)
     parser.add_argument("--y", type=int, default=0)
@@ -796,18 +894,15 @@ def main(argv=None) -> int:
 
     if args.command == "check":
         ssh = check_ssh()
-        adb = check_adb()
         app = check_app()
         print(json.dumps({
             "phone_ip": PHONE_IP,
             "termux_ssh_8022": ssh,
-            "adb_5555": adb,
             "bridge_app": app,
-            "note": "ADB port probe needs the tunnel too; run screenshot with --transport adb to test it.",
         }, indent=2, ensure_ascii=False))
         return 0 if (ssh["ok"] or app["ok"]) else 1
 
-    adapter = AndroidAdapter(transport=args.transport, actions_enabled=args.allow_actions)
+    adapter = AndroidAdapter(actions_enabled=args.allow_actions)
     try:
         if args.command == "screenshot":
             data = adapter.capture_screen(

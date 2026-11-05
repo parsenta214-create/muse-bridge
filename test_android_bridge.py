@@ -32,14 +32,16 @@ def test_actions_allowed_flag_only_enables_explicit_calls():
     adapter = android_bridge.AndroidAdapter(actions_enabled=True)
     # With actions enabled but no phone reachable, the failure must be a
     # transport error, not a permission error: the gate opened, the
-    # transport refused. (Uses the rish path; SSH will fail in this env.)
+    # app transport refused (no APP_URL/APP_TOKEN in this env).
     with pytest.raises(android_bridge.TransportError):
         adapter.click(100, 200)
 
 
-def test_unknown_transport_rejected():
-    with pytest.raises(ValueError):
-        android_bridge.AndroidAdapter(transport="bogus")
+def test_adapter_takes_no_transport_argument():
+    """Decision 60: the transport parameter is gone — passing it is
+    a TypeError, not a ValueError for an unknown value."""
+    with pytest.raises(TypeError):
+        android_bridge.AndroidAdapter(transport="app")
 
 
 def _fake_proxy(port_holder):

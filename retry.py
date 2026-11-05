@@ -21,7 +21,7 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 NON_RETRYABLE_STATUS = {400, 401, 403, 404}
 _DELAY_RANGES_S = [(1, 2), (2, 4), (4, 8), (8, 16), (16, 32)]
 
-_STATUS_RE = re.compile(r"\b(400|401|403|404|409|429|500|502|503|504)\b")
+_STATUS_RE = re.compile(r"\b(400|401|403|404|408|409|410|413|422|429|431|500|502|503|504)\b")
 _RETRY_AFTER_RE = re.compile(r"retry-after[:=]\s*(\d+)", re.IGNORECASE)
 _TRANSIENT_NETWORK_TYPES = {
     "ConnectError",

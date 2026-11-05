@@ -69,7 +69,7 @@ else
     NOTIFY_TEXT="$NAME がダウンロードフォルダに届いたよ。タップしてインストールしてね。"
 fi
 echo "== notifying the bridge app (v1.3+) =="
-python3 "$HERE/android_bridge.py" notify --transport app \
+python3 "$HERE/android_bridge.py" notify \
     --title "Muse Bridge の更新" \
     --text "$NOTIFY_TEXT" \
     || echo "note: notify failed (the installed app is older than v1.3, or notifications are not permitted) — install from Downloads manually"

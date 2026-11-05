@@ -11,8 +11,8 @@ custom.gemini connection (same pattern as run_trial.py). The real key is
 never written to a file or a log.
 
 Usage:
-  python3 android_readonly_pass.py [--transport termux-rish|adb|app]
-      [--out-dir logs] [--prompt "describe this phone screen in detail"]
+  python3 android_readonly_pass.py [--out-dir logs]
+      [--prompt "describe this phone screen in detail"]
 Prints the model's screen read and a JSON summary. Exits 0 only when both
 screenshots were captured and the comparison was made.
 """
@@ -74,8 +74,6 @@ def model_screen_read(png: bytes, prompt: str) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Android read-only verification pass")
-    parser.add_argument("--transport", default=os.environ.get("ANDROID_TRANSPORT", "termux-rish"),
-                        choices=["termux-rish", "adb", "app"])
     parser.add_argument("--out-dir", default=os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "logs"))
     parser.add_argument("--prompt", default=DEFAULT_PROMPT)
@@ -88,10 +86,10 @@ def main(argv=None) -> int:
     shot2_path = os.path.join(out_dir, f"android-{stamp}-shot2.png")
     log_path = os.path.join(out_dir, f"android-{stamp}-readonly.log")
 
-    adapter = AndroidAdapter(transport=args.transport, actions_enabled=False)
+    adapter = AndroidAdapter(actions_enabled=False)
     summary: dict = {
         "timestamp_utc": stamp,
-        "transport": args.transport,
+        "transport": "app",
         "model": "gemini-3.5-flash-lite",
         "actions_performed": [],
     }
