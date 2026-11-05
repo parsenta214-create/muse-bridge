@@ -397,7 +397,14 @@ class AndroidAdapter:
 
         actions is a list of dicts, each with action_id, type, and the
         fields its type needs. A re-sent batch_id returns the cached
-        result without re-executing (server-side idempotency).
+        result without re-executing (server-side idempotency, A-4).
+
+        Resend rules (A-5): if the request fails with a transport
+        error and the outcome is unknown, re-send the SAME batch_id
+        and the SAME payload — the server answers from its cache
+        instead of executing twice. Never reuse a batch_id with
+        different content (409), and never reuse one after a 410
+        (expired: use a NEW batch_id). At most 20 actions per batch.
         """
         self._require_actions(f"batch({batch_id}, {len(actions)} actions)")
         if self.transport != "app":

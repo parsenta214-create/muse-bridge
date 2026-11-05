@@ -583,6 +583,13 @@ public class HttpBridgeServer {
                     }
                     List<BridgeAccessibilityService.BatchAction> actions = new ArrayList<>();
                     JSONArray arr = j.getJSONArray("actions");
+                    // A-5: a batch is capped at 20 actions (Codex Phase A)
+                    // so even all-expect_change batches stay inside the
+                    // 45 s request deadline (20 x 2 s + action time).
+                    if (arr.length() > 20) {
+                        throw new org.json.JSONException(
+                                "batch has too many actions (max 20): " + arr.length());
+                    }
                     for (int i = 0; i < arr.length(); i++) {
                         JSONObject a = arr.getJSONObject(i);
                         rejectUnknownFields(a, "action_id", "type", "node_id",

@@ -949,6 +949,32 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     (SPEC-POC-001, antigravity_projects/muse-bridge-poc/) is a
     separate independent protocol implementation; no merge into
     muse-bridge was done — that remains a separate approval.
+50. A-5 integration check (2026-11-06 03:33, VM-side part):
+    backward compat — /state, /click_node, /type_node, /batch only
+    gain fields (snapshot_id, status, payload_hash,
+    completed_action_ids, failed_action_id); protocol_version is
+    optional (default 1) so old batch requests still work. Error
+    codes: 400 bad JSON / unknown field / unsupported version /
+    too many actions, 401 bad token, 408 timeout, 409 stale
+    snapshot or batch_id reuse with different content, 410
+    expired batch_id, 413 body too large, 422 node not found /
+    not clickable / not editable, 431 header too large, 503
+    service unavailable / main-thread timeout / overloaded.
+    Deadlines: header 5 s, body 10 s, request total 45 s (A-1);
+    main-thread work 20 s (A-3, inside the 45 s total); batch
+    max 20 actions (A-5) so even all-expect_change batches stay
+    inside 45 s. Client resend rules: unknown outcome -> re-send
+    the SAME batch_id + payload (server replays from cache);
+    409 -> new content needs a new batch_id; 410 -> expired,
+    always a new batch_id; 409 stale snapshot -> refetch /state
+    and re-plan. AntiGravity PoC build_batch emits only
+    server-allowed fields and no protocol_version (defaults to 1),
+    so its payloads pass the strict validation; its
+    parse_batch_result reads required keys only, so the added
+    response fields do not break it. Phone verification (A-1
+    errors, A-2 flood/503, A-3 snapshot fields, A-4 replay/409)
+    is the remaining A-5 step and needs the final v1.9 APK
+    installed on the phone.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
