@@ -1257,6 +1257,128 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Tailscale, Termux, Muse Bridge visible) -> BACK + HOME
     restored the home screen -> wait_for_text("ないもの")
     raised TimeoutError after 3.0 s (2 polls). No CLI in v1.
+62. Device state in /state (2026-11-06, client improvement 5,
+    GPT-reviewed in CONS-20261106-013, v1.9.6 / code 16): /state
+    gains a nested "device" object with four fields only —
+    battery_pct (0-100, -1 when unavailable), charging (bool),
+    network ("wifi"|"mobile"|"none"|"other"), interactive
+    (bool). No new endpoint and no new client method
+    (get_current_state() returns the dict as-is). charging_type
+    was in the draft and is OMITTED in v1 (GPT: the bool +
+    battery_pct cover the operator's need). screen_on was in
+    the draft and is RENAMED to interactive (GPT: isInteractive()
+    measures interactivity, not the physical screen state, and
+    operability is what the operator needs). network means the
+    DEFAULT network's transport type, not internet reachability;
+    when the default network is a VPN, report its underlying
+    network's transport (wifi > mobile > other) — the phone's
+    Tailscale VPN is the default network, so without this rule
+    the field would almost always read "other". Reads happen
+    in the /state handler (worker thread), not in the
+    accessibility service's State class: battery from the
+    sticky ACTION_BATTERY_CHANGED intent (explicit
+    registerReceiver() fetch; no permission), network from
+    ConnectivityManager (ACCESS_NETWORK_STATE is already in
+    the manifest as a normal permission), interactivity from
+    PowerManager.isInteractive() (no permission). All three
+    are fast local calls, negligible next to the 500-node tree
+    walk. Best effort only, never fail /state. Failure
+    semantics (GPT A-05): a null battery intent or a missing /
+    abnormal level/scale gives battery_pct=-1 AND
+    charging=false; the combination (battery_pct=-1) is what
+    marks "unknown" — charging=false alone means "not
+    charging" only when battery_pct >= 0. charging is
+    EXTRA_PLUGGED != 0. YAGNI: brightness, volume, and storage
+    are NOT included. Trade-off recorded (GPT A-01, verified
+    in code): /state needs the accessibility service, so
+    device state is unavailable when it is off — no regression
+    vs. today. The HTTP server itself is independent of a11y
+    (it runs in the BridgeService foreground service; /health
+    answers without svc), so a separate GET /device remains
+    architecturally possible — it is ON HOLD per GPT's YAGNI,
+    not blocked. Out of scope: dashboard display of device
+    fields (a savesnapshot schema change, separate decision)
+    and any battery recording in the 5-min health cron (the
+    cron stays as-is). Tests: mock /state carries the device
+    object; assert the four keys and their values; PoC
+    parse_state still passes with the extra key (additivity
+    proof, in the PoC's own tests).
+63. Reading the phone's notifications (2026-11-06, client
+    improvement 6, GPT-reviewed in CONS-20261106-013, v1.9.7
+    / code 17): new BridgeNotificationListener
+    (NotificationListenerService) in the app, declared in the
+    manifest with BIND_NOTIFICATION_LISTENER_SERVICE (no new
+    uses-permission). The user grants notification access
+    manually in Settings (it cannot be granted
+    programmatically). Discovery: /health gains
+    "notification_listener": bool — it means the user GRANTED
+    access, which is NOT the same as the service being
+    connected (GPT B-06). MainActivity gains a status line +
+    a button opening
+    Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS (same
+    pattern as the accessibility button). Storage is an EVENT
+    STREAM, not a list of current notifications (GPT B-02):
+    posts, updates, and removals are EACH new events with a
+    new seq; a removal is a tombstone event {type: "removed",
+    key, package, id, tag, removed_t} — the draft's "mark
+    removed:true on the existing record" is REJECTED, because
+    a client that already fetched seq=10 could never learn of
+    the removal via since=10. Ring buffer cap 200 counts
+    EVENTS (posts+updates+removals), not notifications;
+    latest_seq + dropped flag in the response; memory only
+    (lost when the process dies, like the event buffer and
+    the batch cache), and since is valid only within the
+    process lifetime (seq resets on restart). One event:
+    seq, type ("posted"|"updated"|"removed"), key
+    (StatusBarNotification.getKey()), package, title, text,
+    t (postTime, wall-clock ms, informational only), ongoing
+    (bool), group_summary (bool), id, tag. Title/text are
+    capped at 200 Unicode characters each, never splitting a
+    surrogate pair. Never stored: the extras Bundle,
+    notification actions, or large payloads. On listener
+    connect, seed the buffer with getActiveNotifications()
+    as "posted" events (GPT B-04); dedupe by key (skip a seed
+    entry whose key is already present as posted and not
+    removed). Group summaries are included as-is with the
+    group_summary flag; ongoing notifications are included,
+    and their updates are new events. The server returns
+    every package including its own (dev.muse.bridge) and
+    the client filters with ?package=. Endpoint: GET
+    /notifications?package=&since=&limit= (limit clamped
+    1-200, same as /events). It does NOT need the
+    accessibility service. When the listener is not granted
+    it answers 503 "notification_listener_access_not_granted";
+    when granted but not connected it answers 503
+    "notification_listener_not_connected" (distinct strings,
+    both 503). Client: notifications(package=None, since=0,
+    limit=100) -> dict, read-only, no --allow-actions gate
+    (like events()). Privacy rules (non-negotiable): pull-
+    based GET only, never push; the existing token auth
+    applies to /notifications (verified: the token check runs
+    before path dispatch for every request) and the server
+    binds only Tailscale + 127.0.0.1, so there is no LAN
+    exposure by construction (GPT B-09); never write
+    notification titles/text to /logs (counts and package
+    names only — the BridgeLog allowlist covers event names
+    and counts, and content exclusion is caller-side
+    discipline); no notification content in error messages
+    or /state; no auto-forward to the dashboard or the health
+    cron; no notification content in dashboard snapshots.
+    (A screenshot may show a visible notification banner —
+    inherent to screen capture, same as any on-screen
+    content.) Out of scope for v1: notification actions
+    (reply/dismiss), any server push, server-side package
+    allow/deny lists, and persistence. Order: (a) first in
+    1.9.6, then (b) in 1.9.7 (GPT's split — two smaller
+    releases instead of one combined 1.9.6). Tests: mock
+    /notifications with canned data (posted, updated, and
+    removed events, incl. one ongoing and one group
+    summary); fetch, since filter (incl. tombstone
+    visibility), package filter, limit clamp, dropped flag,
+    /health carrying notification_listener, and the two 503
+    strings. PoC: add build_notifications_query +
+    parse_notifications in a separate PoC update (not Plan A
+    Step 1).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
