@@ -53,8 +53,14 @@ import subprocess
 import sys
 import threading
 
-PHONE_IP = os.environ.get("ANDROID_PHONE_IP", "100.111.74.42")
-TERMUX_USER = os.environ.get("ANDROID_TERMUX_USER", "u0_a388")
+# No hardcoded phone address: the phone's Tailscale IP and Termux user
+# are device-specific and must come from the environment (ANDROID_PHONE_IP,
+# ANDROID_TERMUX_USER, or ANDROID_APP_URL). They used to be hardcoded
+# defaults; the defaults were removed 2026-11-06 when the code went
+# public on GitHub, so no device address ships in the source. The live
+# values live in .env (chmod 600, git-ignored), like the bridge token.
+PHONE_IP = os.environ.get("ANDROID_PHONE_IP", "")
+TERMUX_USER = os.environ.get("ANDROID_TERMUX_USER", "")
 TERMUX_SSH_PORT = int(os.environ.get("ANDROID_TERMUX_SSH_PORT", "8022"))
 ADB_PORT = int(os.environ.get("ANDROID_ADB_PORT", "5555"))
 ADB_FORWARD_PORT = int(os.environ.get("ANDROID_ADB_FORWARD_PORT", "5555"))
@@ -66,7 +72,8 @@ TUNNEL_PROXY_PORT = int(os.environ.get("TUNNEL_PROXY_PORT", "3130"))
 # README decision 29. It is never written to a file or printed elsewhere.
 # Coordinates are screen pixels; callers convert the model's 0-999
 # coordinates using the width/height from get_current_state().
-APP_URL = os.environ.get("ANDROID_APP_URL", f"http://{PHONE_IP}:8080").rstrip("/")
+APP_URL = os.environ.get(
+    "ANDROID_APP_URL", f"http://{PHONE_IP}:8080" if PHONE_IP else "").rstrip("/")
 APP_TOKEN = os.environ.get("ANDROID_APP_TOKEN", "")
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -149,6 +156,10 @@ class TransportError(RuntimeError):
 
 def ssh_base_cmd() -> list:
     """ssh invocation for Termux over the tunnel proxy (no interactive auth)."""
+    if not PHONE_IP or not TERMUX_USER:
+        raise TransportError(
+            "ANDROID_PHONE_IP and ANDROID_TERMUX_USER are not set; put them "
+            "in .env (see .env.example) — no phone address is hardcoded")
     here = os.path.abspath(__file__)
     proxy_cmd = f"{sys.executable} {here} _proxy %h %p"
     return [
@@ -447,6 +458,10 @@ class AndroidAdapter:
         import urllib.error
         import urllib.request
 
+        if not APP_URL:
+            raise TransportError(
+                "ANDROID_APP_URL or ANDROID_PHONE_IP is not set; put it in "
+                ".env (see .env.example) — no phone address is hardcoded")
         if not APP_TOKEN:
             raise TransportError(
                 "ANDROID_APP_TOKEN is not set; copy it from the phone's "

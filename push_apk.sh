@@ -25,11 +25,18 @@ LOCAL_SHA="$(sha256sum "$APK" | cut -d' ' -f1)"
 
 PROXY_CMD="python3 $HERE/android_bridge.py _proxy %h %p"
 # Note: scp takes -P (capital) for the port; ssh takes -p.
+# No hardcoded phone address: ANDROID_PHONE_IP / ANDROID_TERMUX_USER come
+# from .env (sourced above); removed 2026-11-06 when the code went public.
+SSH_PORT="${ANDROID_TERMUX_SSH_PORT:-8022}"
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new
-          -o "ProxyCommand=$PROXY_CMD" -p 8022 -i "$HOME/.ssh/id_ed25519")
+          -o "ProxyCommand=$PROXY_CMD" -p "$SSH_PORT" -i "$HOME/.ssh/id_ed25519")
 SCP_OPTS=(-o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new
-          -o "ProxyCommand=$PROXY_CMD" -P 8022 -i "$HOME/.ssh/id_ed25519")
-REMOTE="u0_a388@100.111.74.42"
+          -o "ProxyCommand=$PROXY_CMD" -P "$SSH_PORT" -i "$HOME/.ssh/id_ed25519")
+if [ -z "${ANDROID_PHONE_IP:-}" ] || [ -z "${ANDROID_TERMUX_USER:-}" ]; then
+    echo "ANDROID_PHONE_IP and ANDROID_TERMUX_USER are not set; put them in .env (see .env.example)" >&2
+    exit 1
+fi
+REMOTE="${ANDROID_TERMUX_USER}@${ANDROID_PHONE_IP}"
 
 echo "== pushing $NAME ($(stat -c%s "$APK") bytes) to the phone =="
 if ! scp "${SCP_OPTS[@]}" "$APK" "$REMOTE:storage/downloads/$NAME" 2>/tmp/push_apk_scp.err; then

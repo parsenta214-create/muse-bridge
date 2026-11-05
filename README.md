@@ -46,10 +46,11 @@ Two halves:
 3. Open **Muse Bridge**, enable its accessibility service, tap
    **Start bridge**. Note the bridge address and the token shown in the
    app UI.
-4. On the VM, set `ANDROID_APP_URL` (default
-   `http://100.111.74.42:8080` — change to your phone's Tailscale IP) and
+4. On the VM, set `ANDROID_PHONE_IP` (your phone's Tailscale IP) and
    `ANDROID_APP_TOKEN` (from the app UI; when stored, only in a `.env`
-   file, never in chat, logs, or source). `push_apk.sh` pushes a new APK
+   file, never in chat, logs, or source — see `.env.example`). The
+   bridge URL defaults to `http://<ANDROID_PHONE_IP>:8080`, or set
+   `ANDROID_APP_URL` directly. `push_apk.sh` pushes a new APK
    to the phone over Termux SSH and notifies the bridge app.
 
 ## Use

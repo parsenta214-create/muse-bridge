@@ -98,7 +98,7 @@ def test_proxy_helper_refuses_empty_reply(monkeypatch):
     monkeypatch.setattr(android_bridge, "TUNNEL_PROXY_HOST", "127.0.0.1")
     monkeypatch.setattr(android_bridge, "TUNNEL_PROXY_PORT", port)
     with pytest.raises(ConnectionError, match="empty reply"):
-        android_bridge.proxy_connect("100.111.74.42", 8022, timeout=10)
+        android_bridge.proxy_connect("192.0.2.1", 8022, timeout=10)
 
 
 def test_shot_out_path_matches_format():

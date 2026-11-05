@@ -22,7 +22,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from android_bridge import proxy_connect  # noqa: E402
 
 LISTEN_PORT = int(os.environ.get("ANDROID_ADB_FORWARD_PORT", "5555"))
-PHONE_IP = os.environ.get("ANDROID_PHONE_IP", "100.111.74.42")
+# No hardcoded phone address: set ANDROID_PHONE_IP in the environment
+# (see android_bridge.py — removed 2026-11-06 when the code went public).
+PHONE_IP = os.environ.get("ANDROID_PHONE_IP", "")
 ADB_PORT = int(os.environ.get("ANDROID_ADB_PORT", "5555"))
 
 
@@ -70,6 +72,11 @@ def handle(conn):
 
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+if not PHONE_IP:
+    print("ANDROID_PHONE_IP is not set; put it in the environment "
+          "(see .env.example) — no phone address is hardcoded",
+          file=sys.stderr, flush=True)
+    sys.exit(2)
 srv.bind(("127.0.0.1", LISTEN_PORT))
 srv.listen(16)
 print(f"adb tunnel listening on 127.0.0.1:{LISTEN_PORT} -> {PHONE_IP}:{ADB_PORT}",

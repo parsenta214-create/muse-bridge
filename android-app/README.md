@@ -70,7 +70,7 @@ until the phone's wireless debugging is on.
    can enable it for you.)
 4. Back in the app, tap **Start bridge**. The status line should say
    "Bridge: running" and "Accessibility service: enabled".
-5. Note the **bridge address** (e.g. `http://100.111.74.42:8080`) and the
+5. Note the **bridge address** (e.g. `http://<phone-tailscale-ip>:8080`) and the
    **bridge token** shown in the app. The token is the only password;
    do not share it. Tap **Regenerate token** if it ever leaks.
 6. Tell Muse the address and the token (via the secure entry, never in
