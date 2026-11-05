@@ -8,6 +8,11 @@
     <string name="btn_start">Start bridge</string>
     <string name="btn_stop">Stop bridge</string>
     <string name="btn_accessibility">Open accessibility settings</string>
+    <string name="btn_add_tile">クイック設定に追加</string>
+    <string name="tile_label">Muse Bridge</string>
+    <string name="toast_tile_added">クイック設定に追加したよ。タイルをタップするとオンオフできるよ。</string>
+    <string name="toast_tile_already_added">もう追加済みだよ。</string>
+    <string name="toast_tile_failed">追加できなかったよ。クイック設定の編集から「Muse Bridge」を手動で追加してね。</string>
     <string name="btn_regenerate">Regenerate token</string>
     <string name="hint">The bridge listens only on this phone (Tailscale address and localhost). Every request needs the token above. Stop the bridge when you are done.</string>
 </resources>

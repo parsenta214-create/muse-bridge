@@ -2,16 +2,20 @@ package dev.muse.bridge;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.StatusBarManager;
+import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.net.Inet4Address;
 import java.net.InetAddress;
@@ -113,6 +117,13 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             }
         });
+        Button addTile = findViewById(R.id.add_tile_button);
+        addTile.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestAddTile();
+            }
+        });
         regen.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
@@ -129,6 +140,43 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         refresh();
+    }
+
+    /**
+     * Ask the system to add the Quick Settings tile (v1.7, Android 13+).
+     * The system shows a one-tap "Add tile?" dialog; the user still
+     * confirms once, but never has to hunt through the QS edit panel.
+     * On older Android, point at the manual route instead.
+     */
+    private void requestAddTile() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            StatusBarManager sbm = getSystemService(StatusBarManager.class);
+            if (sbm == null) {
+                Toast.makeText(this, R.string.toast_tile_failed, Toast.LENGTH_LONG).show();
+                return;
+            }
+            sbm.requestAddTileService(
+                    new ComponentName(this, BridgeTileService.class),
+                    getString(R.string.tile_label),
+                    Icon.createWithResource(this, R.drawable.ic_tile),
+                    getMainExecutor(),
+                    new java.util.function.Consumer<Integer>() {
+                        @Override
+                        public void accept(Integer result) {
+                            int message;
+                            if (result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ADDED) {
+                                message = R.string.toast_tile_added;
+                            } else if (result == StatusBarManager.TILE_ADD_REQUEST_RESULT_TILE_ALREADY_ADDED) {
+                                message = R.string.toast_tile_already_added;
+                            } else {
+                                message = R.string.toast_tile_failed;
+                            }
+                            Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                        }
+                    });
+        } else {
+            Toast.makeText(this, R.string.toast_tile_failed, Toast.LENGTH_LONG).show();
+        }
     }
 
     private void refresh() {

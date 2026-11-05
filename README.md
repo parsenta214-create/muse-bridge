@@ -16,7 +16,7 @@ Two halves:
   read-only by default; actions need `--allow-actions` plus an explicit
   user-approved action.
 
-## What it can do (v1.6)
+## What it can do (v1.7)
 
 - Screenshots (half-scale JPEG by default; full PNG on request).
 - Tap, swipe, type text, HOME / BACK / RECENTS / POWER.
@@ -35,17 +35,23 @@ Two halves:
   alone whether anything happened since its last poll.
 - `POST /notify`: the app posts an update notification (tap opens
   Downloads) when a new APK is pushed.
+- Quick Settings tile (v1.7): one tap starts or stops the bridge server;
+  the tile state shows whether it is running. Add it from the app
+  ("クイック設定に追加", Android 13+) or from the QS edit panel.
+- The running notification (v1.7) carries a Stop action, so the bridge
+  can be turned off without opening the app.
 
 ## Setup
 
 1. Build the app: `cd android-app && ./build.sh` — manual aapt2 / javac /
    d8 pipeline, no Gradle (the build VM has ~400 MiB free RAM).
-   Output: `Muse_Bridge_v1.6.apk` (debug-signed, sideloading only).
+   Output: `Muse_Bridge_v1.7.apk` (debug-signed, sideloading only).
 2. Copy the APK to the phone and install it (allow "install unknown apps"
    for the app used to open the APK). Update installs keep the token.
 3. Open **Muse Bridge**, enable its accessibility service, tap
-   **Start bridge**. Note the bridge address and the token shown in the
-   app UI.
+   **Start bridge** — or add the Quick Settings tile ("クイック設定に
+   追加") and toggle the bridge from there. Note the bridge address
+   and the token shown in the app UI.
 4. On the VM, set `ANDROID_PHONE_IP` (your phone's Tailscale IP) and
    `ANDROID_APP_TOKEN` (from the app UI; when stored, only in a `.env`
    file, never in chat, logs, or source — see `.env.example`). The
