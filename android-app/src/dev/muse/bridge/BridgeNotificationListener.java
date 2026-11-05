@@ -1,6 +1,7 @@
 package dev.muse.bridge;
 
 import android.app.Notification;
+import android.content.ComponentName;
 import android.content.Context;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -50,14 +51,23 @@ public class BridgeNotificationListener extends NotificationListenerService {
      * This is NOT the same as the service being connected: the
      * grant can exist while the system has not bound the service
      * yet, so /notifications distinguishes the two 503s.
+     *
+     * The setting stores flattened component names in FULL form
+     * ("dev.muse.bridge/dev.muse.bridge.BridgeNotification
+     * Listener"); the short form (".BridgeNotificationListener")
+     * never matches, so check both (decision 64).
      */
     public static boolean isAccessGranted(Context ctx) {
         // No public constant for this key in the SDK: the literal
         // setting name is "enabled_notification_listeners".
         String enabled = Settings.Secure.getString(
                 ctx.getContentResolver(), "enabled_notification_listeners");
-        return enabled != null
-                && enabled.contains("dev.muse.bridge/.BridgeNotificationListener");
+        if (enabled == null) {
+            return false;
+        }
+        ComponentName cn = new ComponentName(ctx, BridgeNotificationListener.class);
+        return enabled.contains(cn.flattenToString())
+                || enabled.contains(cn.flattenToShortString());
     }
 
     @Override

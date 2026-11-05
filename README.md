@@ -1411,6 +1411,34 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     or package names. APK 62,150 bytes, sha256 a5098b1f…;
     mock /notifications with posted/updated/ongoing/tombstone
     canned data, 98 tests pass in the whole suite.
+64. Fix the "enabled" checks (2026-11-06, v1.9.8 / code 18):
+    on 1.9.7 MainActivity showed "Accessibility service: NOT
+    enabled" and "Notification access: NOT granted" while the
+    log proved the notification listener had connected (which
+    needs the grant) and /health proved the accessibility
+    service was running. The display was NOT stale — the checks
+    were wrong. Both checks used contains() with the SHORT
+    flattened component name (".BridgeAccessibilityService",
+    ".BridgeNotificationListener"), but the settings store the
+    FULL flattened form ("dev.muse.bridge/dev.muse.bridge.
+    BridgeAccessibilityService"). The short form can never
+    match, so both checks always returned false. Fix: build
+    the expected name with new ComponentName(ctx, cls) and
+    check both flattenToString() (full) and
+    flattenToShortString() (short), in MainActivity.
+    isAccessibilityEnabled and BridgeNotificationListener.
+    isAccessGranted. No manual refresh button was added: the
+    status already refreshes on onResume (returning from
+    Settings re-reads it), and a button would only re-run the
+    same wrong check. The bug also explains the /notifications
+    503 "notification_listener_access_not_granted" seen on
+    1.9.7 while the listener was connected. Verified live
+    before the fix: /state device {battery_pct: 90, charging:
+    true, network: "mobile", interactive: true} on 1.9.7 (the
+    (a) feature works; network "mobile" is correct — the phone
+    is on 4G+ and Tailscale's underlying network is mobile,
+    so the VPN-underlying rule works). APK 62,151 bytes,
+    sha256 aa7b9644…; 98 tests pass.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

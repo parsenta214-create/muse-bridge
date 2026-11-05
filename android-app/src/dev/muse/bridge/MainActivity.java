@@ -69,7 +69,16 @@ public class MainActivity extends Activity {
         String enabled = Settings.Secure.getString(
                 ctx.getContentResolver(),
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-        return enabled != null && enabled.contains("dev.muse.bridge/.BridgeAccessibilityService");
+        if (enabled == null) {
+            return false;
+        }
+        // The setting stores flattened component names in FULL form
+        // ("dev.muse.bridge/dev.muse.bridge.BridgeAccessibility
+        // Service"); the short form (".BridgeAccessibilityService")
+        // never matches, so check both (decision 64).
+        ComponentName cn = new ComponentName(ctx, BridgeAccessibilityService.class);
+        return enabled.contains(cn.flattenToString())
+                || enabled.contains(cn.flattenToShortString());
     }
 
     @Override
