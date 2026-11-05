@@ -13,6 +13,8 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.WindowManager;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
@@ -533,6 +535,185 @@ public class BridgeAccessibilityService extends AccessibilityService {
                 target.recycle();
             }
         }
+    }
+
+    /**
+     * Runs any one-shot node action by name (decision 68, v1.9.11):
+     * POST /node_action. The action runs on the node or the first
+     * ancestor whose action list contains it (the same fallback idea
+     * as click_node/scroll_node, generalized: the client sees the
+     * same lists in /state's "actions"). Runs on the main thread (A-3).
+     */
+    public ActionOutcome nodeAction(final String nodeId, final int treeHash,
+            final String actionName, final JSONObject args) throws Exception {
+        return runOnMainThread(new Callable<ActionOutcome>() {
+            @Override
+            public ActionOutcome call() throws Exception {
+                return nodeActionInternal(nodeId, treeHash, actionName, args);
+            }
+        });
+    }
+
+    private synchronized ActionOutcome nodeActionInternal(String nodeId, int treeHash,
+            String actionName, JSONObject args) throws Exception {
+        int actionId = actionIdForName(actionName);
+        if (actionId < 0) {
+            throw new IllegalArgumentException("unknown action: " + actionName);
+        }
+        Bundle bundle = nodeActionArgs(actionName, args);
+        ActionOutcome out = new ActionOutcome();
+        AccessibilityNodeInfo node = resolveFresh(nodeId, treeHash);
+        out.snapshotId = lastRevision;
+        AccessibilityNodeInfo target = node;
+        while (target != null && !supportsAction(target, actionId)) {
+            AccessibilityNodeInfo parent = target.getParent();
+            if (target != node) {
+                target.recycle();
+            }
+            target = parent;
+        }
+        if (target == null) {
+            out.ok = false;
+            return out;
+        }
+        if (!target.isEnabled()) {
+            if (target != node) {
+                target.recycle();
+            }
+            throw new NodeNotFoundException("node " + nodeId + " is disabled");
+        }
+        try {
+            out.ok = target.performAction(actionId, bundle);
+            return out;
+        } finally {
+            if (target != node) {
+                target.recycle();
+            }
+        }
+    }
+
+    private static boolean supportsAction(AccessibilityNodeInfo node, int actionId) {
+        for (AccessibilityNodeInfo.AccessibilityAction a : node.getActionList()) {
+            if (a.getId() == actionId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Maps a /node_action name to its AccessibilityAction id, or -1. */
+    private static int actionIdForName(String name) {
+        if (name == null) {
+            return -1;
+        }
+        switch (name) {
+            case "click": return AccessibilityNodeInfo.ACTION_CLICK;
+            case "long_click": return AccessibilityNodeInfo.ACTION_LONG_CLICK;
+            case "focus": return AccessibilityNodeInfo.ACTION_FOCUS;
+            case "clear_focus": return AccessibilityNodeInfo.ACTION_CLEAR_FOCUS;
+            case "accessibility_focus":
+                return AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS;
+            case "clear_accessibility_focus":
+                return AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS;
+            case "select": return AccessibilityNodeInfo.ACTION_SELECT;
+            case "clear_selection": return AccessibilityNodeInfo.ACTION_CLEAR_SELECTION;
+            case "set_selection": return AccessibilityNodeInfo.ACTION_SET_SELECTION;
+            case "copy": return AccessibilityNodeInfo.ACTION_COPY;
+            case "cut": return AccessibilityNodeInfo.ACTION_CUT;
+            case "paste": return AccessibilityNodeInfo.ACTION_PASTE;
+            case "expand": return AccessibilityNodeInfo.ACTION_EXPAND;
+            case "collapse": return AccessibilityNodeInfo.ACTION_COLLAPSE;
+            case "dismiss": return AccessibilityNodeInfo.ACTION_DISMISS;
+            case "show_on_screen":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.getId();
+            case "context_click":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_CONTEXT_CLICK.getId();
+            case "ime_enter":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId();
+            case "scroll_forward": return AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
+            case "scroll_backward": return AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+            case "scroll_up":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.getId();
+            case "scroll_down":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.getId();
+            case "scroll_left":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.getId();
+            case "scroll_right":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.getId();
+            case "page_up":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_UP.getId();
+            case "page_down":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_DOWN.getId();
+            case "page_left":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_LEFT.getId();
+            case "page_right":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_RIGHT.getId();
+            case "press_and_hold":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_PRESS_AND_HOLD.getId();
+            case "set_progress":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_PROGRESS.getId();
+            case "scroll_to_position":
+                return AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_TO_POSITION.getId();
+            case "set_text": return AccessibilityNodeInfo.ACTION_SET_TEXT;
+            default: return -1;
+        }
+    }
+
+    /**
+     * Builds the argument Bundle for an action (decision 68). Only
+     * four actions take args; the rest take none. A missing or
+     * wrongly-typed required arg is an IllegalArgumentException
+     * (-> HTTP 400), never a silent default.
+     */
+    private static Bundle nodeActionArgs(String name, JSONObject args) {
+        Bundle b = new Bundle();
+        if (args == null) {
+            args = new JSONObject();
+        }
+        if ("set_selection".equals(name)) {
+            Object start = args.opt("start");
+            Object end = args.opt("end");
+            if (!(start instanceof Number) || !(end instanceof Number)) {
+                throw new IllegalArgumentException(
+                        "set_selection needs integer start and end");
+            }
+            b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,
+                    ((Number) start).intValue());
+            b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
+                    ((Number) end).intValue());
+        } else if ("set_progress".equals(name)) {
+            Object value = args.opt("value");
+            if (!(value instanceof Number)) {
+                throw new IllegalArgumentException("set_progress needs numeric value");
+            }
+            b.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE,
+                    ((Number) value).floatValue());
+        } else if ("scroll_to_position".equals(name)) {
+            Object row = args.opt("row");
+            if (!(row instanceof Number)) {
+                throw new IllegalArgumentException("scroll_to_position needs integer row");
+            }
+            b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT,
+                    ((Number) row).intValue());
+        } else if ("press_and_hold".equals(name)) {
+            Object duration = args.opt("duration_ms");
+            if (duration != null && !(duration instanceof Number)) {
+                throw new IllegalArgumentException(
+                        "press_and_hold duration_ms must be an integer");
+            }
+            if (duration != null) {
+                b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_PRESS_AND_HOLD_DURATION_MILLIS_INT,
+                        ((Number) duration).intValue());
+            }
+        } else if ("set_text".equals(name)) {
+            Object text = args.opt("text");
+            if (!(text instanceof String)) {
+                throw new IllegalArgumentException("set_text needs text");
+            }
+            b.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE,
+                    (String) text);
+        }
+        return b;
     }
 
     /**

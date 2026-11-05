@@ -1503,6 +1503,38 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     "scrollable"). Live test on X's timeline is still pending
     (needs the user to install 1.9.10). APK 62,150 bytes,
     sha256 27331efc…; 103 tests pass in the whole suite.
+68. Generic node actions (2026-11-06, v1.9.11 / code 21): instead
+    of one endpoint per node operation, one generic endpoint —
+    POST /node_action {node_id, tree_hash, action, args} — covers
+    all 32 one-shot node actions (Android's full set is 44; the
+    12 excluded are drag_start/drag_drop/drag_cancel (stateful,
+    multi-step), move_window, show/hide_tooltip,
+    show_text_suggestions, next/previous_at_movement_granularity,
+    next/previous_html_element (niche), and scroll_in_direction
+    (redundant with the four directional scrolls)). The server
+    maps each snake_case name to its AccessibilityAction id
+    (ACTION_* int constants where they exist, otherwise the
+    AccessibilityAction object's getId()); the action runs on
+    the node or the first ancestor whose action list contains
+    it — the same fallback idea as click_node/scroll_node,
+    generalized, using the same "actions" lists the client
+    already sees in /state. Four actions take args: set_selection
+    (start, end), set_progress (value), scroll_to_position (row),
+    set_text (text); press_and_hold takes an optional
+    duration_ms. A missing or wrongly-typed required arg is a
+    400 (never a silent default); an unknown action is a 400;
+    no supporting ancestor is a 422 "action not supported"; the
+    usual 409 (stale tree_hash) / 422 (disabled node) apply.
+    VM client: node_action(node_id, tree_hash, action, args),
+    gated by --allow-actions, never retried, unknown actions
+    and missing args raise ValueError before any request. The
+    old endpoints (click_node, type_node, scroll_node) stay for
+    compatibility. CUT/PASTE/DISMISS can change or remove user
+    content — same risk class as type_node, inside the same
+    gate, never used automatically. Live test of representative
+    actions on X (long_click, scroll_down, focus) is still
+    pending (needs the user to install 1.9.11). APK 62,150
+    bytes, sha256 3a0935f1…; 110 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

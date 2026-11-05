@@ -71,6 +71,8 @@ import java.util.concurrent.TimeUnit;
  *                         "DPAD_CENTER"} (v1.9.9: DPAD keys)
  *   POST /scroll_node     {"node_id":"..","tree_hash":..,
  *                         "direction":"forward"|"backward"} (v1.9.10)
+ *   POST /node_action     {"node_id":"..","tree_hash":..,"action":"..",
+ *                         "args":{..}} (v1.9.11: any one-shot node action)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -718,6 +720,33 @@ public class HttpBridgeServer {
                         sendJson(out, status, new JSONObject().put("ok", false)
                                 .put("error", e.getMessage()));
                     }
+                }
+            } else if ("/node_action".equals(path) && "POST".equals(method)) {
+                // Decision 68 (v1.9.11): any one-shot node action by
+                // name, with optional args. 409 when the screen moved on.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                JSONObject args = j.optJSONObject("args");
+                try {
+                    BridgeAccessibilityService.ActionOutcome o = svc.nodeAction(
+                            j.getString("node_id"), j.getInt("tree_hash"),
+                            j.getString("action"), args);
+                    status = o.ok ? 200 : 422;
+                    sendJson(out, status, new JSONObject().put("ok", o.ok)
+                            .put("snapshot_id", o.snapshotId)
+                            .put("error", o.ok ? JSONObject.NULL : "action not supported"));
+                } catch (IllegalArgumentException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BridgeAccessibilityService.StaleRevisionException e) {
+                    status = 409;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BridgeAccessibilityService.NodeNotFoundException e) {
+                    status = 422;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
                 }
             } else if ("/batch".equals(path) && "POST".equals(method)) {
                 // Phase 2 (A-4): several actions in one request

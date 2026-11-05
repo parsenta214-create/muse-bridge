@@ -1048,3 +1048,89 @@ def test_app_scroll_node_needs_gate(mock_app):
     adapter = ab.AndroidAdapter(actions_enabled=False)
     with pytest.raises(PermissionError):
         adapter.scroll_node("n3", 123456)
+
+
+# --------------------------------------------------------------------------
+# Decision 68: generic node_action (v1.9.11).
+# --------------------------------------------------------------------------
+
+def test_app_node_action_no_arg(mock_app):
+    """Decision 68: node_action posts node_id + tree_hash + action +
+    args for a no-arg action (long_click)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.node_action("n3", 123456, "long_click")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/node_action",
+            {"node_id": "n3", "tree_hash": 123456,
+             "action": "long_click", "args": {}}) in posts
+
+
+def test_app_node_action_directional_scroll(mock_app):
+    """Decision 68: scroll_down / page_down pass through as actions."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.node_action("n3", 123456, "scroll_down")["ok"] is True
+    assert adapter.node_action("n3", 123456, "page_down")["ok"] is True
+
+
+def test_app_node_action_with_args(mock_app):
+    """Decision 68: set_selection and set_progress carry their args."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.node_action(
+        "n3", 123456, "set_selection",
+        {"start": 2, "end": 5})["ok"] is True
+    assert adapter.node_action(
+        "n3", 123456, "set_progress", {"value": 0.5})["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/node_action",
+            {"node_id": "n3", "tree_hash": 123456,
+             "action": "set_selection",
+             "args": {"start": 2, "end": 5}}) in posts
+    assert ("POST", "/node_action",
+            {"node_id": "n3", "tree_hash": 123456,
+             "action": "set_progress", "args": {"value": 0.5}}) in posts
+
+
+def test_app_node_action_unknown(mock_app):
+    """Decision 68: an unknown action name raises ValueError before
+    any request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="unknown action"):
+        adapter.node_action("n3", 123456, "explode")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_node_action_missing_arg(mock_app):
+    """Decision 68: a missing required arg raises ValueError before
+    any request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="needs argument"):
+        adapter.node_action("n3", 123456, "set_selection", {"start": 2})
+    with pytest.raises(ValueError, match="needs argument"):
+        adapter.node_action("n3", 123456, "set_progress")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_node_action_needs_gate(mock_app):
+    """Decision 68: node_action is an action (it changes the screen),
+    so it needs --allow-actions."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.node_action("n3", 123456, "focus")
+
+
+def test_app_node_action_all_names_known(mock_app):
+    """Decision 68: every name in NODE_ACTIONS is accepted by the
+    client (the server maps them; the mock echoes any POST)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    for name in sorted(ab.AndroidAdapter.NODE_ACTIONS):
+        args = {}
+        if name == "set_selection":
+            args = {"start": 0, "end": 1}
+        elif name == "set_progress":
+            args = {"value": 0.5}
+        elif name == "scroll_to_position":
+            args = {"row": 0}
+        elif name == "set_text":
+            args = {"text": "x"}
+        assert adapter.node_action("n3", 123456, name, args)["ok"] is True
+    assert len(ab.AndroidAdapter.NODE_ACTIONS) == 32

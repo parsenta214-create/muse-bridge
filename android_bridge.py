@@ -556,6 +556,52 @@ class AndroidAdapter:
                               {"node_id": node_id, "tree_hash": tree_hash,
                                "direction": direction})
 
+    # Decision 68 (v1.9.11): every one-shot node action, by name.
+    # The server maps each name to its AccessibilityAction id; only
+    # the actions listed in NODE_ACTION_ARGS take args.
+    NODE_ACTIONS = frozenset([
+        "click", "long_click", "focus", "clear_focus",
+        "accessibility_focus", "clear_accessibility_focus",
+        "select", "clear_selection", "set_selection",
+        "copy", "cut", "paste", "expand", "collapse", "dismiss",
+        "show_on_screen", "context_click", "ime_enter",
+        "scroll_forward", "scroll_backward",
+        "scroll_up", "scroll_down", "scroll_left", "scroll_right",
+        "page_up", "page_down", "page_left", "page_right",
+        "press_and_hold", "set_progress", "scroll_to_position",
+        "set_text",
+    ])
+    NODE_ACTION_ARGS = {
+        "set_selection": ("start", "end"),
+        "set_progress": ("value",),
+        "scroll_to_position": ("row",),
+    }
+
+    def node_action(self, node_id: str, tree_hash: int, action: str,
+                    args: dict | None = None) -> dict:
+        """Run any one-shot node action by name (decision 68, v1.9.11):
+        POST /node_action. The action runs on the node or the first
+        ancestor whose action list contains it (the client sees the
+        same lists in /state's "actions"). Only set_selection
+        (start, end), set_progress (value), scroll_to_position (row)
+        and set_text (text) take args; press_and_hold takes an
+        optional duration_ms. Unknown actions and missing required
+        args raise ValueError before any request. Gated by
+        --allow-actions, never retried."""
+        if action not in self.NODE_ACTIONS:
+            raise ValueError(f"unknown action: {action!r}")
+        args = dict(args or {})
+        for required in self.NODE_ACTION_ARGS.get(action, ()):
+            if required not in args:
+                raise ValueError(f"{action} needs argument: {required}")
+        if action == "set_text" and "text" not in args:
+            raise ValueError("set_text needs argument: text")
+        self._require_actions(f"node_action({node_id}, {action})")
+        tree_hash = self._ensure_fresh_snapshot(tree_hash)
+        return self._app_post("/node_action",
+                              {"node_id": node_id, "tree_hash": tree_hash,
+                               "action": action, "args": args})
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 
