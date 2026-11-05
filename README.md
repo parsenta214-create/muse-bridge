@@ -927,6 +927,28 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     tree_hash raises instead of acting. Batch entry check and
     409/422 contract unchanged; batch carries the entry
     snapshot_id.
+49. A-4 batch idempotency (2026-11-06 03:31, Codex Phase A):
+    batch_id is the lookup key; payload_hash = SHA-256 of a
+    canonical payload (fixed field order, defaults filled by the
+    HTTP layer, strings length-prefixed; batch_id NOT in the hash;
+    protocol_version defaults to 1, any other version is 400, and
+    unknown top-level or per-action fields are 400). States:
+    ACCEPTED -> RUNNING -> COMPLETED/PARTIAL/FAILED. Same id + same
+    hash -> cached result (replayed: true), never re-executed;
+    re-send while running -> status "running", replayed: true.
+    Same id + different hash -> 409; an id whose result expired
+    (10 min) -> 410 until its tombstone lapses (another 10 min).
+    0 successes = failed; >= 1 success then stop = partial.
+    Response gains status, payload_hash, completed_action_ids,
+    failed_action_id. "completed" means Android confirmed the
+    action ran, NOT that the target app finished its business
+    operation. Memory only: no exactly-once across a process
+    restart (a stated design constraint). Client sends
+    protocol_version: 1 and re-sends on 410 only with a NEW
+    batch_id (never re-use the expired one). The AntiGravity PoC
+    (SPEC-POC-001, antigravity_projects/muse-bridge-poc/) is a
+    separate independent protocol implementation; no merge into
+    muse-bridge was done — that remains a separate approval.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

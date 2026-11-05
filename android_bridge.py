@@ -404,7 +404,8 @@ class AndroidAdapter:
             raise TransportError("batch is only available on the app transport")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/batch", {
-            "batch_id": batch_id, "tree_hash": tree_hash, "actions": actions})
+            "batch_id": batch_id, "protocol_version": 1,
+            "tree_hash": tree_hash, "actions": actions})
 
     def notify(self, title: str, text: str) -> dict:
         """Ask the bridge app (v1.3+) to post an update notification.

@@ -566,16 +566,28 @@ public class HttpBridgeServer {
                             .put("error", e.getMessage()));
                 }
             } else if ("/batch".equals(path) && "POST".equals(method)) {
-                // Phase 2: several actions in one request (batch_id,
-                // tree_hash, actions[]). Re-sent batch_id returns the
-                // cached result without re-executing (idempotency).
+                // Phase 2 (A-4): several actions in one request
+                // (batch_id, protocol_version, tree_hash, actions[]).
+                // Re-sent batch_id + same payload returns the cached
+                // result without re-executing (idempotency); same id
+                // with different content is 409, an expired id is 410.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
                 try {
+                    rejectUnknownFields(j, "batch_id", "protocol_version",
+                            "tree_hash", "actions");
+                    int protocolVersion = j.optInt("protocol_version", 1);
+                    if (protocolVersion != 1) {
+                        throw new org.json.JSONException(
+                                "unsupported protocol_version: " + protocolVersion);
+                    }
                     List<BridgeAccessibilityService.BatchAction> actions = new ArrayList<>();
                     JSONArray arr = j.getJSONArray("actions");
                     for (int i = 0; i < arr.length(); i++) {
                         JSONObject a = arr.getJSONObject(i);
+                        rejectUnknownFields(a, "action_id", "type", "node_id",
+                                "x", "y", "x1", "y1", "x2", "y2", "duration_ms",
+                                "text", "key", "wait_ms", "expect_change");
                         BridgeAccessibilityService.BatchAction ba =
                                 new BridgeAccessibilityService.BatchAction();
                         ba.actionId = a.optString("action_id", "a" + i);
@@ -595,7 +607,8 @@ public class HttpBridgeServer {
                         actions.add(ba);
                     }
                     BridgeAccessibilityService.BatchResult br = svc.runBatch(
-                            j.getString("batch_id"), j.getInt("tree_hash"), actions);
+                            j.getString("batch_id"), protocolVersion,
+                            j.getInt("tree_hash"), actions);
                     JSONArray results = new JSONArray();
                     for (BridgeAccessibilityService.ActionResult r : br.results) {
                         results.put(new JSONObject()
@@ -606,16 +619,33 @@ public class HttpBridgeServer {
                                 .put("hash_before", r.hashBefore)
                                 .put("hash_after", r.hashAfter));
                     }
+                    JSONArray completed = new JSONArray();
+                    for (String id : br.completedActionIds) {
+                        completed.put(id);
+                    }
                     status = 200;
                     sendJson(out, status, new JSONObject()
                             .put("ok", true)
                             .put("batch_id", br.batchId)
                             .put("snapshot_id", br.snapshotId)
+                            .put("status", br.status)
+                            .put("payload_hash", br.payloadHash)
                             .put("replayed", br.replayed)
                             .put("results", results)
+                            .put("completed_action_ids", completed)
+                            .put("failed_action_id", br.failedActionId.isEmpty()
+                                    ? JSONObject.NULL : br.failedActionId)
                             .put("stopped_at", br.stoppedAt)
                             .put("stop_reason", br.stopReason.isEmpty()
                                     ? JSONObject.NULL : br.stopReason));
+                } catch (BridgeAccessibilityService.BatchMismatchException e) {
+                    status = 409;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BridgeAccessibilityService.BatchGoneException e) {
+                    status = 410;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
                 } catch (BridgeAccessibilityService.StaleRevisionException e) {
                     status = 409;
                     sendJson(out, status, new JSONObject().put("ok", false)
@@ -775,6 +805,24 @@ public class HttpBridgeServer {
         return new JSONObject().put("ok", false).put("error", message);
     }
 
+    /** A-4: unknown JSON fields are rejected (400 via JSONException)
+     * so the canonical payload hash is computed over exactly the
+     * fields the server understands. */
+    private static void rejectUnknownFields(JSONObject j, String... allowed)
+            throws org.json.JSONException {
+        java.util.Set<String> ok = new java.util.HashSet<>();
+        for (String a : allowed) {
+            ok.add(a);
+        }
+        java.util.Iterator<String> keys = j.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (!ok.contains(key)) {
+                throw new org.json.JSONException("unknown field: " + key);
+            }
+        }
+    }
+
     private static long remainingMs(long deadline) {
         long rem = deadline - android.os.SystemClock.elapsedRealtime();
         return rem < 0 ? 0 : rem;
@@ -886,6 +934,8 @@ public class HttpBridgeServer {
             case 401: return "Unauthorized";
             case 404: return "Not Found";
             case 408: return "Request Timeout";
+            case 409: return "Conflict";
+            case 410: return "Gone";
             case 413: return "Content Too Large";
             case 422: return "Unprocessable Entity";
             case 431: return "Request Header Fields Too Large";

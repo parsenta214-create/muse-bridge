@@ -174,6 +174,21 @@ class MockAppHandler(BaseHTTPRequestHandler):
         MockAppHandler.requests.append(("POST", self.path, payload))
         if not self._check_token():
             return self._send_json(401, {"ok": False, "error": "unauthorized"})
+        if self.path == "/batch":
+            # A-4 (v1.9): a realistic batch response, with the status,
+            # payload hash, and completed/failed action ids.
+            acts = payload.get("actions", [])
+            return self._send_json(200, {
+                "ok": True, "batch_id": payload.get("batch_id"),
+                "snapshot_id": 7, "status": "completed",
+                "payload_hash": "ab" * 32, "replayed": False,
+                "results": [{"action_id": a.get("action_id"),
+                             "status": "executed", "error": None,
+                             "hash_before": 123456, "hash_after": 123456}
+                            for a in acts],
+                "completed_action_ids": [a.get("action_id") for a in acts],
+                "failed_action_id": None,
+                "stopped_at": -1, "stop_reason": None})
         return self._send_json(200, {"ok": True, "echo": payload})
 
 
@@ -326,7 +341,21 @@ def test_app_batch_posts_actions(mock_app):
     assert result["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert ("POST", "/batch",
-            {"batch_id": "b-001", "tree_hash": 123456, "actions": actions}) in posts
+            {"batch_id": "b-001", "protocol_version": 1,
+             "tree_hash": 123456, "actions": actions}) in posts
+
+
+def test_app_batch_response_fields_v19(mock_app):
+    """A-4 (v1.9): the batch response carries status, payload_hash,
+    completed_action_ids, and failed_action_id."""
+    adapter = ab.AndroidAdapter(transport="app", actions_enabled=True)
+    actions = [{"action_id": "a1", "type": "tap", "x": 1, "y": 2}]
+    result = adapter.batch("b-002", 123456, actions)
+    assert result["status"] == "completed"
+    assert result["payload_hash"] == "ab" * 32
+    assert result["completed_action_ids"] == ["a1"]
+    assert result["failed_action_id"] is None
+    assert result["replayed"] is False
 
 
 def test_app_phase2_actions_refused_without_flag(mock_app):

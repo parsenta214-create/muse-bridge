@@ -14,6 +14,7 @@ import android.view.accessibility.AccessibilityWindowInfo;
 import android.view.WindowManager;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
@@ -104,13 +105,48 @@ public class BridgeAccessibilityService extends AccessibilityService {
     private int lastRevision = -1;
     private int lastTreeHash = 0;
 
-    /** Batch results by batch_id for idempotency (Phase 2, max 50). */
-    private final Map<String, BatchResult> batchCache = new LinkedHashMap<String, BatchResult>() {
+    /** Batch results by batch_id for idempotency (Phase 2, max 50).
+     * A-4: the entry carries the payload hash, the lifecycle status,
+     * and the expiry; a re-sent id is answered from the entry, never
+     * by re-executing. */
+    private final Map<String, BatchCacheEntry> batchCache =
+            new LinkedHashMap<String, BatchCacheEntry>() {
         @Override
-        protected boolean removeEldestEntry(Map.Entry<String, BatchResult> e) {
+        protected boolean removeEldestEntry(Map.Entry<String, BatchCacheEntry> e) {
             return size() > 50;
         }
     };
+
+    /** A-4: batch result lifetime (Codex Phase A initial values). */
+    private static final long BATCH_TTL_MS = 10 * 60 * 1000;
+    /** After the result expires, the id + hash stay as a tombstone
+     * for another TTL; reuse is refused (410) while it lives. */
+    private static final long BATCH_TOMBSTONE_MS = 10 * 60 * 1000;
+
+    /** A-4: same batch_id, different payload — the id is in use. */
+    public static class BatchMismatchException extends Exception {
+        public BatchMismatchException(String message) {
+            super(message);
+        }
+    }
+
+    /** A-4: batch_id was used before but its result expired (tombstone). */
+    public static class BatchGoneException extends Exception {
+        public BatchGoneException(String message) {
+            super(message);
+        }
+    }
+
+    /** A-4: one cache entry. result is null while RUNNING. */
+    private static class BatchCacheEntry {
+        String payloadHash = "";
+        BatchResult result;
+        /** "running", "completed", "partial", or "failed". */
+        String status = "running";
+        long createdAt = 0;
+        long expiresAt = 0;
+        long tombstoneUntil = 0;
+    }
 
     /**
      * Phase 3 (v1.6): event engine. Accessibility events arrive in
@@ -614,6 +650,17 @@ public class BridgeAccessibilityService extends AccessibilityService {
         public String stopReason = "";
         /** Revision of the snapshot the entry check used (A-3). */
         public int snapshotId = -1;
+        /** A-4: "completed", "partial", "failed", or "running"
+         * (a re-send that arrived while the first run was in flight). */
+        public String status = "";
+        /** A-4: SHA-256 of the canonical payload (see canonicalBatchPayload). */
+        public String payloadHash = "";
+        /** A-4: action_ids Android confirmed ran. "Ran" means the
+         * action was dispatched and confirmed by Android — NOT that
+         * the target app finished its business operation. */
+        public List<String> completedActionIds = new ArrayList<>();
+        /** A-4: the action_id that failed and stopped the batch ("" if none). */
+        public String failedActionId = "";
 
         public BatchResult() {
         }
@@ -625,47 +672,163 @@ public class BridgeAccessibilityService extends AccessibilityService {
             this.stoppedAt = other.stoppedAt;
             this.stopReason = other.stopReason;
             this.snapshotId = other.snapshotId;
+            this.status = other.status;
+            this.payloadHash = other.payloadHash;
+            this.completedActionIds = other.completedActionIds;
+            this.failedActionId = other.failedActionId;
         }
     }
 
     /**
-     * Runs a batch against one snapshot (Phase 2). Steps execute in
-     * order; the first failure stops the batch. A step with
-     * expectChange waits up to 2 s for the tree hash to move: when it
-     * moves, the batch stops after that step (the screen changed, so
-     * later node ids are invalid — the client refetches /state and
-     * sends the next batch). A re-sent batch_id returns the cached
-     * result without re-executing anything (idempotency). Runs on the
-     * main thread (A-3); each node step re-resolves fresh.
+     * A-4: canonical form of a batch payload for the payload hash.
+     * Fixed field order, defaults already filled by the HTTP layer,
+     * strings length-prefixed so no separator can be ambiguous,
+     * numbers and booleans in plain form. Two payloads hash equal
+     * exactly when their normalized content is equal; the batch_id
+     * is NOT part of the hash (it is the lookup key).
      */
-    public BatchResult runBatch(final String batchId, final int treeHash,
-            final List<BatchAction> actions) throws Exception {
-        return runOnMainThread(new Callable<BatchResult>() {
+    private static String canonicalBatchPayload(int protocolVersion, int treeHash,
+            List<BatchAction> actions) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("v").append(protocolVersion);
+        sb.append("|tree=").append(treeHash);
+        sb.append("|actions=[");
+        for (int i = 0; i < actions.size(); i++) {
+            BatchAction a = actions.get(i);
+            if (i > 0) {
+                sb.append(";");
+            }
+            sb.append("{");
+            appendCanon(sb, "id", a.actionId);
+            sb.append(",");
+            appendCanon(sb, "type", a.type);
+            sb.append(",");
+            appendCanon(sb, "node", a.nodeId);
+            sb.append(",");
+            sb.append("x=").append(a.x);
+            sb.append(",y=").append(a.y);
+            sb.append(",x1=").append(a.x1);
+            sb.append(",y1=").append(a.y1);
+            sb.append(",x2=").append(a.x2);
+            sb.append(",y2=").append(a.y2);
+            sb.append(",dur=").append(a.durationMs);
+            sb.append(",");
+            appendCanon(sb, "text", a.text);
+            sb.append(",");
+            appendCanon(sb, "key", a.key);
+            sb.append(",wait=").append(a.waitMs);
+            sb.append(",exp=").append(a.expectChange);
+            sb.append("}");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private static void appendCanon(StringBuilder sb, String name, String value) {
+        String v = value == null ? "" : value;
+        sb.append(name).append("=").append(v.length()).append(":").append(v);
+    }
+
+    private static String sha256Hex(String input) throws Exception {
+        java.security.MessageDigest md =
+                java.security.MessageDigest.getInstance("SHA-256");
+        byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+        StringBuilder hex = new StringBuilder(digest.length * 2);
+        for (byte b : digest) {
+            hex.append(String.format("%02x", b & 0xff));
+        }
+        return hex.toString();
+    }
+
+    /**
+     * Runs a batch against one snapshot (Phase 2, coordinator in
+     * A-4). Steps execute in order; the first failure stops the
+     * batch. A step with expectChange waits up to 2 s for the tree
+     * hash to move: when it moves, the batch stops after that step
+     * (the screen changed, so later node ids are invalid — the
+     * client refetches /state and sends the next batch).
+     *
+     * Idempotency (A-4): the batch_id + payload_hash decides. A
+     * re-send with the same id AND the same hash returns the cached
+     * result (replayed: true) without re-executing; while the first
+     * run is still in flight it returns status "running" (replayed:
+     * true). The same id with a different hash is a 409; an id whose
+     * result expired is a 410 until its tombstone lapses. Results
+     * live 10 minutes in memory only — no exactly-once across a
+     * process restart (a stated design constraint).
+     */
+    public BatchResult runBatch(final String batchId, final int protocolVersion,
+            final int treeHash, final List<BatchAction> actions) throws Exception {
+        final String payloadHash =
+                sha256Hex(canonicalBatchPayload(protocolVersion, treeHash, actions));
+        final long now = System.currentTimeMillis();
+        final int entrySnapshotId;
+        synchronized (this) {
+            if (lastRevision < 0) {
+                throw new NodeNotFoundException(
+                        "no /state snapshot yet — fetch /state first");
+            }
+            if (treeHash != lastTreeHash) {
+                throw new StaleRevisionException(
+                        "screen changed since that /state (tree hash moved) — refetch state");
+            }
+            BatchCacheEntry entry = batchCache.get(batchId);
+            if (entry != null) {
+                if (now > entry.tombstoneUntil) {
+                    batchCache.remove(batchId);
+                    entry = null;
+                } else if (now > entry.expiresAt) {
+                    throw new BatchGoneException(
+                            "batch_id " + batchId + " expired — use a new batch_id");
+                } else if (!entry.payloadHash.equals(payloadHash)) {
+                    throw new BatchMismatchException(
+                            "batch_id " + batchId + " is already in use with different content");
+                } else if ("running".equals(entry.status)) {
+                    BatchResult running = new BatchResult();
+                    running.batchId = batchId;
+                    running.replayed = true;
+                    running.status = "running";
+                    running.payloadHash = payloadHash;
+                    running.snapshotId = lastRevision;
+                    return running;
+                } else {
+                    BatchResult replay = new BatchResult(entry.result);
+                    replay.replayed = true;
+                    return replay;
+                }
+            }
+            entrySnapshotId = lastRevision;
+            BatchCacheEntry fresh = new BatchCacheEntry();
+            fresh.payloadHash = payloadHash;
+            fresh.status = "running";
+            fresh.createdAt = now;
+            fresh.expiresAt = now + BATCH_TTL_MS;
+            fresh.tombstoneUntil = now + BATCH_TTL_MS + BATCH_TOMBSTONE_MS;
+            batchCache.put(batchId, fresh);
+        }
+        final int snapshotId = entrySnapshotId;
+        BatchResult result = runOnMainThread(new Callable<BatchResult>() {
             @Override
             public BatchResult call() throws Exception {
-                return runBatchInternal(batchId, treeHash, actions);
+                return runBatchInternal(batchId, treeHash, actions, snapshotId);
             }
         });
+        result.payloadHash = payloadHash;
+        synchronized (this) {
+            BatchCacheEntry entry = batchCache.get(batchId);
+            if (entry != null && entry.payloadHash.equals(payloadHash)) {
+                entry.result = result;
+                entry.status = result.status;
+            }
+        }
+        return result;
     }
 
     private synchronized BatchResult runBatchInternal(String batchId, int treeHash,
-            List<BatchAction> actions) throws Exception {
-        BatchResult cached = batchCache.get(batchId);
-        if (cached != null) {
-            BatchResult replay = new BatchResult(cached);
-            replay.replayed = true;
-            return replay;
-        }
-        if (lastRevision < 0) {
-            throw new NodeNotFoundException("no /state snapshot yet — fetch /state first");
-        }
-        if (treeHash != lastTreeHash) {
-            throw new StaleRevisionException(
-                    "screen changed since that /state (tree hash moved) — refetch state");
-        }
+            List<BatchAction> actions, int entrySnapshotId) throws Exception {
         BatchResult result = new BatchResult();
         result.batchId = batchId;
-        result.snapshotId = lastRevision;
+        result.snapshotId = entrySnapshotId;
         for (int i = 0; i < actions.size(); i++) {
             BatchAction a = actions.get(i);
             ActionResult r = new ActionResult();
@@ -683,6 +846,11 @@ public class BridgeAccessibilityService extends AccessibilityService {
             }
             r.hashAfter = lastTreeHash;
             result.results.add(r);
+            if ("executed".equals(r.status)) {
+                result.completedActionIds.add(r.actionId);
+            } else {
+                result.failedActionId = r.actionId;
+            }
             if ("failed".equals(r.status)) {
                 result.stoppedAt = i;
                 result.stopReason = r.error;
@@ -712,7 +880,14 @@ public class BridgeAccessibilityService extends AccessibilityService {
                 break;
             }
         }
-        batchCache.put(batchId, result);
+        // A-4: 0 successes = failed; >= 1 success then stop = partial.
+        if (result.completedActionIds.isEmpty()) {
+            result.status = "failed";
+        } else if (result.stoppedAt >= 0) {
+            result.status = "partial";
+        } else {
+            result.status = "completed";
+        }
         return result;
     }
 
