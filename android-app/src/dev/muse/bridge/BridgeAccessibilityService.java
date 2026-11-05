@@ -22,6 +22,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -109,17 +110,16 @@ public class BridgeAccessibilityService extends AccessibilityService {
     private int lastRevision = -1;
     private int lastTreeHash = 0;
 
-    /** Batch results by batch_id for idempotency (Phase 2, max 50).
-     * A-4: the entry carries the payload hash, the lifecycle status,
-     * and the expiry; a re-sent id is answered from the entry, never
-     * by re-executing. */
+    /** Batch results by batch_id for idempotency (Phase 2).
+     * Phase C-1 (P0-03): entries are NEVER evicted by count —
+     * a live entry (inside its 10-min result + 10-min tombstone
+     * window) must survive, or a re-sent batch_id would
+     * re-execute as a new batch. Expired entries (past
+     * tombstoneUntil) are purged lazily on insert, so the map
+     * stays bounded by the batches created in the last
+     * 20 minutes. */
     private final Map<String, BatchCacheEntry> batchCache =
-            new LinkedHashMap<String, BatchCacheEntry>() {
-        @Override
-        protected boolean removeEldestEntry(Map.Entry<String, BatchCacheEntry> e) {
-            return size() > 50;
-        }
-    };
+            new LinkedHashMap<>();
 
     /** A-4: batch result lifetime (Codex Phase A initial values). */
     private static final long BATCH_TTL_MS = 10 * 60 * 1000;
@@ -750,24 +750,48 @@ public class BridgeAccessibilityService extends AccessibilityService {
     /**
      * Set text on the currently focused editable field. Returns false when
      * there is no focused editable field (tap the field first).
+     * Phase C-1 (P0-02): runs on the main thread like every other
+     * node action (A-3), and recycles root/target on all paths.
      */
-    public boolean typeText(String text) {
+    public boolean typeText(final String text) throws Exception {
+        return runOnMainThread(new Callable<Boolean>() {
+            @Override
+            public Boolean call() {
+                return typeTextInternal(text);
+            }
+        });
+    }
+
+    private boolean typeTextInternal(String text) {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) {
             return false;
         }
-        AccessibilityNodeInfo target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
-        if (target == null) {
-            target = root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
+        try {
+            AccessibilityNodeInfo target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+            if (target == null) {
+                target = root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
+            }
+            if (target == null || !target.isEditable()) {
+                if (target != null && target != root) {
+                    target.recycle();
+                }
+                return false;
+            }
+            try {
+                target.refresh();
+                Bundle args = new Bundle();
+                args.putCharSequence(
+                        AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+                return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+            } finally {
+                if (target != root) {
+                    target.recycle();
+                }
+            }
+        } finally {
+            root.recycle();
         }
-        if (target == null || !target.isEditable()) {
-            return false;
-        }
-        target.refresh();
-        Bundle args = new Bundle();
-        args.putCharSequence(
-                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
-        return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
     }
 
     // ---------------------------------------------------------------
@@ -1089,6 +1113,15 @@ public class BridgeAccessibilityService extends AccessibilityService {
             fresh.createdAt = now;
             fresh.expiresAt = now + BATCH_TTL_MS;
             fresh.tombstoneUntil = now + BATCH_TTL_MS + BATCH_TOMBSTONE_MS;
+            // Phase C-1 (P0-03): drop entries past their tombstone
+            // so the map stays bounded without ever evicting a
+            // live one.
+            for (Iterator<Map.Entry<String, BatchCacheEntry>> it =
+                    batchCache.entrySet().iterator(); it.hasNext(); ) {
+                if (now > it.next().getValue().tombstoneUntil) {
+                    it.remove();
+                }
+            }
             batchCache.put(batchId, fresh);
         }
         final int snapshotId = entrySnapshotId;
@@ -1385,7 +1418,11 @@ public class BridgeAccessibilityService extends AccessibilityService {
             n.text = n.password ? "[REDACTED]"
                     : (text == null ? "" : text.toString());
             CharSequence desc = node.getContentDescription();
-            n.contentDescription = desc == null ? "" : desc.toString();
+            // Phase C-1 (P0-01): a password node's description is
+            // redacted too — it must never carry the value by
+            // another field.
+            n.contentDescription = n.password ? "[REDACTED]"
+                    : (desc == null ? "" : desc.toString());
             Rect r = new Rect();
             node.getBoundsInScreen(r);
             n.left = r.left;
@@ -1475,7 +1512,10 @@ public class BridgeAccessibilityService extends AccessibilityService {
             return;
         }
         CharSequence text = node.getText();
-        if (text != null && node.isVisibleToUser()) {
+        // Phase C-1 (P0-01): a password node's value must never
+        // reach /state's texts[] (the node list already redacts
+        // it, but this path did not). Children are still walked.
+        if (text != null && node.isVisibleToUser() && !node.isPassword()) {
             String s = text.toString().trim();
             if (!s.isEmpty() && s.length() <= 120) {
                 out.add(s);

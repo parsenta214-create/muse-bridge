@@ -1583,6 +1583,44 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     right all along, the missing <queries> was the cause.
     APK 62,150 bytes, sha256 2c0c1a11…; 113 tests pass in the
     whole suite.
+71. Phase C-1 P0-01 password redaction (2026-11-06, v1.9.14 /
+    code 24, from GPT review CONS-20261106-014): the node list
+    already redacted password values to "[REDACTED]", but
+    collectTexts() had no isPassword() check, so /state's
+    texts[] leaked the value, and a password node's
+    contentDescription was taken unconditionally. Fix:
+    collectTexts() skips password nodes (children are still
+    walked), and the node's contentDescription is "[REDACTED]"
+    for password nodes. The event path already redacted both
+    fields, and /state exposes no focused text, so these two
+    were the only leaks. Verified by code read; a live check
+    needs a password field with a value, which is still
+    pending.
+72. Phase C-1 P0-02 typeText main thread + recycle
+    (2026-11-06, v1.9.14 / code 24, from GPT review
+    CONS-20261106-014): typeText() ran directly on the HTTP
+    worker thread while every other node action goes through
+    runOnMainThread (A-3), and it never recycled root or
+    target on any path. Fix: typeText() now posts a
+    typeTextInternal() to the main thread (20 s timeout ->
+    503 via the dispatch's outer catch, same as other node
+    ops), and root/target are recycled in try/finally on all
+    paths (target only when it differs from root). No client
+    change — the endpoint shape is unchanged.
+73. Phase C-1 P0-03 batch cache eviction (2026-11-06, v1.9.14
+    / code 24, from GPT review CONS-20261106-014): the
+    LinkedHashMap evicted the eldest entry past 50 even
+    inside the 10-min result + 10-min tombstone window, so a
+    re-sent batch_id could re-execute as a new batch,
+    contradicting the A-4 idempotency guarantee. Fix: the
+    count cap is gone; entries are purged lazily on insert
+    only once past tombstoneUntil, so the map stays bounded
+    by the batches created in the last 20 minutes and a live
+    entry is never evicted. No client change. A live check
+    would need 50+ batches inside 20 minutes and is not
+    run; verified by code read. Phase C-1 (P0-01→P0-03) is
+    complete. APK 66,248 bytes, sha256 9ac40c7f…; 113 tests
+    pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
