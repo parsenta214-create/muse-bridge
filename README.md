@@ -1470,6 +1470,14 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     ACTION_SCROLL_FORWARD/BACKWARD on a scrollable node is a
     separate, not-yet-implemented option. APK 62,152 bytes,
     sha256 fc4d753a…; 99 tests pass in the whole suite.
+    Live test on 1.9.9 (2026-11-06 05:52, X timeline):
+    DPAD_DOWN x5 all returned ok, and focus moved (focused
+    None -> n71, a bottom-half android.view.View) — but the
+    timeline did NOT scroll (identical texts before/after,
+    same posts on screen). Verdict: DPAD moves focus but does
+    not scroll X's timeline, so DPAD is not a usable scroll
+    method for X; swipe stays the scroll method. The bridge
+    side works as designed — the limitation is X's behaviour.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
