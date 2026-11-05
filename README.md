@@ -1606,7 +1606,15 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     503 via the dispatch's outer catch, same as other node
     ops), and root/target are recycled in try/finally on all
     paths (target only when it differs from root). No client
-    change — the endpoint shape is unchanged.
+    change — the endpoint shape is unchanged. Live test
+    2026-11-06 06:35 on 1.9.14 (Muse chat input): type
+    "MUSEテスト" ok, confirmed visually in the field by
+    screenshot, then cleared with type_text("") and the
+    placeholder returned; nothing sent. Note: /state's node
+    text and texts[] did NOT show the typed text even while
+    it was visible — this app's input field does not expose
+    its content via getText(), so the screenshot was the
+    proof, not /state.
 73. Phase C-1 P0-03 batch cache eviction (2026-11-06, v1.9.14
     / code 24, from GPT review CONS-20261106-014): the
     LinkedHashMap evicted the eldest entry past 50 even
