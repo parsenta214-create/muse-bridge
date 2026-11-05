@@ -260,6 +260,10 @@ class MockAppHandler(BaseHTTPRequestHandler):
                      and (pkg is None or e["package"] == pkg)][:limit]
             return self._send_json(200, {"ok": True, "events": shown,
                                          "latest_seq": 4, "dropped": False})
+        if self.path == "/install_status":
+            # Decision 75 (v1.9.16): the install-apk job state.
+            return self._send_json(200, {"ok": True, "status": "idle",
+                                         "detail": ""})
         return self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
@@ -1194,3 +1198,61 @@ def test_app_open_needs_gate(mock_app):
     adapter = ab.AndroidAdapter(actions_enabled=False)
     with pytest.raises(PermissionError):
         adapter.open("https://example.com")
+
+
+# --------------------------------------------------------------------------
+# Decision 75: install_apk / install_status (v1.9.16).
+# --------------------------------------------------------------------------
+
+def test_app_install_apk_url(mock_app):
+    """Decision 75: install_apk posts the https url."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.install_apk(
+        url="https://f-droid.org/repo/com.termux_1002.apk")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/install_apk",
+            {"url": "https://f-droid.org/repo/com.termux_1002.apk"}) in posts
+
+
+def test_app_install_apk_path(mock_app):
+    """Decision 75: install_apk posts a file already on the phone."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.install_apk(path="/sdcard/Download/x.apk")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/install_apk",
+            {"path": "/sdcard/Download/x.apk"}) in posts
+
+
+def test_app_install_apk_neither_or_both(mock_app):
+    """Decision 75: exactly one of url, path — anything else
+    raises ValueError before any request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="exactly one"):
+        adapter.install_apk()
+    with pytest.raises(ValueError, match="exactly one"):
+        adapter.install_apk(url="https://example.com/x.apk",
+                            path="/sdcard/x.apk")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_install_apk_http_rejected(mock_app):
+    """Decision 75: only https downloads are allowed."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="must be https"):
+        adapter.install_apk(url="http://example.com/x.apk")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_install_apk_needs_gate(mock_app):
+    """Decision 75: installing an app changes the device, so it
+    needs --allow-actions."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.install_apk(url="https://example.com/x.apk")
+
+
+def test_app_install_status(mock_app):
+    """Decision 75: install_status reads the job state."""
+    adapter = ab.AndroidAdapter()
+    assert adapter.install_status() == {"ok": True, "status": "idle",
+                                        "detail": ""}

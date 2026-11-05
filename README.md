@@ -1648,6 +1648,34 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     URI → ValueError before any request. APK 66,249 bytes,
     sha256 5e691fa8…; 116 tests pass. D-1 remaining:
     clipboard read/write, notification open/reply.
+75. Install an APK — POST /install_apk + GET /install_status
+    (2026-11-06, v1.9.16 / code 26). `POST /install_apk
+    {"url": "https://...apk"}` downloads the APK on the
+    phone itself (into the app's private cache, no storage
+    permission needed) or `{"path": "/...apk"}` installs a
+    file already on the phone — exactly one of the two.
+    The job runs on its own thread and the call returns
+    {"ok": true, "status": "started"} at once (a ~114 MB
+    download takes minutes on mobile data); PackageInstaller
+    then shows the system confirmation dialog and the USER
+    taps Install. A normal app cannot install silently:
+    INSTALL_PACKAGES is signature-level, so the tap is
+    Android's rule, not a bridge limit. The result arrives
+    on a dynamically-registered BroadcastReceiver
+    (installReceiver) and shows in GET /install_status
+    (idle / downloading / installing / committed / installed
+    / failed) and in BridgeLog. Only https URLs are allowed;
+    400 on a bad request, 409 while a job is running, 422
+    when a given path does not exist. Client:
+    `AndroidAdapter.install_apk(url=..., path=...)` and
+    `install_status()` — the install call is gated, never
+    retried; the status read needs no gate. Termux source
+    (verified 2026-11-06): F-Droid, stable 0.118.3
+    https://f-droid.org/repo/com.termux_1002.apk
+    (~114 MB); latest beta 0.119.0-beta.3 is _1022. APK
+    66,248 bytes, sha256 b8171ab0…; 122 tests pass.
+    This endpoint also covers future bridge self-updates
+    (same flow, the bridge's own APK as the path or URL).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

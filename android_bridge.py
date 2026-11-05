@@ -630,6 +630,31 @@ class AndroidAdapter:
         self._require_actions(f"open({uri})")
         return self._app_post("/open", {"uri": uri})
 
+    def install_apk(self, url=None, path=None) -> dict:
+        """Install an APK (decision 75, v1.9.16): POST
+        /install_apk. Exactly one of url (https, downloaded on
+        the phone by the bridge itself) or path (a file already
+        on the phone). The job runs in the background and the
+        call returns {"ok": true, "status": "started"} at once;
+        PackageInstaller then shows the system confirmation
+        dialog and the USER taps Install — a normal app cannot
+        install silently. Track it with install_status(). Gated
+        by --allow-actions, never retried."""
+        if (url is None) == (path is None):
+            raise ValueError("give exactly one of url, path")
+        if url is not None and not url.startswith("https://"):
+            raise ValueError("url must be https")
+        self._require_actions(f"install_apk({url or path})")
+        body = {"url": url} if url is not None else {"path": path}
+        return self._app_post("/install_apk", body)
+
+    def install_status(self) -> dict:
+        """Install-apk job state (decision 75, v1.9.16): GET
+        /install_status. Read-only: {"ok": true, "status":
+        "idle"|"downloading"|"installing"|"committed"|
+        "installed"|"failed", "detail": "..."}."""
+        return self._app_request("GET", "/install_status")
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 

@@ -6,9 +6,11 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageInstaller;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
@@ -21,14 +23,19 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -77,6 +84,8 @@ import java.util.concurrent.TimeUnit;
  *                         "args":{..}} (v1.9.11: any one-shot node action)
  *   POST /launch_app      {"package":"com.example.app"} (v1.9.12)
  *   POST /open            {"uri":"https://example.com"} (v1.9.15)
+ *   POST /install_apk     {"url":"https://...apk"} or {"path":"/...apk"} (v1.9.16)
+ *   GET  /install_status  (v1.9.16)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -124,6 +133,38 @@ public class HttpBridgeServer {
     private final List<Thread> acceptThreads = new ArrayList<>();
     private volatile ServerState state = ServerState.NEW;
 
+    // Decision 75 (v1.9.16): install-apk job state. One job at a
+    // time; the status is visible via GET /install_status and the
+    // detail goes to BridgeLog. The PackageInstaller result
+    // arrives on this receiver (dynamic registration — the
+    // foreground service outlives the user's tap on the
+    // confirmation dialog).
+    public static final String INSTALL_RESULT_ACTION =
+            "dev.muse.bridge.INSTALL_RESULT";
+    private volatile String installStatus = "idle";
+    private volatile String installDetail = "";
+    private volatile boolean installRunning = false;
+    private final BroadcastReceiver installReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context ctx, Intent intent) {
+            int st = intent.getIntExtra(PackageInstaller.EXTRA_STATUS,
+                    PackageInstaller.STATUS_FAILURE);
+            String msg = intent.getStringExtra(
+                    PackageInstaller.EXTRA_STATUS_MESSAGE);
+            if (st == PackageInstaller.STATUS_SUCCESS) {
+                installStatus = "installed";
+                installDetail = msg == null ? "" : msg;
+                BridgeLog.log("install_result", "success");
+            } else {
+                installStatus = "failed";
+                installDetail = msg == null ? "status=" + st : msg;
+                BridgeLog.log("install_result", "failed status=" + st
+                        + (msg == null ? "" : " " + msg));
+            }
+            installRunning = false;
+        }
+    };
+
     public HttpBridgeServer(int port, TokenProvider tokens, Context context) {
         this.port = port;
         this.tokens = tokens;
@@ -131,6 +172,8 @@ public class HttpBridgeServer {
         // v1.9.3: the debug log reads the previous run's tail and
         // opens the file once, when the server is created.
         BridgeLog.init(this.context);
+        context.registerReceiver(installReceiver,
+                new IntentFilter(INSTALL_RESULT_ACTION));
     }
 
     /** Binds the listeners and starts one dedicated accept thread per
@@ -799,6 +842,57 @@ public class HttpBridgeServer {
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", "open blocked by the system"));
                 }
+            } else if ("/install_status".equals(path) && "GET".equals(method)) {
+                // Decision 75 (v1.9.16): the install-apk job state
+                // (idle / downloading / installing / committed /
+                // installed / failed). Read-only.
+                status = 200;
+                sendJson(out, status, new JSONObject()
+                        .put("ok", true)
+                        .put("status", installStatus)
+                        .put("detail", installDetail));
+            } else if ("/install_apk".equals(path) && "POST".equals(method)) {
+                // Decision 75 (v1.9.16): install an APK. {"url":
+                // "https://...apk"} downloads it on the phone
+                // (the bridge itself fetches it, so installing
+                // Termux does not depend on Termux); {"path":
+                // "/...apk"} installs a file already on the
+                // phone. Exactly one of the two. The job runs on
+                // its own thread — a ~114 MB download takes
+                // minutes on mobile data — and returns "started"
+                // at once; the PackageInstaller then shows the
+                // system confirmation dialog and the USER taps
+                // Install (a normal app cannot install silently:
+                // INSTALL_PACKAGES is signature-level). 400 on a
+                // bad request, 409 while a job is running, 422
+                // when a given path does not exist.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                String url = j.optString("url", null);
+                String apkPath = j.optString("path", null);
+                if ((url == null) == (apkPath == null)) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "give exactly one of url, path"));
+                } else if (url != null && !url.startsWith("https://")) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "url must be https"));
+                } else if (apkPath != null && !new File(apkPath).isFile()) {
+                    status = 422;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "apk file not found: " + apkPath));
+                } else if (installRunning) {
+                    status = 409;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "install already in progress"));
+                } else {
+                    final String fUrl = url;
+                    final String fPath = apkPath;
+                    new Thread(() -> runInstall(fUrl, fPath), "install-apk").start();
+                    status = 200;
+                    sendJson(out, status, new JSONObject().put("ok", true)
+                            .put("status", "started"));
+                }
             } else if ("/batch".equals(path) && "POST".equals(method)) {
                 // Phase 2 (A-4): several actions in one request
                 // (batch_id, protocol_version, tree_hash, actions[]).
@@ -1170,6 +1264,96 @@ public class HttpBridgeServer {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
         return true;
+    }
+
+    /**
+     * Install-apk job (decision 75, v1.9.16). Runs on its own
+     * thread: downloads the APK when a URL was given (into the
+     * app's private cache, so no storage permission is needed),
+     * then hands it to PackageInstaller and commits. The
+     * commit shows the system confirmation dialog; the result
+     * (installed / failed) arrives on installReceiver. The
+     * downloaded file is deleted after the commit. Never logs
+     * the APK bytes, only the URL and sizes.
+     */
+    private void runInstall(String url, String apkPath) {
+        installRunning = true;
+        File apk = null;
+        boolean downloaded = false;
+        try {
+            if (url != null) {
+                installStatus = "downloading";
+                installDetail = url;
+                BridgeLog.log("install_download_start", url);
+                String name = url.substring(url.lastIndexOf('/') + 1);
+                if (name.isEmpty() || name.contains("..")) {
+                    name = "app.apk";
+                }
+                File dir = new File(context.getCacheDir(), "install");
+                dir.mkdirs();
+                apk = new File(dir, name);
+                HttpURLConnection conn =
+                        (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(30000);
+                conn.connect();
+                if (conn.getResponseCode() != HttpURLConnection.HTTP_OK) {
+                    throw new java.io.IOException(
+                            "download HTTP " + conn.getResponseCode());
+                }
+                long total = 0;
+                try (InputStream in = conn.getInputStream();
+                     OutputStream out = new FileOutputStream(apk)) {
+                    byte[] buf = new byte[8192];
+                    int n;
+                    while ((n = in.read(buf)) != -1) {
+                        out.write(buf, 0, n);
+                        total += n;
+                    }
+                }
+                downloaded = true;
+                BridgeLog.log("install_downloaded", total + " bytes");
+            } else {
+                apk = new File(apkPath);
+            }
+            installStatus = "installing";
+            installDetail = apk.getName();
+            PackageInstaller installer =
+                    context.getPackageManager().getPackageInstaller();
+            PackageInstaller.SessionParams params =
+                    new PackageInstaller.SessionParams(
+                            PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+            int sessionId = installer.createSession(params);
+            PackageInstaller.Session session = installer.openSession(sessionId);
+            try (OutputStream out = session.openWrite("package", 0, -1);
+                 InputStream in = new FileInputStream(apk)) {
+                byte[] buf = new byte[8192];
+                int n;
+                while ((n = in.read(buf)) != -1) {
+                    out.write(buf, 0, n);
+                }
+                session.fsync(out);
+            }
+            Intent resultIntent = new Intent(INSTALL_RESULT_ACTION);
+            resultIntent.setPackage(context.getPackageName());
+            PendingIntent pi = PendingIntent.getBroadcast(context, sessionId,
+                    resultIntent, PendingIntent.FLAG_UPDATE_CURRENT
+                            | PendingIntent.FLAG_MUTABLE);
+            session.commit(pi.getIntentSender());
+            session.close();
+            if (downloaded) {
+                apk.delete();
+            }
+            installStatus = "committed";
+            installDetail = "waiting for the install confirmation";
+            BridgeLog.log("install_committed", apk.getName());
+        } catch (Exception e) {
+            installStatus = "failed";
+            installDetail = e.getMessage() == null
+                    ? e.getClass().getSimpleName() : e.getMessage();
+            installRunning = false;
+            BridgeLog.log("install_failed", installDetail);
+        }
     }
 
     private static class ServiceUnavailable extends Exception {
