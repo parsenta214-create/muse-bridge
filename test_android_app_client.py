@@ -36,6 +36,10 @@ def _tiny_png() -> bytes:
 
 class MockAppHandler(BaseHTTPRequestHandler):
     requests = []
+    # Test hook for the retry policy: {(method, path): N} — answer
+    # the next N calls to that endpoint with 503, then behave
+    # normally. Reset by the fixture.
+    fail_next = {}
     # A-3 (v1.9): how /state answers, per test. "normal" always returns
     # a stable snapshot; "unstable_then_same" returns an unstable
     # snapshot first, then the same tree hash stable; "unstable_then_
@@ -66,6 +70,10 @@ class MockAppHandler(BaseHTTPRequestHandler):
         MockAppHandler.requests.append(("GET", self.path, None))
         if not self._check_token():
             return self._send_json(401, {"ok": False, "error": "unauthorized"})
+        key = ("GET", self.path.split("?")[0])
+        if MockAppHandler.fail_next.get(key, 0) > 0:
+            MockAppHandler.fail_next[key] -= 1
+            return self._send_json(503, {"ok": False, "error": "overloaded (test hook)"})
         if self.path == "/health":
             return self._send_json(200, {"ok": True, "service": "muse-bridge",
                                          "version": 1, "accessibility": True,
@@ -183,6 +191,10 @@ class MockAppHandler(BaseHTTPRequestHandler):
         MockAppHandler.requests.append(("POST", self.path, payload))
         if not self._check_token():
             return self._send_json(401, {"ok": False, "error": "unauthorized"})
+        key = ("POST", self.path.split("?")[0])
+        if MockAppHandler.fail_next.get(key, 0) > 0:
+            MockAppHandler.fail_next[key] -= 1
+            return self._send_json(503, {"ok": False, "error": "overloaded (test hook)"})
         if self.path == "/batch":
             # A-4 (v1.9): a realistic batch response, with the status,
             # payload hash, and completed/failed action ids.
@@ -204,6 +216,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
 @pytest.fixture()
 def mock_app(monkeypatch):
     MockAppHandler.requests.clear()
+    MockAppHandler.fail_next.clear()
     MockAppHandler.state_mode = "normal"
     MockAppHandler.state_calls = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockAppHandler)
@@ -489,6 +502,82 @@ def test_app_unstable_snapshot_changed_raises_v19(mock_app):
     with pytest.raises(ab.TransportError, match="stale snapshot"):
         adapter.click_node("n5", state["tree_hash"])
     assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_get_retries_transient_503(mock_app, monkeypatch):
+    """Client improvement 1: a GET that fails twice with 503 succeeds
+    on the third attempt (reads are idempotent)."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    MockAppHandler.fail_next[("GET", "/state")] = 2
+    adapter = ab.AndroidAdapter(transport="app")
+    state = adapter.get_current_state()
+    assert state["tree_hash"] == 123456
+    gets = [r for r in MockAppHandler.requests
+            if r[0] == "GET" and r[1] == "/state"]
+    assert len(gets) == 3
+
+
+def test_app_batch_retries_transient_503(mock_app, monkeypatch):
+    """Client improvement 1: POST /batch retries with the SAME
+    batch_id (server-side idempotency, A-4), so a transient 503
+    does not lose the batch."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    MockAppHandler.fail_next[("POST", "/batch")] = 2
+    adapter = ab.AndroidAdapter(transport="app", actions_enabled=True)
+    result = adapter.batch("retry-1", 123456,
+                           [{"action_id": "a1", "type": "wait", "ms": 100}])
+    assert result["status"] == "completed"
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/batch"]
+    assert len(posts) == 3
+    assert all(p[2]["batch_id"] == "retry-1" for p in posts)
+
+
+def test_app_click_does_not_retry(mock_app, monkeypatch):
+    """Client improvement 1: a non-idempotent POST (click) runs
+    exactly once — a retry could double-tap."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    MockAppHandler.fail_next[("POST", "/click")] = 1
+    adapter = ab.AndroidAdapter(transport="app", actions_enabled=True)
+    with pytest.raises(ab.TransportError):
+        adapter.click(100, 100)
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/click"]
+    assert len(posts) == 1
+
+
+def test_app_get_fails_fast_on_400(mock_app, monkeypatch):
+    """Client improvement 1: a 4xx is not retried — it cannot heal."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    adapter = ab.AndroidAdapter(transport="app")
+    with pytest.raises(ab.TransportError):
+        adapter._app_request("GET", "/state?err=400")
+    gets = [r for r in MockAppHandler.requests
+            if r[0] == "GET" and r[1].startswith("/state?err=400")]
+    assert len(gets) == 1
+
+
+def test_bridge_error_classifier():
+    """Client improvement 1: the retry classifier (unit test)."""
+    assert ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 503 for GET /health: {} (overloaded)"))
+    assert ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 500 for GET /state: {} (unexpected bridge error)"))
+    assert not ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 409 for POST /batch: {} (unexpected bridge error)"))
+    assert not ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 401 for GET /state: {} (wrong token)"))
+    assert not ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 422 for POST /click_node: {} (unexpected bridge error)"))
+    reset = ab.TransportError("cannot reach the app at http://127.0.0.1:8080")
+    reset.__cause__ = ConnectionResetError(104, "Connection reset by peer")
+    assert ab._is_retryable_bridge_error(reset)
+    refused = ab.TransportError("cannot reach the app at http://127.0.0.1:8080")
+    refused.__cause__ = ConnectionRefusedError(111, "Connection refused")
+    assert ab._is_retryable_bridge_error(refused)
+    bad = ab.TransportError("cannot reach the app at http://127.0.0.1:8080")
+    bad.__cause__ = ValueError("bad value")
+    assert not ab._is_retryable_bridge_error(bad)
 
 
 def test_app_logs_returns_lines_v193(mock_app):

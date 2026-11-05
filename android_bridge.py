@@ -45,6 +45,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -52,6 +53,12 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+import urllib.error
+
+import retry  # Local sibling (retry.py): backoff math only; the bridge
+# classifier below is its own, because the bridge retries a different
+# set of failures than the Gemini API.
 
 # No hardcoded phone address: the phone's Tailscale IP and Termux user
 # are device-specific and must come from the environment (ANDROID_PHONE_IP,
@@ -154,6 +161,70 @@ class TransportError(RuntimeError):
     pass
 
 
+# --------------------------------------------------------------------------
+# Retry policy for the bridge client (client improvement 1).
+# --------------------------------------------------------------------------
+# Retried: reads (GET — /health, /state, /events, /logs,
+# /capture_screen) and POST /batch. Reads are idempotent, and a
+# re-sent batch_id is answered from the server cache (A-4) instead
+# of executing twice. NOT retried: click, swipe, type_text,
+# press_key, click_node, type_node, notify — a second send could
+# double-execute the action (or double-post a notification).
+# Only transient failures are retried: HTTP 500/502/503/504 and
+# transport failures (reset, refused, aborted, timeout). 4xx fail
+# fast — retrying a bad request, a wrong token, or a stale snapshot
+# cannot help, and the caller must re-plan (409/410/422).
+APP_MAX_ATTEMPTS = 3
+APP_RETRY_BASE_DELAY_S = 1.0
+APP_RETRYABLE_STATUS = {500, 502, 503, 504}
+
+
+def _is_retryable_bridge_error(exc: BaseException) -> bool:
+    """True when a bridge call failed transiently and may be retried."""
+    status = retry.extract_status(exc)
+    if status is not None:
+        return status in APP_RETRYABLE_STATUS
+    cause = exc
+    while getattr(cause, "__cause__", None) is not None:
+        cause = cause.__cause__
+    if isinstance(cause, (urllib.error.URLError, ConnectionResetError,
+                          BrokenPipeError, TimeoutError, socket.timeout)):
+        return True
+    if isinstance(cause, OSError) and cause.errno in (
+            errno.ECONNRESET, errno.ECONNREFUSED, errno.ECONNABORTED,
+            errno.ETIMEDOUT, errno.EPIPE):
+        return True
+    return False
+
+
+def _call_with_bridge_retry(fn, method: str, path: str):
+    """Call fn(), retrying transient bridge failures (APP_MAX_ATTEMPTS).
+
+    The delay reuses retry.py's full-jitter backoff. Each retry is
+    noted on stderr (method + path + status or error type only —
+    never the token, and never a request body).
+    """
+    last_error = None
+    for attempt in range(1, APP_MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - classify, then re-raise
+            last_error = exc
+            if not _is_retryable_bridge_error(exc) or attempt == APP_MAX_ATTEMPTS:
+                raise
+            status = retry.extract_status(exc)
+            cause = exc
+            while getattr(cause, "__cause__", None) is not None:
+                cause = cause.__cause__
+            reason = f"HTTP {status}" if status is not None else type(cause).__name__
+            delay = retry.backoff_delay_s(attempt, base_delay_s=APP_RETRY_BASE_DELAY_S)
+            print(f"bridge: retry {attempt}/{APP_MAX_ATTEMPTS} for "
+                  f"{method} {path} after {reason} "
+                  f"(sleep {delay:.1f}s)", file=sys.stderr)
+            time.sleep(delay)
+    raise last_error  # Unreachable; keeps the control flow explicit.
+
+
 def ssh_base_cmd() -> list:
     """ssh invocation for Termux over the tunnel proxy (no interactive auth)."""
     if not PHONE_IP or not TERMUX_USER:
@@ -244,7 +315,11 @@ def _app_opener():
 
 
 def check_app() -> dict:
-    """Report bridge-app transport prerequisites (one read-only HTTP probe)."""
+    """Report bridge-app transport prerequisites (one read-only HTTP probe).
+
+    The probe is a GET /health, so it retries transient failures
+    (same policy as the adapter's reads).
+    """
     import urllib.error
     import urllib.request
 
@@ -254,11 +329,15 @@ def check_app() -> dict:
             "detail": f"ANDROID_APP_TOKEN is not set (app URL is {APP_URL}); "
                       "enter the token from the phone's Muse Bridge app",
         }
-    try:
+
+    def probe():
         req = urllib.request.Request(
             f"{APP_URL}/health", headers={"X-Bridge-Token": APP_TOKEN})
         with _app_opener().open(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
+
+    try:
+        data = _call_with_bridge_retry(probe, "GET", "/health")
     except urllib.error.HTTPError as exc:
         return {"ok": False, "detail": f"app returned HTTP {exc.code} (wrong token?)"}
     except Exception as exc:  # noqa: BLE001 - report the probe failure
@@ -501,7 +580,23 @@ class AndroidAdapter:
 
         The token comes from the ANDROID_APP_TOKEN env var only and is
         never logged. Raises TransportError on any failure.
+        Reads (GET) and POST /batch retry transient failures (see the
+        retry policy above the TransportError class); every other POST
+        runs exactly once, so an action is never double-executed.
         """
+        retryable = (method == "GET") or (method == "POST" and path == "/batch")
+        if not retryable:
+            return self._app_request_once(method, path, payload,
+                                          expect_png, expect_image)
+        return _call_with_bridge_retry(
+            lambda: self._app_request_once(method, path, payload,
+                                           expect_png, expect_image),
+            method, path)
+
+    def _app_request_once(self, method: str, path: str,
+                          payload: dict | None = None,
+                          expect_png: bool = False, expect_image: bool = False):
+        """A single attempt of _app_request (no retry)."""
         import urllib.error
         import urllib.request
 

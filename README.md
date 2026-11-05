@@ -1106,6 +1106,22 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     and check /health with no manual start (Tailscale Always-on
     VPN still needs the user's one-time setting for the network
     path to be automatic too).
+58. Client retry policy (2026-11-06 04:29, client improvement 1,
+    user chose it first): _app_request retries transient failures
+    (max 3 attempts, full-jitter backoff from retry.py). Retried:
+    GETs (idempotent reads) and POST /batch (same batch_id, safe
+    by A-4 server idempotency). NOT retried: click, swipe,
+    type_text, press_key, click_node, type_node, notify — a second
+    send could double-execute. Only transient failures are
+    retried: HTTP 500/502/503/504 and transport failures (reset,
+    refused, aborted, timeout); 4xx fail fast. check_app()'s
+    /health probe retries the same way (fewer false "down"
+    reports from the health cron). Each retry is noted on stderr
+    (method + path + status/type only — never the token or a body).
+    Tests: 5 new (GET retry, batch retry with the same batch_id,
+    click runs exactly once, 400 fails fast, classifier unit
+    test); 43 passed total. Live regression: the A-5 verify
+    script still passes 12/12 on the real phone (v1.9.5).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
