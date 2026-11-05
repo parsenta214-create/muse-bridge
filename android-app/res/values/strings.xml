@@ -9,6 +9,7 @@
     <string name="btn_start">Start bridge</string>
     <string name="btn_stop">Stop bridge</string>
     <string name="btn_accessibility">Open accessibility settings</string>
+    <string name="btn_notification">Open notification access settings</string>
     <string name="btn_add_tile">クイック設定に追加</string>
     <string name="tile_label">Muse Bridge</string>
     <string name="toast_tile_added">クイック設定に追加したよ。タイルをタップするとオンオフできるよ。</string>

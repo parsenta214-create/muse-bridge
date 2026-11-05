@@ -1388,7 +1388,29 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     /health carrying notification_listener, and the two 503
     strings. PoC: add build_notifications_query +
     parse_notifications in a separate PoC update (not Plan A
-    Step 1).
+    Step 1). Implemented 2026-11-06 (v1.9.7 / code 17):
+    BridgeNotificationListener.java (static event buffer,
+    cap 200 events; onListenerConnected seeds from
+    getActiveNotifications() with dedupe by key; onNotification
+    Posted records "posted" or "updated" by whether the key is
+    live; onNotificationRemoved records a tombstone with no
+    title/text), GET /notifications in HttpBridgeServer
+    (?package=&since=&limit=, limit clamped 1-200; 503
+    "notification_listener_access_not_granted" vs 503
+    "notification_listener_not_connected"), /health gains
+    "notification_listener" (the grant, surfaced through
+    check_app() too), MainActivity status line + a button
+    opening the notification-access settings. VM client:
+    notifications(package=None, since=0, limit=100), read-only,
+    no gate. Lessons found while building: (1)
+    Settings.Secure.ENABLED_NOTIFICATION_LISTENERS is not a
+    public SDK constant — the grant check reads the literal
+    setting name "enabled_notification_listeners"; (2)
+    BridgeLog.log takes (event, detail), two args — the
+    listener logs ("notification", type) only, never content
+    or package names. APK 62,150 bytes, sha256 a5098b1f…;
+    mock /notifications with posted/updated/ongoing/tombstone
+    canned data, 98 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

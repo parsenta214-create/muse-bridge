@@ -392,10 +392,12 @@ def check_app() -> dict:
     seconds = round(time.monotonic() - probe_start, 3)
     if data.get("ok") and data.get("accessibility"):
         return {"ok": True, "detail": "app reachable, accessibility service enabled",
+                "notification_listener": data.get("notification_listener"),
                 "seconds": seconds}
     if data.get("ok"):
         return {"ok": None,
                 "detail": "app reachable but the accessibility service is not enabled on the phone",
+                "notification_listener": data.get("notification_listener"),
                 "seconds": seconds}
     return {"ok": False, "detail": f"app health check failed: {data}",
             "seconds": seconds}
@@ -586,6 +588,30 @@ class AndroidAdapter:
         import urllib.parse
         params = urllib.parse.urlencode({"since": since, "limit": limit})
         result = self._app_request("GET", f"/events?{params}")
+        result["transport"] = "app"
+        return result
+
+    def notifications(self, package=None, since=0, limit=100):
+        """Return the phone's notification event stream (decision 63,
+        v1.9.7). Read-only (no --allow-actions gate): it only reports
+        what the phone received. Each event is posted / updated /
+        removed (a removal is a tombstone with its own seq, so a
+        client polling with since= sees it). `since` is valid only
+        within the phone's current process lifetime (seq resets when
+        the bridge process restarts). `dropped` true means the buffer
+        evicted events the caller never saw — refetch with since=0.
+        The server returns every package; `package` filters
+        client-side. Raises TransportError with the server's 503 text
+        when the listener is not granted
+        ("notification_listener_access_not_granted") or not connected
+        ("notification_listener_not_connected").
+        """
+        import urllib.parse
+        params = {"since": since, "limit": limit}
+        if package is not None:
+            params["package"] = package
+        query = urllib.parse.urlencode(params)
+        result = self._app_request("GET", f"/notifications?{query}")
         result["transport"] = "app"
         return result
 

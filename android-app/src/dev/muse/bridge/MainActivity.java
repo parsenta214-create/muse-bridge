@@ -126,6 +126,13 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             }
         });
+        Button notif = findViewById(R.id.notification_button);
+        notif.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
+            }
+        });
         Button addTile = findViewById(R.id.add_tile_button);
         addTile.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -200,6 +207,12 @@ public class MainActivity extends Activity {
                 .append(isAccessibilityEnabled(this) ? "enabled" : "NOT enabled");
         if (!isAccessibilityEnabled(this)) {
             status.append(" — open accessibility settings and turn on Muse Bridge");
+        }
+        status.append("\nNotification access: ")
+                .append(BridgeNotificationListener.isAccessGranted(this)
+                        ? "granted" : "NOT granted");
+        if (!BridgeNotificationListener.isAccessGranted(this)) {
+            status.append(" — open notification access settings and turn on Muse Bridge");
         }
         statusText.setText(status.toString());
 

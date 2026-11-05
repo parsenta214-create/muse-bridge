@@ -88,6 +88,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self._send_json(200, {"ok": True, "service": "muse-bridge",
                                          "version": 1, "accessibility": True,
+                                         "notification_listener": True,
                                          "app_version": "1.9.5",
                                          "app_version_code": 15})
         if self.path.startswith("/logs"):
@@ -222,6 +223,43 @@ class MockAppHandler(BaseHTTPRequestHandler):
             return self._send_json(200, {"ok": True, "events": shown,
                                          "latest_seq": 2, "dropped": False,
                                          "tree_hash": 123456, "revision": 7})
+        if self.path == "/notifications" or self.path.startswith("/notifications?"):
+            # Decision 63 (v1.9.7): the notification event stream.
+            # Canned data: a post, an update of the same key, an
+            # ongoing post from another package, and a tombstone
+            # removal of the first key.
+            import urllib.parse
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            since = int(query.get("since", ["0"])[0])
+            limit = int(query.get("limit", ["100"])[0])
+            pkg = query.get("package", [None])[0]
+            all_notifs = [
+                {"seq": 1, "type": "posted",
+                 "key": "0|com.example.chat|1|null|10001",
+                 "package": "com.example.chat", "id": 1, "tag": None,
+                 "title": "Aya", "text": "こんにちは", "t": 1700000000000,
+                 "ongoing": False, "group_summary": False},
+                {"seq": 2, "type": "updated",
+                 "key": "0|com.example.chat|1|null|10001",
+                 "package": "com.example.chat", "id": 1, "tag": None,
+                 "title": "Aya", "text": "こんにちは！元気？",
+                 "t": 1700000005000, "ongoing": False, "group_summary": False},
+                {"seq": 3, "type": "posted",
+                 "key": "0|com.example.music|2|null|10002",
+                 "package": "com.example.music", "id": 2, "tag": None,
+                 "title": "Now playing", "text": "Song — Artist",
+                 "t": 1700000008000, "ongoing": True, "group_summary": False},
+                {"seq": 4, "type": "removed",
+                 "key": "0|com.example.chat|1|null|10001",
+                 "package": "com.example.chat", "id": 1, "tag": None,
+                 "title": "", "text": "", "t": 1700000000000,
+                 "ongoing": False, "group_summary": False,
+                 "removed_t": 1700000010000},
+            ]
+            shown = [e for e in all_notifs if e["seq"] > since
+                     and (pkg is None or e["package"] == pkg)][:limit]
+            return self._send_json(200, {"ok": True, "events": shown,
+                                         "latest_seq": 4, "dropped": False})
         return self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
@@ -883,3 +921,68 @@ def test_app_state_device_object(mock_app):
                       "network": "wifi", "interactive": True}
     # No new client method: the dict flows through get_current_state().
     assert not hasattr(adapter, "device")
+
+
+# --------------------------------------------------------------------------
+# Decision 63: notification reading (v1.9.7).
+# --------------------------------------------------------------------------
+
+def test_app_notifications_fetch(mock_app):
+    """Decision 63: /notifications returns the event stream: a post,
+    an update of the same key, an ongoing post, and a tombstone
+    removal (title/text empty, removed_t set)."""
+    adapter = ab.AndroidAdapter()
+    result = adapter.notifications()
+    assert result["ok"] is True
+    assert result["latest_seq"] == 4
+    assert result["dropped"] is False
+    events = result["events"]
+    assert [e["seq"] for e in events] == [1, 2, 3, 4]
+    assert [e["type"] for e in events] == ["posted", "updated",
+                                           "posted", "removed"]
+    assert events[1]["key"] == events[0]["key"]  # update, same key
+    assert events[2]["ongoing"] is True
+    tombstone = events[3]
+    assert tombstone["key"] == events[0]["key"]
+    assert tombstone["title"] == "" and tombstone["text"] == ""
+    assert tombstone["removed_t"] == 1700000010000
+
+
+def test_app_notifications_since_sees_tombstone(mock_app):
+    """Decision 63: a client that already fetched seq=3 still learns
+    of the removal via since=3 — the tombstone has its own seq."""
+    adapter = ab.AndroidAdapter()
+    result = adapter.notifications(since=3)
+    assert [e["seq"] for e in result["events"]] == [4]
+    assert result["events"][0]["type"] == "removed"
+
+
+def test_app_notifications_package_filter(mock_app):
+    """Decision 63: ?package= filters client-side; the server still
+    returns every package when no filter is given."""
+    adapter = ab.AndroidAdapter()
+    result = adapter.notifications(package="com.example.music")
+    assert [e["seq"] for e in result["events"]] == [3]
+    assert all(e["package"] == "com.example.music"
+               for e in result["events"])
+
+
+def test_app_notifications_limit(mock_app):
+    """Decision 63: limit caps the returned events."""
+    adapter = ab.AndroidAdapter()
+    result = adapter.notifications(limit=2)
+    assert [e["seq"] for e in result["events"]] == [1, 2]
+    assert result["latest_seq"] == 4
+
+
+def test_app_notifications_is_read_only(mock_app):
+    """Decision 63: notifications() needs no --allow-actions gate,
+    like events()."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    assert adapter.notifications()["ok"] is True
+
+
+def test_app_health_notification_listener_flag(mock_app):
+    """Decision 63: /health carries notification_listener (the grant,
+    not the connection state)."""
+    assert ab.check_app()["notification_listener"] is True

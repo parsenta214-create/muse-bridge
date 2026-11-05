@@ -70,6 +70,11 @@
         android:layout_height="wrap_content"
         android:text="@string/btn_accessibility" />
     <Button
+        android:id="@+id/notification_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/btn_notification" />
+    <Button
         android:id="@+id/add_tile_button"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"

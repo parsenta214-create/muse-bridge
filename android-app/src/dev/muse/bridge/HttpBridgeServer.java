@@ -57,6 +57,9 @@ import java.util.concurrent.TimeUnit;
  *                         v1.8: installed app version)
  *   GET  /events?since=..&limit=.. -> {"events":[..],"latest_seq":..,
  *                         "dropped":..,"tree_hash":..,"revision":..} (v1.6)
+ *   GET  /notifications?package=..&since=..&limit=.. -> {"events":[..],
+ *                         "latest_seq":..,"dropped":..} (v1.9.7; 503 when
+ *                         the listener is not granted / not connected)
  *   POST /click           {"x":..,"y":..}
  *   POST /click_node      {"node_id":"..","tree_hash":..} (v1.5)
  *   POST /type_node       {"node_id":"..","tree_hash":..,"text":".."} (v1.5)
@@ -426,7 +429,9 @@ public class HttpBridgeServer {
                         .put("version", 1)
                         .put("app_version", AppVersion.name(context))
                         .put("app_version_code", AppVersion.code(context))
-                        .put("accessibility", svc != null));
+                        .put("accessibility", svc != null)
+                        .put("notification_listener",
+                                BridgeNotificationListener.isAccessGranted(context)));
             } else if ("/capture_screen".equals(path)) {
                 if (svc == null) {
                     status = 503;
@@ -584,6 +589,61 @@ public class HttpBridgeServer {
                             .put("dropped", r.dropped)
                             .put("tree_hash", r.treeHash)
                             .put("revision", r.revision));
+                }
+            } else if ("/notifications".equals(path)) {
+                // Decision 63 (v1.9.7): the notification event stream.
+                // Needs neither the accessibility service nor the
+                // bridge token beyond the check every endpoint gets.
+                // 503 when the listener is not granted, and a
+                // different 503 when granted but not connected.
+                if (!BridgeNotificationListener.isAccessGranted(context)) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "notification_listener_access_not_granted"));
+                } else if (BridgeNotificationListener.getInstance() == null) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "notification_listener_not_connected"));
+                } else {
+                    long since = parseLong(queryParam(query, "since"), 0);
+                    int limit = parseInt(queryParam(query, "limit"), 100);
+                    if (limit < 1) {
+                        limit = 1;
+                    }
+                    if (limit > 200) {
+                        limit = 200;
+                    }
+                    String pkg = queryParam(query, "package");
+                    if (pkg != null && pkg.isEmpty()) {
+                        pkg = null;
+                    }
+                    BridgeNotificationListener.NotificationsResult nr =
+                            BridgeNotificationListener.getEvents(since, limit, pkg);
+                    JSONArray notifs = new JSONArray();
+                    for (BridgeNotificationListener.NotificationEvent e : nr.events) {
+                        JSONObject o = new JSONObject()
+                                .put("seq", e.seq)
+                                .put("type", e.type)
+                                .put("key", e.key)
+                                .put("package", e.packageName)
+                                .put("id", e.id)
+                                .put("tag", e.tag == null ? JSONObject.NULL : e.tag)
+                                .put("title", e.title)
+                                .put("text", e.text)
+                                .put("t", e.t)
+                                .put("ongoing", e.ongoing)
+                                .put("group_summary", e.groupSummary);
+                        if ("removed".equals(e.type)) {
+                            o.put("removed_t", e.removedT);
+                        }
+                        notifs.put(o);
+                    }
+                    status = 200;
+                    sendJson(out, status, new JSONObject()
+                            .put("ok", true)
+                            .put("events", notifs)
+                            .put("latest_seq", nr.latestSeq)
+                            .put("dropped", nr.dropped));
                 }
             } else if ("/click_node".equals(path) && "POST".equals(method)) {
                 // Phase 2: click by node id (tree_hash from the /state
