@@ -73,6 +73,7 @@ import java.util.concurrent.TimeUnit;
  *                         "direction":"forward"|"backward"} (v1.9.10)
  *   POST /node_action     {"node_id":"..","tree_hash":..,"action":"..",
  *                         "args":{..}} (v1.9.11: any one-shot node action)
+ *   POST /launch_app      {"package":"com.example.app"} (v1.9.12)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -744,6 +745,25 @@ public class HttpBridgeServer {
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", e.getMessage()));
                 } catch (BridgeAccessibilityService.NodeNotFoundException e) {
+                    status = 422;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                }
+            } else if ("/launch_app".equals(path) && "POST".equals(method)) {
+                // Decision 69 (v1.9.12): launch an app by package
+                // name. 422 when the package is not installed or has
+                // no launcher; 503 when Android refuses the start
+                // (background-activity-start restriction) — fall back
+                // to tapping the home-screen icon.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                try {
+                    boolean ok = svc.launchApp(j.getString("package"));
+                    status = ok ? 200 : 503;
+                    sendJson(out, status, new JSONObject().put("ok", ok)
+                            .put("error", ok ? JSONObject.NULL
+                                    : "launch blocked by the system"));
+                } catch (IllegalArgumentException e) {
                     status = 422;
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", e.getMessage()));

@@ -602,6 +602,20 @@ class AndroidAdapter:
                               {"node_id": node_id, "tree_hash": tree_hash,
                                "action": action, "args": args})
 
+    def launch_app(self, package: str) -> dict:
+        """Launch an app by package name (decision 69, v1.9.12):
+        POST /launch_app. The bridge asks the PackageManager for
+        the package's launcher intent and starts it — no home
+        screen hunt, no icon tap. 422 when the package is not
+        installed or has no launcher; 503 when Android refuses
+        the start (background-activity-start restriction — fall
+        back to tapping the icon). Gated by --allow-actions,
+        never retried."""
+        if not package:
+            raise ValueError("package must not be empty")
+        self._require_actions(f"launch_app({package})")
+        return self._app_post("/launch_app", {"package": package})
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 

@@ -1551,6 +1551,23 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     quirk (advertised is not performed). focus (ACTION_FOCUS)
     on a post text node: ok. APK 62,150 bytes, sha256
     3a0935f1…; 110 tests pass in the whole suite.
+69. Direct app launch (2026-11-06, v1.9.12 / code 22): until
+    now opening an app meant HOME, swiping to its home-screen
+    page, and tapping the icon. POST /launch_app
+    {"package": "com.twitter.android"} asks the
+    PackageManager for the package's launcher intent and starts
+    it from the bridge service (FLAG_ACTIVITY_NEW_TASK, which
+    a Service context needs). No accessibility work, so it runs
+    on the HTTP worker thread with no main-thread hop. 422
+    when the package is not installed or has no launcher;
+    503 "launch blocked by the system" when Android refuses
+    the start (background-activity-start restriction) — fall
+    back to tapping the icon then. VM client:
+    launch_app(package), gated by --allow-actions, never
+    retried, empty package raises ValueError before any
+    request. Live test on X is still pending (needs the user
+    to install 1.9.12). APK 62,150 bytes, sha256 9f04190a…;
+    113 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

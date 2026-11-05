@@ -1134,3 +1134,33 @@ def test_app_node_action_all_names_known(mock_app):
             args = {"text": "x"}
         assert adapter.node_action("n3", 123456, name, args)["ok"] is True
     assert len(ab.AndroidAdapter.NODE_ACTIONS) == 32
+
+
+# --------------------------------------------------------------------------
+# Decision 69: launch_app (v1.9.12).
+# --------------------------------------------------------------------------
+
+def test_app_launch_app(mock_app):
+    """Decision 69: launch_app posts the package name."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.launch_app("com.twitter.android")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/launch_app",
+            {"package": "com.twitter.android"}) in posts
+
+
+def test_app_launch_app_empty_package(mock_app):
+    """Decision 69: an empty package raises ValueError before any
+    request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="must not be empty"):
+        adapter.launch_app("")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_launch_app_needs_gate(mock_app):
+    """Decision 69: launch_app changes the screen, so it needs
+    --allow-actions."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.launch_app("com.twitter.android")
