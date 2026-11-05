@@ -1089,6 +1089,23 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Tailscale start. Open follow-up: bridge auto-start at boot
     (BOOT_COMPLETED receiver) and Tailscale Always-on VPN, so the
     whole chain comes back without him.
+57. Bridge auto-start at boot (2026-11-06 04:24, v1.9.5,
+    versionCode 15, user-approved): BootReceiver listens for
+    BOOT_COMPLETED and starts BridgeService (foreground service;
+    BOOT_COMPLETED is one of the cases where Android lets an app
+    start a foreground service from the background, and the
+    service calls startForeground() immediately in onCreate).
+    RECEIVE_BOOT_COMPLETED permission + exported receiver in the
+    manifest. The receiver also logs a "boot" line (BridgeLog.init
+    first, so it is persisted, not just in the ring). Caveat: a
+    freshly installed app does not receive BOOT_COMPLETED until it
+    has been opened once — open the app after installing, then the
+    next boot works. The accessibility service stays enabled
+    across a reboot (system setting), so the bridge comes up fully
+    working. Verification pending: install, open once, reboot,
+    and check /health with no manual start (Tailscale Always-on
+    VPN still needs the user's one-time setting for the network
+    path to be automatic too).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
