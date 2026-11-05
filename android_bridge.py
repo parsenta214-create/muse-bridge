@@ -425,6 +425,19 @@ class AndroidAdapter:
             raise TransportError("notify is only available on the app transport")
         return self._app_post("/notify", {"title": title, "text": text})
 
+    def logs(self, limit: int = 100) -> dict:
+        """Return the bridge's debug log (v1.9.3, app transport only).
+
+        Pull-based: the phone never pushes logs anywhere. The log
+        holds key events only (server start/stop, bind results,
+        accept failures, error-status counts, batch outcomes) — never
+        request bodies, node text, or tokens. `lines` is the current
+        run; `previous_lines` is the previous run's tail.
+        """
+        if self.transport != "app":
+            raise TransportError("logs is only available on the app transport")
+        return self._app_request("GET", f"/logs?limit={limit}")
+
     def events(self, since: int = 0, limit: int = 100) -> dict:
         """Return the bridge's recorded accessibility-event history
         (Phase 3, v1.6). Read-only (no --allow-actions gate): it only

@@ -109,6 +109,9 @@ public class HttpBridgeServer {
         this.port = port;
         this.tokens = tokens;
         this.context = context.getApplicationContext();
+        // v1.9.3: the debug log reads the previous run's tail and
+        // opens the file once, when the server is created.
+        BridgeLog.init(this.context);
     }
 
     /** Binds the listeners and starts one dedicated accept thread per
@@ -140,8 +143,11 @@ public class HttpBridgeServer {
                 acceptThreads.add(t);
                 t.start();
                 Log.i(TAG, "listening on " + addr.getHostAddress() + ":" + port);
+                BridgeLog.log("listen", addr.getHostAddress() + ":" + port);
             } catch (Exception e) {
                 Log.w(TAG, "cannot bind " + addr.getHostAddress() + ": " + e.getMessage());
+                BridgeLog.log("bind-failed",
+                        addr.getHostAddress() + ": " + e.getMessage());
             }
         }
         if (listeners.isEmpty()) {
@@ -149,9 +155,11 @@ public class HttpBridgeServer {
             workers.shutdownNow();
             workers = null;
             Log.e(TAG, "no listener bound; server FAILED");
+            BridgeLog.log("server", "FAILED: no listener bound");
             return false;
         }
         state = ServerState.RUNNING;
+        BridgeLog.log("server", "RUNNING");
         return true;
     }
 
@@ -173,6 +181,7 @@ public class HttpBridgeServer {
             workers = null;
         }
         state = ServerState.STOPPED;
+        BridgeLog.log("server", "STOPPED");
     }
 
     public boolean isRunning() {
@@ -230,6 +239,8 @@ public class HttpBridgeServer {
                     } catch (Exception ignored) {
                     }
                     Log.w(TAG, "connection cap reached; closed a connection");
+                    BridgeLog.logThrottled("conn-cap", "conn-cap",
+                            "closed a connection at cap");
                     continue;
                 }
                 try {
@@ -237,7 +248,11 @@ public class HttpBridgeServer {
                         @Override
                         public void run() {
                             try {
-                                handle(conn);
+                                int st = handle(conn);
+                                if (st >= 400) {
+                                    BridgeLog.logThrottled("http-" + st,
+                                            "http-" + st, "");
+                                }
                             } finally {
                                 connectionSlots.release();
                             }
@@ -248,11 +263,15 @@ public class HttpBridgeServer {
                     // request (reading it would defeat the shedding)
                     // and release the slot.
                     connectionSlots.release();
+                    BridgeLog.logThrottled("overload-503", "overload-503",
+                            "worker queue full");
                     sendOverload(conn);
                 }
             } catch (Exception e) {
                 if (state == ServerState.RUNNING || state == ServerState.STARTING) {
                     Log.w(TAG, "accept failed: " + e.getMessage());
+                    BridgeLog.logThrottled("accept-failed", "accept-failed",
+                            e.getMessage());
                 }
             }
         }
@@ -281,7 +300,7 @@ public class HttpBridgeServer {
         }
     }
 
-    private void handle(Socket conn) {
+    private int handle(Socket conn) {
         String method = "?";
         String path = "?";
         int status = 500;
@@ -297,7 +316,7 @@ public class HttpBridgeServer {
             setPhaseTimeout(conn, HEADER_TIMEOUT_MS, deadline);
             String head = readHead(in);
             if (head == null || head.isEmpty()) {
-                return;
+                return status;
             }
             String[] lines = head.split("\r\n");
             String[] req = lines[0].split(" ");
@@ -307,7 +326,7 @@ public class HttpBridgeServer {
                     || !("HTTP/1.0".equals(req[2]) || "HTTP/1.1".equals(req[2]))) {
                 status = 400;
                 sendJson(out, status, errorJson("bad request line"));
-                return;
+                return status;
             }
             method = req[0];
             String target = req[1];
@@ -323,7 +342,7 @@ public class HttpBridgeServer {
                 if (colon <= 0) {
                     status = 400;
                     sendJson(out, status, errorJson("bad header line"));
-                    return;
+                    return status;
                 }
                 String name = line.substring(0, colon).trim();
                 String value = line.substring(colon + 1).trim();
@@ -331,21 +350,21 @@ public class HttpBridgeServer {
                     if (token != null) {
                         status = 400;
                         sendJson(out, status, errorJson("duplicate X-Bridge-Token"));
-                        return;
+                        return status;
                     }
                     token = value;
                 } else if ("Content-Length".equalsIgnoreCase(name)) {
                     if (contentLength != null) {
                         status = 400;
                         sendJson(out, status, errorJson("duplicate Content-Length"));
-                        return;
+                        return status;
                     }
                     try {
                         contentLength = Long.parseLong(value);
                     } catch (NumberFormatException e) {
                         status = 400;
                         sendJson(out, status, errorJson("bad Content-Length"));
-                        return;
+                        return status;
                     }
                 } else if ("Transfer-Encoding".equalsIgnoreCase(name)) {
                     sawTransferEncoding = true;
@@ -354,7 +373,7 @@ public class HttpBridgeServer {
             if (sawTransferEncoding) {
                 status = 400;
                 sendJson(out, status, errorJson("Transfer-Encoding not supported"));
-                return;
+                return status;
             }
 
             // Phase 2: token check BEFORE the body is read, so an
@@ -363,7 +382,7 @@ public class HttpBridgeServer {
             if (expected == null || !expected.equals(token)) {
                 status = 401;
                 sendJson(out, status, errorJson("unauthorized"));
-                return;
+                return status;
             }
 
             // Phase 3: Content-Length validation.
@@ -371,12 +390,12 @@ public class HttpBridgeServer {
             if (cl < 0) {
                 status = 400;
                 sendJson(out, status, errorJson("negative Content-Length"));
-                return;
+                return status;
             }
             if (cl > MAX_BODY_BYTES) {
                 status = 413;
                 sendJson(out, status, errorJson("body too large"));
-                return;
+                return status;
             }
 
             // Phase 4: body, capped at MAX_BODY_BYTES, deadline
@@ -388,7 +407,7 @@ public class HttpBridgeServer {
                 if (body.length != cl) {
                     status = 400;
                     sendJson(out, status, errorJson("short body"));
-                    return;
+                    return status;
                 }
             }
 
@@ -483,6 +502,36 @@ public class HttpBridgeServer {
                             .put("event_seq", st.eventSeq)
                             .put("truncated", st.truncated));
                 }
+            } else if ("/logs".equals(path)) {
+                // v1.9.3: debug log, pull-based and token-authenticated
+                // like every endpoint. ?limit= (default 100, max 200)
+                // takes the newest lines of the current run; the
+                // previous run's tail rides along separately.
+                int limit = parseInt(queryParam(query, "limit"), 100);
+                if (limit < 1) {
+                    limit = 1;
+                }
+                if (limit > 200) {
+                    limit = 200;
+                }
+                List<String> all = BridgeLog.snapshot();
+                JSONArray arr = new JSONArray();
+                int start = Math.max(0, all.size() - limit);
+                for (int i = start; i < all.size(); i++) {
+                    arr.put(all.get(i));
+                }
+                JSONArray prev = new JSONArray();
+                for (String l : BridgeLog.previousSnapshot()) {
+                    prev.put(l);
+                }
+                status = 200;
+                sendJson(out, status, new JSONObject()
+                        .put("ok", true)
+                        .put("app_version", AppVersion.name(context))
+                        .put("app_version_code", AppVersion.code(context))
+                        .put("lines", arr)
+                        .put("previous_lines", prev));
+                return status;
             } else if ("/events".equals(path)) {
                 // Phase 3 (v1.6): the recorded event history after
                 // `since` (default 0 = everything buffered), oldest
@@ -766,6 +815,7 @@ public class HttpBridgeServer {
             } catch (Exception ignored) {
             }
         }
+        return status;
     }
 
     /**

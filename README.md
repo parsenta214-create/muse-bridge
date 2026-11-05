@@ -1020,6 +1020,24 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     moved, contents F-Droid/Tailscale/Termux/Muse Bridge), then
     BACK + HOME restored the home screen. Phase B is complete
     (A-1..A-5, decisions 46-53).
+54. Debug log endpoint (2026-11-06 03:59, v1.9.3, versionCode 13,
+    user-approved): GET /logs, pull-based and token-authenticated
+    like every endpoint — the phone never pushes logs anywhere.
+    Ring buffer (200 lines) + rotating file (64 KB) in the app's
+    private files dir; /logs returns the current run's lines plus
+    the previous run's tail (?limit=, default 100, max 200).
+    Content rule (allowlist, enforced by BridgeLog.log's
+    sanitizer): event names, counts, and short error messages
+    only — never request bodies, node text, or tokens. Recorded:
+    server start/stop, per-address bind results, accept failures,
+    connection-cap sheds, overload 503s, HTTP error statuses by
+    code (throttled to once per 10 s per code, with a suppressed
+    count), batch outcomes (status + counts only). handle()
+    returns the status int so the worker logs error statuses in
+    one place. Client: AndroidAdapter.logs(limit). The A-2
+    accept-loop bug (decision 51) is the case this exists for: a
+    deaf server now leaves "listen" lines with no accepts in the
+    log instead of silence.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

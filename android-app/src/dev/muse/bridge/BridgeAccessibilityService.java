@@ -888,6 +888,10 @@ public class BridgeAccessibilityService extends AccessibilityService {
         } else {
             result.status = "completed";
         }
+        // v1.9.3: batch outcome in the debug log (status + counts
+        // only — no batch_id, no payload, no node text).
+        BridgeLog.log("batch", result.status + " "
+                + result.completedActionIds.size() + "/" + actions.size());
         return result;
     }
 

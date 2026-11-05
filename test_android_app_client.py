@@ -69,8 +69,17 @@ class MockAppHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self._send_json(200, {"ok": True, "service": "muse-bridge",
                                          "version": 1, "accessibility": True,
-                                         "app_version": "1.9.2",
-                                         "app_version_code": 12})
+                                         "app_version": "1.9.3",
+                                         "app_version_code": 13})
+        if self.path.startswith("/logs"):
+            # v1.9.3: debug log (current run + previous run's tail).
+            return self._send_json(200, {"ok": True,
+                                         "app_version": "1.9.3",
+                                         "app_version_code": 13,
+                                         "lines": ["[11-06 03:55:00] listen 100.111.74.42:8080",
+                                                   "[11-06 03:55:00] server RUNNING",
+                                                   "[11-06 03:55:01] batch completed 1/1"],
+                                         "previous_lines": ["[11-06 03:50:00] server STOPPED"]})
         if self.path.startswith("/state?"):
             # A-1 (v1.9): simulated bridge input-validation rejections.
             import urllib.parse
@@ -123,8 +132,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
                                          "snapshot_valid": True,
                                          "snapshot_stable": stable,
                                          "event_seq": 42,
-                                         "app_version": "1.9.2",
-                                         "app_version_code": 12,
+                                         "app_version": "1.9.3",
+                                         "app_version_code": 13,
                                          "nodes": [
                                              {"id": "n0", "parent": None, "class": "android.widget.FrameLayout",
                                               "text": "", "desc": "", "bounds": {"left": 0, "top": 0, "right": 1080, "bottom": 2340},
@@ -387,22 +396,22 @@ def test_app_state_event_seq_v16(mock_app):
     assert state["event_seq"] == 42
 
 
-def test_app_state_app_version_v192(mock_app):
+def test_app_state_app_version_v193(mock_app):
     """v1.9: /state and /health carry the installed app version, so
     the VM can tell which build is on the phone without guessing
     from behaviour. The version comes from the APK itself (aapt2
     --version-name/--version-code), never a hardcoded constant."""
     adapter = ab.AndroidAdapter(transport="app")
     state = adapter.get_current_state()
-    assert state["app_version"] == "1.9.2"
-    assert state["app_version_code"] == 12
+    assert state["app_version"] == "1.9.3"
+    assert state["app_version_code"] == 13
     import urllib.request
     req = urllib.request.Request(
         f"{ab.APP_URL}/health", headers={"X-Bridge-Token": MOCK_TOKEN})
     with urllib.request.urlopen(req, timeout=10) as resp:
         health = json.loads(resp.read().decode("utf-8"))
-    assert health["app_version"] == "1.9.2"
-    assert health["app_version_code"] == 12
+    assert health["app_version"] == "1.9.3"
+    assert health["app_version_code"] == 13
     # The old protocol version field is untouched.
     assert health["version"] == 1
 
@@ -480,6 +489,18 @@ def test_app_unstable_snapshot_changed_raises_v19(mock_app):
     with pytest.raises(ab.TransportError, match="stale snapshot"):
         adapter.click_node("n5", state["tree_hash"])
     assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_logs_returns_lines_v193(mock_app):
+    """v1.9.3: /logs returns the current run's lines plus the
+    previous run's tail, through the adapter."""
+    adapter = ab.AndroidAdapter(transport="app")
+    result = adapter.logs()
+    assert result["lines"][1] == "[11-06 03:55:00] server RUNNING"
+    assert result["previous_lines"] == ["[11-06 03:50:00] server STOPPED"]
+    gets = [r for r in MockAppHandler.requests
+            if r[0] == "GET" and r[1].startswith("/logs")]
+    assert len(gets) == 1
 
 
 def test_app_events_returns_history(mock_app):
