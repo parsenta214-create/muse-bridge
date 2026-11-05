@@ -1076,6 +1076,13 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     boot script only runs at device boot when that app is
     installed. If Termux is force-stopped, reopen Termux and run
     `sshd` by hand (the boot script does not cover that case).
+    Reboot test PASSED 2026-11-06 04:20: after the user rebooted,
+    SSH was back up on the second probe (~2 min after boot, phone
+    uptime 2 min) with no manual `sshd`; the sshd parent process
+    started at boot +2 min, i.e. the Termux:Boot script ran it.
+    The bridge app was reachable too (health OK, accessibility
+    enabled) — whether it auto-restarted (START_STICKY) or the
+    user started it by hand was not established.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
