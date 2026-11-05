@@ -33,6 +33,7 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private TextView addressText;
     private TextView tokenText;
+    private TextView versionText;
 
     /** Returns the runtime token, generating and storing one on first use. */
     public static String getOrCreateToken(Context ctx) {
@@ -91,6 +92,7 @@ public class MainActivity extends Activity {
         statusText = findViewById(R.id.status_text);
         addressText = findViewById(R.id.address_text);
         tokenText = findViewById(R.id.token_text);
+        versionText = findViewById(R.id.version_text);
 
         Button start = findViewById(R.id.start_button);
         Button stop = findViewById(R.id.stop_button);
@@ -180,6 +182,11 @@ public class MainActivity extends Activity {
     }
 
     private void refresh() {
+        // v1.8: the installed version, so the user (and Muse, via
+        // /state) can tell at a glance which build is on the phone.
+        versionText.setText("v" + AppVersion.name(this)
+                + " (" + AppVersion.code(this) + ")");
+
         StringBuilder status = new StringBuilder();
         status.append(BridgeService.isRunning() ? "Bridge: running" : "Bridge: stopped");
         status.append("\nAccessibility service: ")

@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Muse Bridge</string>
+    <string name="title_version">Version</string>
     <string name="accessibility_service_description">Lets the Muse Bridge read the screen and perform taps and swipes for automation. Enable it only while you want the bridge to work.</string>
     <string name="title_status">Status</string>
     <string name="title_token">Bridge token (keep private)</string>

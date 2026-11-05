@@ -36,13 +36,16 @@ import java.util.concurrent.Executors;
  * Only the method, path, and status are logged — never the token or body.
  *
  * Endpoints (coordinates are screen pixels):
- *   GET  /health          -> {"ok":true, ...}
+ *   GET  /health          -> {"ok":true, ...} (v1.8: also
+ *                         "app_version"/"app_version_code")
  *   GET  /capture_screen  -> PNG bytes (default) or, with
  *   ?scale=0.5&format=jpeg&quality=80, a half-scale JPEG (v1.2).
  *   GET  /state           -> {"width":..,"height":..,"package":"..","texts":[..],
  *                         "revision":..,"nodes":[..],"focused":..,
- *                         "ime_visible":..,"truncated":..,"event_seq":..}
- *                         (v1.4: node tree; v1.6: event_seq)
+ *                         "ime_visible":..,"truncated":..,"event_seq":..,
+ *                         "app_version":..,"app_version_code":..}
+ *                         (v1.4: node tree; v1.6: event_seq;
+ *                         v1.8: installed app version)
  *   GET  /events?since=..&limit=.. -> {"events":[..],"latest_seq":..,
  *                         "dropped":..,"tree_hash":..,"revision":..} (v1.6)
  *   POST /click           {"x":..,"y":..}
@@ -216,6 +219,8 @@ public class HttpBridgeServer {
                         .put("ok", true)
                         .put("service", "muse-bridge")
                         .put("version", 1)
+                        .put("app_version", AppVersion.name(context))
+                        .put("app_version_code", AppVersion.code(context))
                         .put("accessibility", svc != null));
             } else if ("/capture_screen".equals(path)) {
                 if (svc == null) {
@@ -280,6 +285,8 @@ public class HttpBridgeServer {
                     status = 200;
                     sendJson(out, status, new JSONObject()
                             .put("ok", true)
+                            .put("app_version", AppVersion.name(context))
+                            .put("app_version_code", AppVersion.code(context))
                             .put("width", st.width)
                             .put("height", st.height)
                             .put("package", st.packageName)

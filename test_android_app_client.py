@@ -61,7 +61,9 @@ class MockAppHandler(BaseHTTPRequestHandler):
             return self._send_json(401, {"ok": False, "error": "unauthorized"})
         if self.path == "/health":
             return self._send_json(200, {"ok": True, "service": "muse-bridge",
-                                         "version": 1, "accessibility": True})
+                                         "version": 1, "accessibility": True,
+                                         "app_version": "1.8",
+                                         "app_version_code": 9})
         if self.path == "/capture_screen" or self.path.startswith("/capture_screen?"):
             import urllib.parse
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -90,6 +92,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
                                          "package": "com.example", "texts": ["Hi"],
                                          "revision": 7, "tree_hash": 123456,
                                          "event_seq": 42,
+                                         "app_version": "1.8",
+                                         "app_version_code": 9,
                                          "nodes": [
                                              {"id": "n0", "parent": None, "class": "android.widget.FrameLayout",
                                               "text": "", "desc": "", "bounds": {"left": 0, "top": 0, "right": 1080, "bottom": 2340},
@@ -319,6 +323,26 @@ def test_app_state_event_seq_v16(mock_app):
     adapter = ab.AndroidAdapter(transport="app")
     state = adapter.get_current_state()
     assert state["event_seq"] == 42
+
+
+def test_app_state_app_version_v18(mock_app):
+    """v1.8: /state and /health carry the installed app version, so
+    the VM can tell which build is on the phone without guessing
+    from behaviour. The version comes from the APK itself (aapt2
+    --version-name/--version-code), never a hardcoded constant."""
+    adapter = ab.AndroidAdapter(transport="app")
+    state = adapter.get_current_state()
+    assert state["app_version"] == "1.8"
+    assert state["app_version_code"] == 9
+    import urllib.request
+    req = urllib.request.Request(
+        f"{ab.APP_URL}/health", headers={"X-Bridge-Token": MOCK_TOKEN})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        health = json.loads(resp.read().decode("utf-8"))
+    assert health["app_version"] == "1.8"
+    assert health["app_version_code"] == 9
+    # The old protocol version field is untouched.
+    assert health["version"] == 1
 
 
 def test_app_events_returns_history(mock_app):

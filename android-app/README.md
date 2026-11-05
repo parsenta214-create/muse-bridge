@@ -23,7 +23,7 @@ serves them over a small HTTP server on the phone.
 ```bash
 cd ~/workspace/computer-use-preview/android-app
 ./build.sh
-# -> Muse_Bridge_v1.6.apk (debug-signed, sideloading only)
+# -> Muse_Bridge_v1.8.apk (debug-signed, sideloading only)
 ```
 
 The build uses the manual aapt2 / javac / d8 pipeline — no Gradle,
@@ -62,7 +62,7 @@ until the phone's wireless debugging is on.
 
 ## Install on the phone
 
-1. Copy `Muse_Bridge_v1.6.apk` to the phone and install it (allow
+1. Copy `Muse_Bridge_v1.8.apk` to the phone and install it (allow
    "install unknown apps" for the app you use to open the APK).
 2. Open the **Muse Bridge** app.
 3. Tap **Open accessibility settings**, find **Muse Bridge**, and turn
@@ -85,9 +85,9 @@ until the phone's wireless debugging is on.
 Coordinates are screen **pixels** (the VM client converts the model's
 0–999 coordinates using the width/height from `/state`).
 
-- `GET /health` → `{"ok":true,"service":"muse-bridge","version":1,"accessibility":true}`
+- `GET /health` → `{"ok":true,"service":"muse-bridge","version":1,"accessibility":true,"app_version":"1.8","app_version_code":9}`
 - `GET /capture_screen` → PNG bytes
-- `GET /state` → `{"width":1080,"height":2340,"package":"...","texts":["..."]}`
+- `GET /state` → `{"width":1080,"height":2340,"package":"...","texts":["..."],"app_version":"1.8","app_version_code":9}`
 - `POST /click` `{"x":500,"y":800}`
 - `POST /swipe` `{"x1":..,"y1":..,"x2":..,"y2":..,"duration_ms":300}`
 - `POST /type_text` `{"text":"hello"}` — sets text on the currently
@@ -103,6 +103,6 @@ Coordinates are screen **pixels** (the VM client converts the model's
   field that was never tapped.
 - The server is plain HTTP on the private Tailscale network only. Do
   not forward the port to the internet; the token is the only auth.
-- The VM side has not been tested against a real phone yet (the app is
-  not installed on the phone). The client module was tested against a
-  local mock server only (see `test_android_app_client.py`).
+- The VM side is verified against the real phone since v1.1 (screenshots,
+  taps, swipes, typing, node actions, batches, events). See the main
+  `README.md` frozen decisions for the verification log.
