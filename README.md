@@ -1059,6 +1059,23 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     its verification); the VM-side /logs matched it exactly
     (4 + 9, app 1.9.4 code 14), and /health is reachable with
     accessibility enabled.
+56. Termux remote execution (2026-11-06 04:16, user-approved):
+    termux_exec.sh on the VM runs any command on the phone's
+    Termux over the existing tunnel-proxy SSH channel (same
+    invocation as push_apk.sh), streams the output, and exits
+    with the remote exit code (124 on timeout, default 120 s,
+    --timeout to change it). Phone side: ~/.termux/boot/start-sshd
+    (wake-lock + sshd) created and chmod +x, wake-lock acquired
+    now; sshd_config hardened with `PasswordAuthentication no`
+    (backup sshd_config.bak-muse, sshd -t OK, sshd restarted via
+    a detached nohup so the restart did not kill its own
+    session). Verified live: `echo termux-ok; whoami; uptime`
+    works (u0_a388, phone up 4 days); a failing command returns
+    its exit code (2); --timeout 2 on `sleep 5` returns 124.
+    Remaining user step: install Termux:Boot from F-Droid — the
+    boot script only runs at device boot when that app is
+    installed. If Termux is force-stopped, reopen Termux and run
+    `sshd` by hand (the boot script does not cover that case).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

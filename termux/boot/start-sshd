@@ -1,0 +1,10 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Termux:Boot script — runs at device boot when the Termux:Boot app
+# is installed (F-Droid). Keeps the Muse SSH door up:
+#   termux-wake-lock: stops Android killing Termux in the background
+#   sshd: key-only SSH for the VM and the PC (see sshd_config)
+# Install: copy to ~/.termux/boot/start-sshd and chmod +x.
+# If Termux is force-stopped, this does not re-run until the next
+# boot — reopen Termux and run `sshd` by hand in that case.
+termux-wake-lock
+sshd
