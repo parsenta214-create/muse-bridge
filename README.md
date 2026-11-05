@@ -1052,7 +1052,13 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     BridgeLog.renderText() builds the shared text (header with app
     version + export time, current run, then the previous run's
     tail) used by both the viewer and the export, so both show
-    exactly what GET /logs returns.
+    exactly what GET /logs returns. Verified live 2026-11-06
+    04:12: the user exported the txt from the phone and pasted
+    it — 4 current lines (fresh start 04:11:50) + 9 previous-run
+    lines (the v1.9.3 run, incl. the http-401/413/409/400 from
+    its verification); the VM-side /logs matched it exactly
+    (4 + 9, app 1.9.4 code 14), and /health is reachable with
+    accessibility enabled.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
