@@ -1568,6 +1568,18 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     request. Live test on X is still pending (needs the user
     to install 1.9.12). APK 62,150 bytes, sha256 9f04190a…;
     113 tests pass in the whole suite.
+70. launch_app package-visibility fix (2026-11-06, v1.9.13 /
+    code 23): the first live test on 1.9.12 answered 422
+    "package not installed or has no launcher:
+    com.twitter.android" even though X is installed. Cause:
+    Android 11+ package visibility — the manifest had no
+    <queries>, so getLaunchIntentForPackage() returned null
+    for every other app. Fix: an intent-based <queries>
+    (MAIN + LAUNCHER) in the manifest, which makes all
+    launcher apps visible with no QUERY_ALL_PACKAGES. No Java
+    change. Live test on X is still pending (needs the user
+    to install 1.9.13). APK 62,150 bytes, sha256 2c0c1a11…;
+    113 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
