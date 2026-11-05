@@ -1531,10 +1531,21 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     old endpoints (click_node, type_node, scroll_node) stay for
     compatibility. CUT/PASTE/DISMISS can change or remove user
     content — same risk class as type_node, inside the same
-    gate, never used automatically. Live test of representative
-    actions on X (long_click, scroll_down, focus) is still
-    pending (needs the user to install 1.9.11). APK 62,150
-    bytes, sha256 3a0935f1…; 110 tests pass in the whole suite.
+    gate, never used automatically. Live test on X (2026-11-06,
+    1.9.11, after the user installed it): scroll_down on the
+    timeline (n14) ok and the timeline moved — directional
+    scroll WORKS on X, unlike DPAD; scroll_forward through the
+    same endpoint ok and moved too. long_click on a post text
+    node: first try 409 (the screen moved between /state and
+    the action — the A-3 stale discipline working as designed),
+    retry 422 "action not supported" (no long-clickable
+    ancestor; X posts do not expose long-click, and the
+    screenshot confirmed nothing opened). accessibility_focus
+    on the same node: 422 even though the node advertises it
+    in /state — performAction returned false, an X custom-view
+    quirk (advertised is not performed). focus (ACTION_FOCUS)
+    on a post text node: ok. APK 62,150 bytes, sha256
+    3a0935f1…; 110 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
