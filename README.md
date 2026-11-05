@@ -1676,6 +1676,24 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     66,248 bytes, sha256 b8171ab0…; 122 tests pass.
     This endpoint also covers future bridge self-updates
     (same flow, the bridge's own APK as the path or URL).
+76. Clipboard read/write — GET / POST /clipboard
+    (2026-11-06, v1.9.17 / code 27). `GET /clipboard`
+    returns {"ok": true, "text": "..."|null, "truncated":
+    bool}; `POST /clipboard {"text": "..."}` writes it
+    (empty text clears it). Both run on the server's own
+    context, no accessibility service needed. The text is
+    capped at 64 KiB with truncated=true; the content is
+    never written to BridgeLog (it may hold a password).
+    Open question, to be settled by the live test: Android
+    10+ blocks clipboard reads while the app runs in the
+    background, so GET may return null even with content
+    on the clipboard (a SecurityException is caught and
+    treated the same as empty). Writing works from the
+    background. Client: `AndroidAdapter.get_clipboard()` —
+    read-only, no gate; `set_clipboard(text)` — gated, never
+    retried; a non-string raises ValueError before any
+    request. APK 66,246 bytes, sha256 4ddb4f0a…; 127 tests
+    pass. D-1 remaining: notification open/reply.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

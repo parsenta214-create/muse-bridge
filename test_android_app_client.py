@@ -264,6 +264,10 @@ class MockAppHandler(BaseHTTPRequestHandler):
             # Decision 75 (v1.9.16): the install-apk job state.
             return self._send_json(200, {"ok": True, "status": "idle",
                                          "detail": ""})
+        if self.path == "/clipboard":
+            # Decision 76 (v1.9.17): the clipboard content.
+            return self._send_json(200, {"ok": True, "text": "hello-clipboard",
+                                         "truncated": False})
         return self._send_json(404, {"ok": False, "error": "not found"})
 
     def do_POST(self):
@@ -1256,3 +1260,51 @@ def test_app_install_status(mock_app):
     adapter = ab.AndroidAdapter()
     assert adapter.install_status() == {"ok": True, "status": "idle",
                                         "detail": ""}
+
+
+# --------------------------------------------------------------------------
+# Decision 76: clipboard read/write (v1.9.17).
+# --------------------------------------------------------------------------
+
+def test_app_get_clipboard(mock_app):
+    """Decision 76: get_clipboard reads the clipboard text."""
+    adapter = ab.AndroidAdapter()
+    assert adapter.get_clipboard() == {"ok": True, "text": "hello-clipboard",
+                                       "truncated": False}
+
+
+def test_app_set_clipboard(mock_app):
+    """Decision 76: set_clipboard posts the text."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.set_clipboard("MUSEテスト")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/clipboard", {"text": "MUSEテスト"}) in posts
+
+
+def test_app_set_clipboard_empty_clears(mock_app):
+    """Decision 76: an empty string clears the clipboard — it is
+    allowed, unlike open() where empty means a missing uri."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.set_clipboard("")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/clipboard", {"text": ""}) in posts
+
+
+def test_app_set_clipboard_bad_type(mock_app):
+    """Decision 76: a non-string raises ValueError before any
+    request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="must be a string"):
+        adapter.set_clipboard(None)
+    with pytest.raises(ValueError, match="must be a string"):
+        adapter.set_clipboard(42)
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_set_clipboard_needs_gate(mock_app):
+    """Decision 76: writing the clipboard changes device state,
+    so it needs --allow-actions; reading needs no gate."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.set_clipboard("x")
+    assert adapter.get_clipboard()["ok"] is True

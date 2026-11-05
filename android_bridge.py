@@ -655,6 +655,24 @@ class AndroidAdapter:
         "installed"|"failed", "detail": "..."}."""
         return self._app_request("GET", "/install_status")
 
+    def get_clipboard(self) -> dict:
+        """Read the clipboard (decision 76, v1.9.17): GET
+        /clipboard. Read-only, no gate: {"ok": true, "text":
+        "..."|null, "truncated": bool}. text is null when the
+        clipboard is empty — or when Android 10+ blocks the
+        read while the app runs in the background (the live
+        test settles which one it is)."""
+        return self._app_request("GET", "/clipboard")
+
+    def set_clipboard(self, text: str) -> dict:
+        """Write the clipboard (decision 76, v1.9.17): POST
+        /clipboard. Empty text clears it. Gated by
+        --allow-actions, never retried."""
+        if text is None or not isinstance(text, str):
+            raise ValueError("text must be a string")
+        self._require_actions("set_clipboard(...)")
+        return self._app_post("/clipboard", {"text": text})
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 

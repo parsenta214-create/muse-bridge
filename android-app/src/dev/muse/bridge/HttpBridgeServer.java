@@ -7,6 +7,8 @@ import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
@@ -86,6 +88,8 @@ import java.util.concurrent.TimeUnit;
  *   POST /open            {"uri":"https://example.com"} (v1.9.15)
  *   POST /install_apk     {"url":"https://...apk"} or {"path":"/...apk"} (v1.9.16)
  *   GET  /install_status  (v1.9.16)
+ *   GET  /clipboard       (v1.9.17)
+ *   POST /clipboard       {"text":"..."} (v1.9.17)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -842,6 +846,51 @@ public class HttpBridgeServer {
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", "open blocked by the system"));
                 }
+            } else if ("/clipboard".equals(path) && "GET".equals(method)) {
+                // Decision 76 (v1.9.17): read the clipboard. Runs
+                // on this server's own context, no accessibility
+                // service needed. text is null when the clipboard
+                // is empty — or when Android 10+ blocks the read
+                // while the app runs in the background (the live
+                // test settles which one it is). Capped at 64 KiB
+                // with truncated=true. The content is never written
+                // to BridgeLog (it may hold a password).
+                ClipboardManager cm = (ClipboardManager)
+                        context.getSystemService(Context.CLIPBOARD_SERVICE);
+                ClipData clip = null;
+                try {
+                    clip = cm == null ? null : cm.getPrimaryClip();
+                } catch (SecurityException e) {
+                    // Background read blocked on this device — the
+                    // same outcome as an empty clipboard (null).
+                    clip = null;
+                }
+                CharSequence cs = null;
+                if (clip != null && clip.getItemCount() > 0) {
+                    cs = clip.getItemAt(0).coerceToText(context);
+                }
+                String text = cs == null ? null : cs.toString();
+                boolean truncated = false;
+                if (text != null && text.length() > 65536) {
+                    text = text.substring(0, 65536);
+                    truncated = true;
+                }
+                status = 200;
+                sendJson(out, status, new JSONObject()
+                        .put("ok", true)
+                        .put("text", text == null ? JSONObject.NULL : text)
+                        .put("truncated", truncated));
+            } else if ("/clipboard".equals(path) && "POST".equals(method)) {
+                // Decision 76 (v1.9.17): write the clipboard.
+                // Empty text clears it. Writing works from the
+                // background (only reading is restricted).
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                String text = j.getString("text");
+                ClipboardManager cm = (ClipboardManager)
+                        context.getSystemService(Context.CLIPBOARD_SERVICE);
+                cm.setPrimaryClip(ClipData.newPlainText("muse-bridge", text));
+                status = 200;
+                sendJson(out, status, new JSONObject().put("ok", true));
             } else if ("/install_status".equals(path) && "GET".equals(method)) {
                 // Decision 75 (v1.9.16): the install-apk job state
                 // (idle / downloading / installing / committed /
