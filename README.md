@@ -1122,6 +1122,114 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     click runs exactly once, 400 fails fast, classifier unit
     test); 43 passed total. Live regression: the A-5 verify
     script still passes 12/12 on the real phone (v1.9.5).
+59. Client timeouts and per-call measurement (2026-11-06,
+    client improvement 2, GPT-reviewed in CONS-20261106-012):
+    one named place for client timeouts — APP_TIMEOUT_READ_S =
+    30 (all GETs and non-batch POSTs), APP_TIMEOUT_BATCH_S = 60
+    (POST /batch only: server total 45 s + margin, so the client
+    never gives up before the server answers and a "running"
+    result is practically unreachable), APP_TIMEOUT_HEALTH_S = 15
+    (check_app() probe; value unchanged, now named). Env
+    overrides ANDROID_APP_TIMEOUT_READ_S / _BATCH_S / _HEALTH_S
+    (same pattern as ANDROID_SSH_TIMEOUT), validated at startup:
+    non-numeric -> error, <= 0 rejected, > 300 s rejected, never
+    silently fall back to defaults. Note: urllib's timeout is
+    per socket operation, not a total deadline — the 60 s batch
+    timeout gives each operation 60 s (so the purpose holds), and
+    a slow-drip response could run longer than 60 s total (known
+    limitation). Measurement: AndroidAdapter.last_call holds the
+    latest logical call {"method", "path", "seconds" (wall incl.
+    retries), "attempts" (actual HTTP attempts), "ok", "status"
+    (None when unavailable), "error" (no confidential info)};
+    cleared when a call starts; a single attempt over
+    APP_SLOW_CALL_S = 10 s is noted on stderr (per attempt, not
+    the retry total). No timing keys in returned response dicts;
+    no call history ring. check_app() gains "seconds" in its
+    returned dict. Worst case per logical call with decision 58
+    (max 3 attempts): reads ≈ 96 s, batch ≈ 186 s — accepted,
+    no total-time cap for now, revisit after measurement. A
+    batch re-send is a cache query, not a new execution (A-4).
+    Decision 58 unchanged; server deadlines unchanged; no APK,
+    no phone change. Tests: mock slow endpoint + long-batch
+    case; assert last_call fields and timeout values. Follow-up
+    (not in this decision): the health cron
+    (bridge_health_check.py) duplicates the /health probe with
+    its own timeout=15 and no retry — it should call check_app()
+    instead.
+60. Dead transport cleanup (2026-11-06, client improvement 3,
+    GPT-reviewed in CONS-20261106-012): the adapter is app-only.
+    Deleted from android_bridge.py: the transport parameter
+    (AndroidAdapter(actions_enabled=False) only), the
+    "termux-rish" and "adb" choices, _rish, _capture_screen_rish,
+    _state_rish, _run_input, _capture_screen_adb, _state_adb,
+    check_adb, ADB_PORT/ADB_FORWARD_PORT, the --transport flag in
+    both CLIs, the ANDROID_TRANSPORT env var, the "adb_5555"
+    field in the check output, and adb_tunnel.py (unreferenced;
+    git history preserves it) + its manifest entry. No compat
+    shim (GPT: a shim preserves a dead concept). Sweep checklist
+    for leftovers: type definitions, branches, ANDROID_TRANSPORT,
+    CLI help + tests, docs + samples, mocks, adb-only deps,
+    indirect refs to adb_tunnel.py from shell scripts; no
+    exit-code or decision logic referencing adb may remain.
+    Kept: _proxy (push_apk.sh and termux_exec.sh depend on it),
+    the Termux SSH channel (run_ssh/check_ssh/ssh_base_cmd —
+    live), _app_opener, check_app, the retry policy (decision
+    58), _ensure_fresh_snapshot, _state_app/_capture_screen_app
+    (names kept to minimize the diff), all public method names,
+    the actions gate. Documented design constraint: the app
+    transport is now the only route — if the accessibility
+    service breaks, no screenshot/tap path remains (adb was
+    never a real fallback: untested, no adb binary, no wireless
+    debugging). README transports section and the "Termux/rish
+    route" user steps become historical; the Termux SSH channel
+    section stays. Tests updated:
+    test_unknown_transport_rejected,
+    test_app_phase2_actions_need_app_transport,
+    test_app_events_needs_app_transport, and
+    test_actions_allowed_flag_only_enables_explicit_calls
+    (rewritten against the app path).
+61. High-level operation helper (2026-11-06, client improvement
+    4, GPT-reviewed in CONS-20261106-012, conditional):
+    wait_for_text first, validate on a real screen, then
+    click_text; no CLI in v1 (YAGNI — revisit after live
+    validation). wait_for_text(text, timeout_s=15.0, poll_s=1.5,
+    match="exact") -> the node dict only, with "tree_hash" added
+    (the tree_hash of the state it was found in), read-only.
+    click_text(text, timeout_s=15.0, poll_s=1.5, match="exact")
+    -> click result dict plus "node_id" and "attempts", gated by
+    _require_actions; the click runs exactly once, never retried
+    (decision 58). match is "exact" (node["text"] == text) or
+    "contains" (substring); text only, never desc; first match
+    in tree order; no clickable preference (the server resolves
+    the clickable ancestor). timeout_s default 15.0, max 60.0;
+    poll_s default 1.5, min 1.0 (raised from 0.5: each poll
+    costs ~0.75-1 s over the tunnel, so below 1.0 s is
+    pointless); out of range -> ValueError. Deadline: monotonic
+    clock (time.monotonic()), overall deadline for the WAIT
+    phase only — never start a new poll after it; the click is a
+    separate call with the 30 s read timeout (worst case 60 +
+    30 = 90 s, documented). Loop: 409 and snapshot-stale errors
+    mean "not ready yet" — resume polling (re-find by text),
+    bounded by the deadline. 422 at click time: fetch a fresh
+    /state; node absent -> resume polling; node present -> walk
+    the node + ancestors in that fresh state; if any is clickable
+    and enabled, the 422 was a race -> resume polling; if none
+    is, raise TransportError immediately (the node exists but
+    cannot be clicked). Any other TransportError raises at once;
+    a failed GET raises at once. Timeout -> standard
+    TimeoutError (not TransportError), so callers can tell "not
+    found in time" from "transport failed". Poll cadence note: a
+    single poll can take longer than poll_s because GETs retry
+    (decision 58); the deadline is what bounds the total. Pure
+    client-side composition of GET /state + POST /click_node; no
+    wire change, no new endpoint, no new server fields. Out of
+    scope: type-by-label, swipe-to-find, multi-step flows, image
+    matching, desc/resource_id matching, any server change.
+    Tests: mock text_after mode + fail_next with a chosen status;
+    success-on-2nd-poll, timeout (TimeoutError),
+    409-then-success, 422-node-still-present-raises. Order:
+    (a) -> (b) -> (c, wait_for_text first). Guiding principle
+    (GPT): preventing double execution beats convenience.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
