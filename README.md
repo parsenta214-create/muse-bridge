@@ -1438,7 +1438,11 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     (a) feature works; network "mobile" is correct — the phone
     is on 4G+ and Tailscale's underlying network is mobile,
     so the VPN-underlying rule works). APK 62,151 bytes,
-    sha256 aa7b9644…; 98 tests pass.
+    sha256 aa7b9644…; 98 tests pass. Live-verified on 1.9.8
+    (2026-11-06 05:36): /health notification_listener True,
+    /notifications answers with 7 events (Facebook x4,
+    Samsung smartcapture, Tailscale, the bridge itself) —
+    the (b) feature works end to end.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
