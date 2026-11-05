@@ -1443,6 +1443,15 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     /notifications answers with 7 events (Facebook x4,
     Samsung smartcapture, Tailscale, the bridge itself) —
     the (b) feature works end to end.
+65. Notify before operating the phone (2026-11-06, operating
+    rule from Saardeim, 05:40 +07): before Muse operates the
+    phone from the VM side — taps, swipes, app opens, or any
+    bridge action that changes what is on the screen — Muse
+    must notify Saardeim first. Read-only probes (/health,
+    /state, /logs, /notifications) need no advance notice. He
+    is often using the phone himself (e.g. ChatGPT in the
+    foreground) and does not want the screen taken over
+    without warning. Recorded in MEMORY.md (Preferences).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
