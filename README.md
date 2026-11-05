@@ -1629,6 +1629,25 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     run; verified by code read. Phase C-1 (P0-01→P0-03) is
     complete. APK 66,248 bytes, sha256 9ac40c7f…; 113 tests
     pass in the whole suite.
+74. Phase D-1 (1/3): open a URI — POST /open (2026-11-06,
+    v1.9.15 / code 25). `POST /open {"uri": "..."}` opens the
+    URI with ACTION_VIEW: a web URL, or an app's deep link
+    when the URI's scheme belongs to an installed app. This
+    generalises `launch_app` beyond the launcher activity —
+    a web link opens in the browser, `https://x.com/search?q=...`
+    opens X's search, `mailto:` opens the mail app. The open
+    runs on the HTTP server's own application context
+    (`HttpBridgeServer.openUri`), NOT via the accessibility
+    service, so it needs no requireService() and works even
+    when the service is off — the correct design, and also
+    how /launch_app should work (P1-05, still open).
+    Error mapping: empty URI → 422; no app handles the URI →
+    422 ("no app can open this link"); Android refuses the
+    start → 503 ("open blocked by the system"). Client:
+    `AndroidAdapter.open(uri)` — gated, never retried; empty
+    URI → ValueError before any request. APK 66,249 bytes,
+    sha256 5e691fa8…; 116 tests pass. D-1 remaining:
+    clipboard read/write, notification open/reply.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

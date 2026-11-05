@@ -616,6 +616,20 @@ class AndroidAdapter:
         self._require_actions(f"launch_app({package})")
         return self._app_post("/launch_app", {"package": package})
 
+    def open(self, uri: str) -> dict:
+        """Open a URI with ACTION_VIEW (decision 74, v1.9.15):
+        POST /open. A web URL, or an app's deep link when the
+        URI's scheme belongs to an installed app — the
+        generalisation of launch_app beyond the launcher
+        activity. 422 when no app handles the URI; 503 when
+        Android refuses the start. Works even when the
+        accessibility service is off. Gated by --allow-actions,
+        never retried."""
+        if not uri:
+            raise ValueError("uri must not be empty")
+        self._require_actions(f"open({uri})")
+        return self._app_post("/open", {"uri": uri})
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 

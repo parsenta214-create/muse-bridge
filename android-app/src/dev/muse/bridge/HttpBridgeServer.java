@@ -5,12 +5,14 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.PowerManager;
 import android.util.Log;
@@ -74,6 +76,7 @@ import java.util.concurrent.TimeUnit;
  *   POST /node_action     {"node_id":"..","tree_hash":..,"action":"..",
  *                         "args":{..}} (v1.9.11: any one-shot node action)
  *   POST /launch_app      {"package":"com.example.app"} (v1.9.12)
+ *   POST /open            {"uri":"https://example.com"} (v1.9.15)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -768,6 +771,34 @@ public class HttpBridgeServer {
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", e.getMessage()));
                 }
+            } else if ("/open".equals(path) && "POST".equals(method)) {
+                // Decision 74 (v1.9.15): open a URI with ACTION_VIEW
+                // (web URL or an app's deep link). Deliberately no
+                // requireService() — opening needs only startActivity
+                // from this server's own context, so it works even
+                // when the accessibility service is off (unlike
+                // /launch_app today — see P1-05). 422 when no app
+                // handles the URI; 503 when Android refuses the
+                // start.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                try {
+                    boolean ok = openUri(j.getString("uri"));
+                    status = ok ? 200 : 422;
+                    sendJson(out, status, new JSONObject().put("ok", ok)
+                            .put("error", ok ? JSONObject.NULL : "could not open uri"));
+                } catch (IllegalArgumentException e) {
+                    status = 422;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (ActivityNotFoundException e) {
+                    status = 422;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "no app can open this link"));
+                } catch (SecurityException e) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "open blocked by the system"));
+                }
             } else if ("/batch".equals(path) && "POST".equals(method)) {
                 // Phase 2 (A-4): several actions in one request
                 // (batch_id, protocol_version, tree_hash, actions[]).
@@ -1120,6 +1151,25 @@ public class HttpBridgeServer {
         if (svc == null) {
             throw new ServiceUnavailable("accessibility service not enabled");
         }
+    }
+
+    /**
+     * Opens a URI with ACTION_VIEW (decision 74, v1.9.15): a web
+     * URL, or an app's deep link when the URI's scheme belongs
+     * to an installed app. Runs on this server's own application
+     * context, so it needs no accessibility service. Throws
+     * IllegalArgumentException on an empty URI,
+     * ActivityNotFoundException when no app handles the URI,
+     * SecurityException when Android refuses the start.
+     */
+    private boolean openUri(String uriString) {
+        if (uriString == null || uriString.isEmpty()) {
+            throw new IllegalArgumentException("uri must not be empty");
+        }
+        Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(uriString));
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        context.startActivity(intent);
+        return true;
     }
 
     private static class ServiceUnavailable extends Exception {

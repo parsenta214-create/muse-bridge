@@ -1164,3 +1164,33 @@ def test_app_launch_app_needs_gate(mock_app):
     adapter = ab.AndroidAdapter(actions_enabled=False)
     with pytest.raises(PermissionError):
         adapter.launch_app("com.twitter.android")
+
+
+# --------------------------------------------------------------------------
+# Decision 74: open (v1.9.15, Phase D-1).
+# --------------------------------------------------------------------------
+
+def test_app_open_uri(mock_app):
+    """Decision 74: open posts the uri."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.open("https://x.com/search?q=Muse")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/open",
+            {"uri": "https://x.com/search?q=Muse"}) in posts
+
+
+def test_app_open_empty_uri(mock_app):
+    """Decision 74: an empty uri raises ValueError before any
+    request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="must not be empty"):
+        adapter.open("")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_open_needs_gate(mock_app):
+    """Decision 74: open changes the screen, so it needs
+    --allow-actions."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.open("https://example.com")
