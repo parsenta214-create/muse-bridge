@@ -1,8 +1,11 @@
 package dev.muse.bridge;
 
 import android.app.Notification;
+import android.app.PendingIntent;
+import android.app.RemoteInput;
 import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
@@ -30,6 +33,12 @@ import java.util.List;
  * nothing about a notification's content is ever written to the
  * debug log (only the event type). The VM pulls via
  * GET /notifications; nothing is ever pushed anywhere.
+ *
+ * Acting (decision 77, v1.9.18): POST /notification_action opens
+ * a notification or sends an inline reply. Actions are NOT
+ * stored — the handler looks the notification up live in
+ * getActiveNotifications() at action time, so a key that is
+ * gone (or was never live) is 422.
  */
 public class BridgeNotificationListener extends NotificationListenerService {
 
@@ -206,6 +215,96 @@ public class BridgeNotificationListener extends NotificationListenerService {
             return s;
         }
         return s.substring(0, s.offsetByCodePoints(0, MAX_TEXT_CHARS));
+    }
+
+    /**
+     * Opens a live notification by its sbn key (decision 77):
+     * fires its contentIntent, which brings the app forward.
+     * Returns null on success, or an error string. The lookup
+     * is live — nothing is stored.
+     */
+    public static String openNotification(String key) {
+        BridgeNotificationListener l = instance;
+        if (l == null) {
+            return "notification_listener_not_connected";
+        }
+        StatusBarNotification sbn = l.findLive(key);
+        if (sbn == null) {
+            return "notification not found or already gone";
+        }
+        Notification n = sbn.getNotification();
+        if (n == null || n.contentIntent == null) {
+            return "notification cannot be opened";
+        }
+        try {
+            n.contentIntent.send();
+            BridgeLog.log("notification", "opened");
+            return null;
+        } catch (PendingIntent.CanceledException e) {
+            return "notification action no longer valid";
+        }
+    }
+
+    /**
+     * Sends an inline reply to a live notification by its sbn
+     * key (decision 77): finds the first action carrying a
+     * RemoteInput and sends the text through it. Returns null
+     * on success, or an error string. Throws
+     * IllegalArgumentException on empty text. This SENDS a
+     * message — the caller must have the user's approval of
+     * the exact text first.
+     */
+    public static String replyNotification(String key, String text) {
+        if (text == null || text.isEmpty()) {
+            throw new IllegalArgumentException("reply text must not be empty");
+        }
+        BridgeNotificationListener l = instance;
+        if (l == null) {
+            return "notification_listener_not_connected";
+        }
+        StatusBarNotification sbn = l.findLive(key);
+        if (sbn == null) {
+            return "notification not found or already gone";
+        }
+        Notification n = sbn.getNotification();
+        if (n == null || n.actions == null) {
+            return "no reply action on this notification";
+        }
+        for (Notification.Action action : n.actions) {
+            RemoteInput[] inputs = action.getRemoteInputs();
+            if (inputs == null || inputs.length == 0) {
+                continue;
+            }
+            Intent fillIn = new Intent();
+            Bundle results = new Bundle();
+            results.putCharSequence(inputs[0].getResultKey(), text);
+            RemoteInput.addResultsToIntent(inputs, fillIn, results);
+            try {
+                action.actionIntent.send(l, 0, fillIn);
+                BridgeLog.log("notification", "replied");
+                return null;
+            } catch (PendingIntent.CanceledException e) {
+                return "notification action no longer valid";
+            }
+        }
+        return "no reply action on this notification";
+    }
+
+    /** The live StatusBarNotification for this key, or null. */
+    private StatusBarNotification findLive(String key) {
+        if (key == null) {
+            return null;
+        }
+        try {
+            for (StatusBarNotification sbn : getActiveNotifications()) {
+                if (sbn != null && key.equals(sbn.getKey())) {
+                    return sbn;
+                }
+            }
+        } catch (Exception ignored) {
+            // Best effort: a null result reads as "not found".
+        }
+        return null;
     }
 
     /** One recorded notification event (post, update, or removal). */

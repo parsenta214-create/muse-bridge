@@ -1308,3 +1308,54 @@ def test_app_set_clipboard_needs_gate(mock_app):
     with pytest.raises(PermissionError):
         adapter.set_clipboard("x")
     assert adapter.get_clipboard()["ok"] is True
+
+
+# --------------------------------------------------------------------------
+# Decision 77: notification open/reply (v1.9.18).
+# --------------------------------------------------------------------------
+
+NOTIF_KEY = "0|com.example.chat|1|null|10001"
+
+
+def test_app_notification_open(mock_app):
+    """Decision 77: notification_action open posts key + action."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.notification_action(NOTIF_KEY, "open")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/notification_action",
+            {"key": NOTIF_KEY, "action": "open"}) in posts
+
+
+def test_app_notification_reply(mock_app):
+    """Decision 77: notification_action reply posts key + action +
+    the exact text."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.notification_action(
+        NOTIF_KEY, "reply", text="はい")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/notification_action",
+            {"key": NOTIF_KEY, "action": "reply", "text": "はい"}) in posts
+
+
+def test_app_notification_action_bad_args(mock_app):
+    """Decision 77: a bad key, action, or missing reply text
+    raises ValueError before any request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="must not be empty"):
+        adapter.notification_action("", "open")
+    with pytest.raises(ValueError, match="must be 'open' or 'reply'"):
+        adapter.notification_action(NOTIF_KEY, "dismiss")
+    with pytest.raises(ValueError, match="text is required"):
+        adapter.notification_action(NOTIF_KEY, "reply")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_notification_action_needs_gate(mock_app):
+    """Decision 77: opening a notification changes the screen
+    and replying sends a message, so both need
+    --allow-actions."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.notification_action(NOTIF_KEY, "open")
+    with pytest.raises(PermissionError):
+        adapter.notification_action(NOTIF_KEY, "reply", text="x")

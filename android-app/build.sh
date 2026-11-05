@@ -16,8 +16,8 @@ BUILD="$HERE/build"
 # File naming rule (2026-11-06): underscores, never spaces, and the
 # extension always matches the content. The APK is versioned so a
 # download is recognizable: Muse_Bridge_v1.9.apk.
-VERSION_CODE=27
-VERSION_NAME="1.9.17"
+VERSION_CODE=28
+VERSION_NAME="1.9.18"
 OUT="$HERE/Muse_Bridge_v${VERSION_NAME}.apk"
 
 for f in "$ANDROID_JAR" "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner" "$JAVA_HOME/bin/javac"; do

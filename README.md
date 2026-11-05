@@ -1694,6 +1694,27 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     retried; a non-string raises ValueError before any
     request. APK 66,246 bytes, sha256 4ddb4f0a…; 127 tests
     pass. D-1 remaining: notification open/reply.
+77. Notification open/reply — POST /notification_action
+    (2026-11-06, v1.9.18 / code 28). `POST
+    /notification_action {"key": "...", "action": "open"}`
+    fires the notification's contentIntent (brings the app
+    forward); `{"action": "reply", "text": "..."}` sends an
+    inline reply through the notification's first action
+    carrying a RemoteInput. The lookup is live in
+    getActiveNotifications() at action time — actions are
+    still never stored (decision 63's privacy rule stands),
+    so a gone key is 422 ("notification not found or already
+    gone"), a notification with no contentIntent is 422, and
+    one with no reply action is 422. 503 when the listener
+    is not granted or not connected (same as /notifications).
+    Reply SENDS a message: the caller must have the user's
+    approval of the exact text first. Client:
+    `AndroidAdapter.notification_action(key, action, text)`
+    — gated, never retried; bad key/action or a reply
+    without text raises ValueError before any request. APK
+    70,342 bytes, sha256 d635b11c…; 131 tests pass.
+    Phase D-1 is complete (open / install_apk / clipboard /
+    notification action).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

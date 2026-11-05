@@ -90,6 +90,7 @@ import java.util.concurrent.TimeUnit;
  *   GET  /install_status  (v1.9.16)
  *   GET  /clipboard       (v1.9.17)
  *   POST /clipboard       {"text":"..."} (v1.9.17)
+ *   POST /notification_action {"key":"...","action":"open"|"reply","text":"..."} (v1.9.18)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -701,6 +702,47 @@ public class HttpBridgeServer {
                             .put("events", notifs)
                             .put("latest_seq", nr.latestSeq)
                             .put("dropped", nr.dropped));
+                }
+            } else if ("/notification_action".equals(path) && "POST".equals(method)) {
+                // Decision 77 (v1.9.18): act on a live notification.
+                // {"key": "...", "action": "open"} fires its
+                // contentIntent; {"action": "reply", "text": "..."}
+                // sends an inline reply through its RemoteInput.
+                // The lookup is live (no stored actions), so a
+                // gone key is 422. 503 when the listener is not
+                // granted or not connected (same as /notifications).
+                // Reply SENDS a message: the caller must have the
+                // user's approval of the exact text first.
+                if (!BridgeNotificationListener.isAccessGranted(context)) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "notification_listener_access_not_granted"));
+                } else if (BridgeNotificationListener.getInstance() == null) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "notification_listener_not_connected"));
+                } else {
+                    JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                    String key = j.getString("key");
+                    String action = j.optString("action", "");
+                    String err;
+                    try {
+                        if ("open".equals(action)) {
+                            err = BridgeNotificationListener.openNotification(key);
+                        } else if ("reply".equals(action)) {
+                            String text = j.getString("text");
+                            err = BridgeNotificationListener.replyNotification(key, text);
+                        } else {
+                            throw new org.json.JSONException("unknown action: " + action);
+                        }
+                        status = err == null ? 200 : 422;
+                        sendJson(out, status, new JSONObject().put("ok", err == null)
+                                .put("error", err == null ? JSONObject.NULL : err));
+                    } catch (IllegalArgumentException e) {
+                        status = 422;
+                        sendJson(out, status, new JSONObject().put("ok", false)
+                                .put("error", e.getMessage()));
+                    }
                 }
             } else if ("/click_node".equals(path) && "POST".equals(method)) {
                 // Phase 2: click by node id (tree_hash from the /state

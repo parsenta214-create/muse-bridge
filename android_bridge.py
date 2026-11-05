@@ -673,6 +673,27 @@ class AndroidAdapter:
         self._require_actions("set_clipboard(...)")
         return self._app_post("/clipboard", {"text": text})
 
+    def notification_action(self, key: str, action: str, text=None) -> dict:
+        """Act on a live notification (decision 77, v1.9.18):
+        POST /notification_action. action "open" fires the
+        notification's contentIntent (brings the app forward);
+        "reply" sends an inline reply through its RemoteInput
+        (text required). The lookup is live, so a gone key is
+        422. Reply SENDS a message — call it only with the
+        user's approval of the exact text. Gated by
+        --allow-actions, never retried."""
+        if not key:
+            raise ValueError("key must not be empty")
+        if action not in ("open", "reply"):
+            raise ValueError("action must be 'open' or 'reply'")
+        if action == "reply" and not text:
+            raise ValueError("text is required for reply")
+        self._require_actions(f"notification_action({action})")
+        body = {"key": key, "action": action}
+        if text is not None:
+            body["text"] = text
+        return self._app_post("/notification_action", body)
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 
