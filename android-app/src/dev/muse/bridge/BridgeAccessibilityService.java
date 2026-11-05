@@ -456,6 +456,21 @@ public class BridgeAccessibilityService extends AccessibilityService {
             action = GLOBAL_ACTION_RECENTS;
         } else if ("POWER".equalsIgnoreCase(key)) {
             action = GLOBAL_ACTION_POWER_DIALOG;
+        } else if ("DPAD_UP".equalsIgnoreCase(key)) {
+            // Decision 66 (v1.9.9): DPAD global actions (API 33+)
+            // move focus, not the viewport — in a list, focus
+            // movement scrolls as a side effect. Whether a given
+            // app scrolls on DPAD_DOWN is the app's behaviour,
+            // not the bridge's.
+            action = GLOBAL_ACTION_DPAD_UP;
+        } else if ("DPAD_DOWN".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_DPAD_DOWN;
+        } else if ("DPAD_LEFT".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_DPAD_LEFT;
+        } else if ("DPAD_RIGHT".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_DPAD_RIGHT;
+        } else if ("DPAD_CENTER".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_DPAD_CENTER;
         } else {
             return false;
         }

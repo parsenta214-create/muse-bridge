@@ -518,7 +518,11 @@ class AndroidAdapter:
         return self._app_post("/type_text", {"text": text})
 
     def press_key(self, key: str) -> dict:
-        """key is a keyevent name or code, e.g. 'BACK', 'HOME', '4', '3'."""
+        """key is a keyevent name or code, e.g. 'BACK', 'HOME', '4', '3',
+        or a DPAD key ('DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT',
+        'DPAD_CENTER', decision 66, v1.9.9). DPAD keys move focus, not
+        the viewport — in a list, focus movement scrolls as a side
+        effect, which depends on the app."""
         self._require_actions(f"press_key({key})")
         app_key = {"3": "HOME", "4": "BACK"}.get(key, key)
         return self._app_post("/press_key", {"key": app_key})

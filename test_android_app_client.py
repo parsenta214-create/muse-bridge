@@ -986,3 +986,19 @@ def test_app_health_notification_listener_flag(mock_app):
     """Decision 63: /health carries notification_listener (the grant,
     not the connection state)."""
     assert ab.check_app()["notification_listener"] is True
+
+
+# --------------------------------------------------------------------------
+# Decision 66: DPAD keys in press_key (v1.9.9).
+# --------------------------------------------------------------------------
+
+def test_app_press_key_dpad(mock_app):
+    """Decision 66: press_key accepts the DPAD keys (they move focus;
+    scrolling is a side effect in lists, app-dependent). The mock
+    echoes any POST, so this pins the client-side pass-through."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    for key in ("DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+                "DPAD_CENTER"):
+        assert adapter.press_key(key)["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/press_key", {"key": "DPAD_DOWN"}) in posts

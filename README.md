@@ -1452,6 +1452,24 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     is often using the phone himself (e.g. ChatGPT in the
     foreground) and does not want the screen taken over
     without warning. Recorded in MEMORY.md (Preferences).
+66. DPAD keys in press_key (2026-11-06, v1.9.9 / code 19):
+    Saardeim asked whether scrolling accepts anything but
+    swipes (virtual/physical keys). Verified in the Android 34
+    SDK: GLOBAL_ACTION_DPAD_UP/DOWN/LEFT/RIGHT/CENTER exist
+    (API 33+) and ACTION_SCROLL_FORWARD/BACKWARD exists on
+    nodes; raw key-event injection (volume keys, PageUp/Down,
+    arrows) needs INJECT_EVENTS, a signature-level permission
+    a normal app cannot get — so keys cannot scroll that way.
+    press_key now also accepts DPAD_UP, DPAD_DOWN, DPAD_LEFT,
+    DPAD_RIGHT, DPAD_CENTER (performGlobalAction, same path
+    as HOME/BACK/RECENTS/POWER). DPAD moves FOCUS, not the
+    viewport: in a list, focus movement scrolls as a side
+    effect, which depends on the app — whether X's timeline
+    scrolls on DPAD_DOWN is X's behaviour and is UNVERIFIED
+    until the live test (user approved the test 05:48).
+    ACTION_SCROLL_FORWARD/BACKWARD on a scrollable node is a
+    separate, not-yet-implemented option. APK 62,152 bytes,
+    sha256 fc4d753a…; 99 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

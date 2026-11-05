@@ -66,7 +66,9 @@ import java.util.concurrent.TimeUnit;
  *   POST /batch           {"batch_id":"..","tree_hash":..,"actions":[..]} (v1.5)
  *   POST /swipe           {"x1":..,"y1":..,"x2":..,"y2":..,"duration_ms":..}
  *   POST /type_text       {"text":".."}
- *   POST /press_key       {"key":"HOME"|"BACK"|"RECENTS"|"POWER"}
+ *   POST /press_key       {"key":"HOME"|"BACK"|"RECENTS"|"POWER"|
+ *                         "DPAD_UP"|"DPAD_DOWN"|"DPAD_LEFT"|"DPAD_RIGHT"|
+ *                         "DPAD_CENTER"} (v1.9.9: DPAD keys)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
