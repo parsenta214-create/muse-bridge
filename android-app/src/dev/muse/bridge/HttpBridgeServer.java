@@ -25,8 +25,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Minimal raw-socket HTTP server for the bridge. No external dependencies.
@@ -79,12 +82,28 @@ public class HttpBridgeServer {
     private static final int BODY_TIMEOUT_MS = 10000;
     private static final long TOTAL_TIMEOUT_MS = 45000;
 
+    // A-2 (v1.9): executor separation. Accept threads never run HTTP
+    // handling; the worker pool is bounded so a flood cannot queue
+    // forever; at most MAX_CONNECTIONS sockets are held at once.
+    // These are the Codex Phase A initial values (decision 47) —
+    // tune them from measured load, not from first principles.
+    private static final int HTTP_WORKERS = 4;
+    private static final int HTTP_QUEUE = 8;
+    private static final int MAX_CONNECTIONS = 16;
+
+    /** Server lifecycle (A-2). start() only reports RUNNING when at
+     * least one listener socket is bound; a bind failure leaves
+     * FAILED instead of pretending to run. */
+    public enum ServerState { NEW, STARTING, RUNNING, FAILED, STOPPING, STOPPED }
+
     private final int port;
     private final TokenProvider tokens;
     private final Context context;
-    private final ExecutorService pool = Executors.newFixedThreadPool(4);
+    private final Semaphore connectionSlots = new Semaphore(MAX_CONNECTIONS);
+    private ThreadPoolExecutor workers;
     private final List<ServerSocket> listeners = new ArrayList<>();
-    private volatile boolean running = false;
+    private final List<Thread> acceptThreads = new ArrayList<>();
+    private volatile ServerState state = ServerState.NEW;
 
     public HttpBridgeServer(int port, TokenProvider tokens, Context context) {
         this.port = port;
@@ -92,8 +111,18 @@ public class HttpBridgeServer {
         this.context = context.getApplicationContext();
     }
 
-    public void start() {
-        running = true;
+    /** Binds the listeners and starts one dedicated accept thread per
+     * listener. Returns true only when at least one socket is bound.
+     * A second start after STOPPED creates a fresh worker pool. */
+    public synchronized boolean start() {
+        if (state == ServerState.RUNNING || state == ServerState.STARTING) {
+            return state == ServerState.RUNNING;
+        }
+        state = ServerState.STARTING;
+        workers = new ThreadPoolExecutor(HTTP_WORKERS, HTTP_WORKERS,
+                0L, TimeUnit.MILLISECONDS,
+                new ArrayBlockingQueue<Runnable>(HTTP_QUEUE),
+                new ThreadPoolExecutor.AbortPolicy());
         List<InetAddress> addrs = bindAddresses();
         for (InetAddress addr : addrs) {
             try {
@@ -102,21 +131,35 @@ public class HttpBridgeServer {
                 ss.bind(new InetSocketAddress(addr, port));
                 listeners.add(ss);
                 final ServerSocket sock = ss;
-                pool.execute(new Runnable() {
+                Thread t = new Thread(new Runnable() {
                     @Override
                     public void run() {
                         acceptLoop(sock);
                     }
-                });
+                }, "muse-bridge-accept-" + addr.getHostAddress());
+                acceptThreads.add(t);
+                t.start();
                 Log.i(TAG, "listening on " + addr.getHostAddress() + ":" + port);
             } catch (Exception e) {
                 Log.w(TAG, "cannot bind " + addr.getHostAddress() + ": " + e.getMessage());
             }
         }
+        if (listeners.isEmpty()) {
+            state = ServerState.FAILED;
+            workers.shutdownNow();
+            workers = null;
+            Log.e(TAG, "no listener bound; server FAILED");
+            return false;
+        }
+        state = ServerState.RUNNING;
+        return true;
     }
 
-    public void stop() {
-        running = false;
+    public synchronized void stop() {
+        if (state == ServerState.STOPPED || state == ServerState.NEW) {
+            return;
+        }
+        state = ServerState.STOPPING;
         for (ServerSocket ss : listeners) {
             try {
                 ss.close();
@@ -124,7 +167,16 @@ public class HttpBridgeServer {
             }
         }
         listeners.clear();
-        pool.shutdownNow();
+        acceptThreads.clear();
+        if (workers != null) {
+            workers.shutdownNow();
+            workers = null;
+        }
+        state = ServerState.STOPPED;
+    }
+
+    public boolean isRunning() {
+        return state == ServerState.RUNNING;
     }
 
     private List<InetAddress> bindAddresses() {
@@ -150,19 +202,76 @@ public class HttpBridgeServer {
     }
 
     private void acceptLoop(ServerSocket ss) {
-        while (running) {
+        // A-2: this thread only accepts. HTTP handling runs on the
+        // bounded worker pool; the connection slot is released when
+        // the worker finishes (or immediately when we shed the load).
+        final ThreadPoolExecutor pool = workers;
+        while (state == ServerState.RUNNING) {
             try {
                 final Socket conn = ss.accept();
-                pool.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        handle(conn);
+                if (pool == null || pool.isShutdown()) {
+                    try {
+                        conn.close();
+                    } catch (Exception ignored) {
                     }
-                });
+                    continue;
+                }
+                if (!connectionSlots.tryAcquire()) {
+                    // At the connection cap: shed without reading the
+                    // request — reading is what we protect the
+                    // workers from.
+                    try {
+                        conn.close();
+                    } catch (Exception ignored) {
+                    }
+                    Log.w(TAG, "connection cap reached; closed a connection");
+                    continue;
+                }
+                try {
+                    pool.execute(new Runnable() {
+                        @Override
+                        public void run() {
+                            try {
+                                handle(conn);
+                            } finally {
+                                connectionSlots.release();
+                            }
+                        }
+                    });
+                } catch (RejectedExecutionException e) {
+                    // Worker queue full: answer 503 without reading the
+                    // request (reading it would defeat the shedding)
+                    // and release the slot.
+                    connectionSlots.release();
+                    sendOverload(conn);
+                }
             } catch (Exception e) {
-                if (running) {
+                if (state == ServerState.RUNNING) {
                     Log.w(TAG, "accept failed: " + e.getMessage());
                 }
+            }
+        }
+    }
+
+    /** 503 for an overloaded server, sent without reading the request:
+     * the point of shedding load is to not spend work on it. */
+    private void sendOverload(Socket conn) {
+        try {
+            JSONObject body = errorJson("server busy");
+            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            String head = "HTTP/1.1 503 Service Unavailable\r\n"
+                    + "Content-Type: application/json\r\n"
+                    + "Content-Length: " + bytes.length + "\r\n"
+                    + "Connection: close\r\n\r\n";
+            OutputStream out = conn.getOutputStream();
+            out.write(head.getBytes(StandardCharsets.US_ASCII));
+            out.write(bytes);
+            out.flush();
+        } catch (Exception ignored) {
+        } finally {
+            try {
+                conn.close();
+            } catch (Exception ignored) {
             }
         }
     }

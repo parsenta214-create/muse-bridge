@@ -878,6 +878,29 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     stated design constraint). New frozen decisions are needed
     for: node_id/snapshot validity, batch TTL, post-restart
     resend, 503 responses, Accessibility serialization.
+    A-1 implemented in v1.9 (2026-11-06 03:14, 65 tests pass):
+    HttpBridgeServer validates the request line, rejects bad/
+    duplicate headers, checks the token BEFORE reading the body,
+    validates Content-Length (negative -> 400, over 256 KiB ->
+    413), caps headers at 8 KiB (-> 431), per-phase timeouts
+    5 s header / 10 s body / 45 s total (-> 408), malformed
+    JSON -> 400; the VM client classifies 400/408/413/431 as
+    input-validation errors instead of blaming the token.
+47. A-2 adopted limits (2026-11-06 03:16, Codex Phase A initial
+    values, now frozen): HTTP workers 4, worker queue 8, max
+    connections 16 (Semaphore, acquired at accept, fail -> close
+    without reading). Accept threads are dedicated (one per
+    listener socket) and never run HTTP handling; the worker pool
+    is a bounded ThreadPoolExecutor (AbortPolicy). Lifecycle
+    NEW -> STARTING -> RUNNING / FAILED -> STOPPING -> STOPPED;
+    start() returns true only when >= 1 socket is bound, and
+    BridgeService reports running only then (fixes the old
+    "running = true unconditionally" bug). Deviation from the
+    Codex design, recorded: a queue-full 503 is sent WITHOUT
+    reading the request (Codex said "after minimal header
+    parse") — reading the request would spend the work the
+    shedding is meant to save. Same deviation for the
+    connection-cap close.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

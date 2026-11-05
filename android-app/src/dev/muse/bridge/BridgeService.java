@@ -65,8 +65,14 @@ public class BridgeService extends Service {
                     }
                 },
                 this);
-        server.start();
-        running = true;
+        // A-2 (v1.9): start() is false when no socket bound — the
+        // service must not report running in that case (old code set
+        // running = true unconditionally).
+        running = server.start();
+        if (!running) {
+            android.util.Log.e("MuseBridge",
+                    "bridge server failed to bind any address");
+        }
     }
 
     @Override
