@@ -1107,10 +1107,15 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     has been opened once — open the app after installing, then the
     next boot works. The accessibility service stays enabled
     across a reboot (system setting), so the bridge comes up fully
-    working. Verification pending: install, open once, reboot,
-    and check /health with no manual start (Tailscale Always-on
-    VPN still needs the user's one-time setting for the network
-    path to be automatic too).
+    working. Verified 2026-11-06 06:10 (on 1.9.11, which carries
+    the same receiver): after the user rebooted with no manual
+    bridge or Tailscale start, /health answered (1.9.11, code
+    21) and /logs held "[11-06 06:10:47] boot BOOT_COMPLETED
+    received; starting bridge". The bridge auto-starts. The
+    phone was also reachable over Tailscale with no manual
+    start, so the network path came back too (whether by
+    Always-on VPN or Tailscale's own restart is unconfirmed;
+    the setting itself is still unchecked).
 58. Client retry policy (2026-11-06 04:29, client improvement 1,
     user chose it first): _app_request retries transient failures
     (max 3 attempts, full-jitter backoff from retry.py). Retried:
