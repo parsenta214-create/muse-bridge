@@ -1,0 +1,12 @@
+# Secrets and local state — never commit these.
+.env
+*.apk
+*.apk.idsig
+android-app/debug.keystore
+android-app/build/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+logs/
+.pytest_cache/

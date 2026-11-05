@@ -1,0 +1,923 @@
+package dev.muse.bridge;
+
+import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
+import android.graphics.Bitmap;
+import android.graphics.Path;
+import android.graphics.Rect;
+import android.os.Bundle;
+import android.view.Display;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
+import android.view.WindowManager;
+
+import java.io.ByteArrayOutputStream;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * AccessibilityService that performs the on-device work for the bridge:
+ * screenshots, taps, swipes, text entry, and global keys.
+ *
+ * The service itself does no networking and holds no credential. The HTTP
+ * server (HttpBridgeServer) calls into the live instance.
+ */
+public class BridgeAccessibilityService extends AccessibilityService {
+
+    private static volatile BridgeAccessibilityService instance;
+
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+
+    /** Monotonic snapshot counter (Phase 1): every /state gets a new revision. */
+    private final AtomicInteger revision = new AtomicInteger(0);
+
+    /** Caps for the node tree (Phase 1): keeps one /state small and fast. */
+    private static final int MAX_NODES = 500;
+    private static final int MAX_DEPTH = 25;
+
+    /**
+     * Live nodes from the most recent tree walk (Phase 2). Ids are only
+     * valid within lastRevision; a node action refreshes its node first
+     * and fails when the screen has moved on. The map is recycled and
+     * rebuilt on every currentState() call — live nodes are never held
+     * across a snapshot (GPT design: verify validity right before use).
+     */
+    private final Map<String, AccessibilityNodeInfo> lastNodes = new LinkedHashMap<>();
+    private int lastRevision = -1;
+    private int lastTreeHash = 0;
+
+    /** Batch results by batch_id for idempotency (Phase 2, max 50). */
+    private final Map<String, BatchResult> batchCache = new LinkedHashMap<String, BatchResult>() {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, BatchResult> e) {
+            return size() > 50;
+        }
+    };
+
+    /**
+     * Phase 3 (v1.6): event engine. Accessibility events arrive in
+     * onAccessibilityEvent on the service main thread; the bridge
+     * records a bounded, coalesced history that the VM pulls with
+     * GET /events. HTTP handlers run on server threads, so every
+     * method touching this state is synchronized on the service.
+     * Events are a "something happened" signal, not precise state:
+     * the VM refetches /state for the true current tree.
+     */
+    private static final int MAX_EVENTS = 200;
+    private static final long COALESCE_WINDOW_MS = 300;
+    private final Deque<UiEvent> eventBuffer = new ArrayDeque<>();
+    private final AtomicLong eventSeq = new AtomicLong(0);
+    /** Seq of the most recently evicted event (0 = nothing evicted). */
+    private long lastEventDroppedSeq = 0;
+
+    public static BridgeAccessibilityService getInstance() {
+        return instance;
+    }
+
+    @Override
+    public void onServiceConnected() {
+        super.onServiceConnected();
+        instance = this;
+    }
+
+    @Override
+    public void onDestroy() {
+        instance = null;
+        executor.shutdownNow();
+        super.onDestroy();
+    }
+
+    @Override
+    public void onAccessibilityEvent(android.view.accessibility.AccessibilityEvent event) {
+        // Phase 3 (v1.6): record a bounded, coalesced history for
+        // GET /events. Never let event handling break the service.
+        try {
+            recordEvent(event);
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Record one accessibility event, or merge it into the previous
+     * record when it is an identical repeat within the coalescing
+     * window (CONTENT_CHANGED floods on every layout pass). Only the
+     * whitelisted types are recorded; the config already asks for
+     * typeAllMask with notificationTimeout 100, so the flood is
+     * throttled twice. Password sources are always "[REDACTED]":
+     * no password text, before-text, or description ever leaves the
+     * phone in an event. The event time is uptimeMillis — monotonic
+     * on-device, never compared with VM wall clocks.
+     */
+    private synchronized void recordEvent(android.view.accessibility.AccessibilityEvent event) {
+        int type = event.getEventType();
+        if (type != android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && type != android.view.accessibility.AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                && type != android.view.accessibility.AccessibilityEvent.TYPE_VIEW_CLICKED
+                && type != android.view.accessibility.AccessibilityEvent.TYPE_VIEW_FOCUSED
+                && type != android.view.accessibility.AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED
+                && type != android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SCROLLED
+                && type != android.view.accessibility.AccessibilityEvent.TYPE_VIEW_SELECTED) {
+            return;
+        }
+        UiEvent e = new UiEvent();
+        e.t = event.getEventTime();
+        e.type = android.view.accessibility.AccessibilityEvent.eventTypeToString(type);
+        CharSequence pkg = event.getPackageName();
+        e.packageName = pkg == null ? "" : pkg.toString();
+        CharSequence cls = event.getClassName();
+        e.className = cls == null ? "" : cls.toString();
+        e.left = -1;
+        e.top = -1;
+        e.right = -1;
+        e.bottom = -1;
+        boolean password = false;
+        String nodeText = "";
+        String nodeDesc = "";
+        AccessibilityNodeInfo src = null;
+        try {
+            src = event.getSource();
+            if (src != null) {
+                password = src.isPassword();
+                Rect b = new Rect();
+                src.getBoundsInScreen(b);
+                e.left = b.left;
+                e.top = b.top;
+                e.right = b.right;
+                e.bottom = b.bottom;
+                CharSequence t = src.getText();
+                if (t != null) {
+                    nodeText = t.toString().trim();
+                }
+                CharSequence d = src.getContentDescription();
+                if (d != null) {
+                    nodeDesc = d.toString().trim();
+                }
+            }
+        } catch (Exception ignored) {
+            // Best effort only; the event still records without bounds.
+        } finally {
+            if (src != null) {
+                try {
+                    src.recycle();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        if (password) {
+            e.text = "[REDACTED]";
+            e.desc = nodeDesc.isEmpty() ? "" : "[REDACTED]";
+        } else {
+            StringBuilder sb = new StringBuilder();
+            try {
+                for (CharSequence c : event.getText()) {
+                    if (sb.length() > 0) {
+                        sb.append(' ');
+                    }
+                    sb.append(c);
+                }
+            } catch (Exception ignored) {
+            }
+            String text = sb.toString().trim();
+            if (text.isEmpty()) {
+                text = nodeText;
+            }
+            e.text = text.length() > 120 ? text.substring(0, 120) : text;
+            e.desc = nodeDesc.length() > 120 ? nodeDesc.substring(0, 120) : nodeDesc;
+        }
+        UiEvent last = eventBuffer.peekLast();
+        if (last != null && e.t - last.t <= COALESCE_WINDOW_MS
+                && last.type.equals(e.type)
+                && last.packageName.equals(e.packageName)
+                && last.className.equals(e.className)
+                && last.text.equals(e.text)) {
+            last.coalesced++;
+            return;
+        }
+        e.seq = eventSeq.incrementAndGet();
+        eventBuffer.addLast(e);
+        if (eventBuffer.size() > MAX_EVENTS) {
+            UiEvent dropped = eventBuffer.removeFirst();
+            lastEventDroppedSeq = dropped.seq;
+        }
+    }
+
+    /**
+     * Events after `since` (exclusive), oldest first, capped at
+     * `limit`. dropped is true when the buffer evicted events the
+     * caller never saw (since is older than the oldest evicted seq),
+     * so the caller should refetch /state instead of trusting the
+     * gap. treeHash/revision are the latest snapshot's, so the
+     * caller can tell whether the screen also moved.
+     */
+    public synchronized EventsResult getEvents(long since, int limit) {
+        EventsResult r = new EventsResult();
+        r.latestSeq = eventSeq.get();
+        r.dropped = since < lastEventDroppedSeq;
+        for (UiEvent e : eventBuffer) {
+            if (e.seq > since) {
+                r.events.add(e);
+            }
+            if (r.events.size() >= limit) {
+                break;
+            }
+        }
+        r.treeHash = lastTreeHash;
+        r.revision = lastRevision;
+        return r;
+    }
+
+    @Override
+    public void onInterrupt() {
+    }
+
+    /** Screenshot of the default display as PNG bytes (API 30+). */
+    public byte[] takeScreenshotPng() throws Exception {
+        return takeScreenshot(1.0f, "png", 100);
+    }
+
+    /**
+     * Screenshot with optional downscale and JPEG compression (v1.2).
+     * scale is clamped to 0.1–1.0; format is "png" or "jpeg"
+     * (anything else falls back to PNG); quality 10–100 applies to
+     * JPEG only. Full-res PNG stays the default for callers that
+     * need every pixel; the VM client uses half-scale JPEG for
+     * routine checks because a 1080x2340 wallpaper PNG is ~2 MB
+     * and costs ~2 s of transfer over the tunnel.
+     */
+    public byte[] takeScreenshot(float scale, String format, int quality) throws Exception {
+        final CountDownLatch latch = new CountDownLatch(1);
+        final byte[][] out = new byte[1][];
+        final int[] err = new int[]{-1};
+        final float useScale = Math.max(0.1f, Math.min(1.0f, scale));
+        final boolean useJpeg = "jpeg".equalsIgnoreCase(format) || "jpg".equalsIgnoreCase(format);
+        final int useQuality = Math.max(10, Math.min(100, quality));
+        takeScreenshot(Display.DEFAULT_DISPLAY, executor,
+                new TakeScreenshotCallback() {
+                    @Override
+                    public void onSuccess(ScreenshotResult result) {
+                        android.hardware.HardwareBuffer hb = null;
+                        try {
+                            hb = result.getHardwareBuffer();
+                            Bitmap hw = Bitmap.wrapHardwareBuffer(hb, result.getColorSpace());
+                            if (hw == null) {
+                                err[0] = -3;
+                                return;
+                            }
+                            Bitmap sw = hw.copy(Bitmap.Config.ARGB_8888, false);
+                            if (useScale < 1.0f) {
+                                int w = Math.max(1, Math.round(sw.getWidth() * useScale));
+                                int h = Math.max(1, Math.round(sw.getHeight() * useScale));
+                                Bitmap small = Bitmap.createScaledBitmap(sw, w, h, true);
+                                sw.recycle();
+                                sw = small;
+                            }
+                            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                            if (useJpeg) {
+                                sw.compress(Bitmap.CompressFormat.JPEG, useQuality, bos);
+                            } else {
+                                sw.compress(Bitmap.CompressFormat.PNG, 100, bos);
+                            }
+                            sw.recycle();
+                            out[0] = bos.toByteArray();
+                        } catch (Exception e) {
+                            err[0] = -2;
+                        } finally {
+                            if (hb != null) {
+                                hb.close();
+                            }
+                            latch.countDown();
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(int errorCode) {
+                        err[0] = errorCode;
+                        latch.countDown();
+                    }
+                });
+        if (!latch.await(10, TimeUnit.SECONDS)) {
+            throw new Exception("screenshot timed out");
+        }
+        if (out[0] == null) {
+            throw new Exception("screenshot failed (error " + err[0] + ")");
+        }
+        return out[0];
+    }
+
+    private boolean runGesture(Path path, long durationMs) throws Exception {
+        GestureDescription desc = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, durationMs))
+                .build();
+        final CountDownLatch latch = new CountDownLatch(1);
+        final boolean[] ok = new boolean[]{false};
+        boolean dispatched = dispatchGesture(desc, new GestureResultCallback() {
+            @Override
+            public void onCompleted(GestureDescription g) {
+                ok[0] = true;
+                latch.countDown();
+            }
+
+            @Override
+            public void onCancelled(GestureDescription g) {
+                latch.countDown();
+            }
+        }, null);
+        if (!dispatched) {
+            throw new Exception("gesture rejected by the system "
+                    + "(dispatchGesture returned false — is canPerformGestures set?)");
+        }
+        if (!latch.await(5, TimeUnit.SECONDS)) {
+            throw new Exception("gesture timed out");
+        }
+        return ok[0];
+    }
+
+    public boolean tap(int x, int y) throws Exception {
+        Path path = new Path();
+        path.moveTo(x, y);
+        // A moveTo-only path is degenerate: the gesture system may drop
+        // it without ever calling the callback. A 1px line makes it a
+        // real stroke.
+        path.lineTo(x + 1, y);
+        return runGesture(path, 100);
+    }
+
+    public boolean swipe(int x1, int y1, int x2, int y2, long durationMs) throws Exception {
+        Path path = new Path();
+        path.moveTo(x1, y1);
+        path.lineTo(x2, y2);
+        return runGesture(path, durationMs);
+    }
+
+    public boolean pressKey(String key) {
+        int action;
+        if ("HOME".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_HOME;
+        } else if ("BACK".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_BACK;
+        } else if ("RECENTS".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_RECENTS;
+        } else if ("POWER".equalsIgnoreCase(key)) {
+            action = GLOBAL_ACTION_POWER_DIALOG;
+        } else {
+            return false;
+        }
+        return performGlobalAction(action);
+    }
+
+    /**
+     * Set text on the currently focused editable field. Returns false when
+     * there is no focused editable field (tap the field first).
+     */
+    public boolean typeText(String text) {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) {
+            return false;
+        }
+        AccessibilityNodeInfo target = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+        if (target == null) {
+            target = root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY);
+        }
+        if (target == null || !target.isEditable()) {
+            return false;
+        }
+        target.refresh();
+        Bundle args = new Bundle();
+        args.putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        return target.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 2: node-targeted actions and batches.
+    // ---------------------------------------------------------------
+
+    /** The screen moved on since the /state the client used. */
+    public static class StaleRevisionException extends Exception {
+        public StaleRevisionException(String message) {
+            super(message);
+        }
+    }
+
+    /** No live node with that id in the current snapshot. */
+    public static class NodeNotFoundException extends Exception {
+        public NodeNotFoundException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Resolves a node id against the snapshot the client used. The
+     * check is the tree hash, not the snapshot counter: the hash only
+     * moves when the screen content changes, so a node stays valid
+     * across snapshots of an unchanged screen. refresh() is the
+     * second check — it fails when the node itself went away.
+     */
+    private AccessibilityNodeInfo findLiveNode(String nodeId, int treeHash)
+            throws StaleRevisionException, NodeNotFoundException {
+        if (lastRevision < 0) {
+            throw new NodeNotFoundException("no /state snapshot yet — fetch /state first");
+        }
+        if (treeHash != lastTreeHash) {
+            throw new StaleRevisionException(
+                    "screen changed since that /state (tree hash moved) — refetch state");
+        }
+        AccessibilityNodeInfo node = lastNodes.get(nodeId);
+        if (node == null) {
+            throw new NodeNotFoundException("no node " + nodeId + " in this snapshot");
+        }
+        if (!node.refresh()) {
+            throw new NodeNotFoundException("node " + nodeId + " went stale — refetch state");
+        }
+        return node;
+    }
+
+    /**
+     * Clicks a node by id. When the node itself is not clickable, the
+     * handler is often on an ancestor (GPT design), so the first
+     * clickable ancestor is used instead.
+     */
+    public synchronized boolean clickNode(String nodeId, int treeHash) throws Exception {
+        AccessibilityNodeInfo node = findLiveNode(nodeId, treeHash);
+        AccessibilityNodeInfo target = node;
+        while (target != null && !target.isClickable()) {
+            AccessibilityNodeInfo parent = target.getParent();
+            if (target != node) {
+                target.recycle();
+            }
+            target = parent;
+        }
+        if (target == null) {
+            return false;
+        }
+        try {
+            return target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        } finally {
+            if (target != node) {
+                target.recycle();
+            }
+        }
+    }
+
+    /** Sets text on an editable node by id. */
+    public synchronized boolean typeNode(String nodeId, int treeHash, String text)
+            throws Exception {
+        AccessibilityNodeInfo node = findLiveNode(nodeId, treeHash);
+        if (!node.isEditable()) {
+            return false;
+        }
+        Bundle args = new Bundle();
+        args.putCharSequence(
+                AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+    }
+
+    /** One step of a batch. Only the fields its type needs are set. */
+    public static class BatchAction {
+        public String actionId = "";
+        public String type = "";
+        public String nodeId = "";
+        public int x;
+        public int y;
+        public int x1;
+        public int y1;
+        public int x2;
+        public int y2;
+        public long durationMs = 300;
+        public String text = "";
+        public String key = "";
+        public long waitMs;
+        public boolean expectChange;
+    }
+
+    public static class ActionResult {
+        public String actionId = "";
+        public String status = "";
+        public String error = "";
+        public int hashBefore;
+        public int hashAfter;
+    }
+
+    public static class BatchResult {
+        public String batchId = "";
+        public boolean replayed;
+        public List<ActionResult> results = new ArrayList<>();
+        public int stoppedAt = -1;
+        public String stopReason = "";
+
+        public BatchResult() {
+        }
+
+        /** Copy for a replayed response (the original stays cached). */
+        public BatchResult(BatchResult other) {
+            this.batchId = other.batchId;
+            this.results = other.results;
+            this.stoppedAt = other.stoppedAt;
+            this.stopReason = other.stopReason;
+        }
+    }
+
+    /**
+     * Runs a batch against one snapshot (Phase 2). Steps execute in
+     * order; the first failure stops the batch. A step with
+     * expectChange waits up to 2 s for the tree hash to move: when it
+     * moves, the batch stops after that step (the screen changed, so
+     * later node ids are invalid — the client refetches /state and
+     * sends the next batch). A re-sent batch_id returns the cached
+     * result without re-executing anything (idempotency).
+     */
+    public synchronized BatchResult runBatch(String batchId, int treeHash,
+            List<BatchAction> actions) throws Exception {
+        BatchResult cached = batchCache.get(batchId);
+        if (cached != null) {
+            BatchResult replay = new BatchResult(cached);
+            replay.replayed = true;
+            return replay;
+        }
+        if (lastRevision < 0) {
+            throw new NodeNotFoundException("no /state snapshot yet — fetch /state first");
+        }
+        if (treeHash != lastTreeHash) {
+            throw new StaleRevisionException(
+                    "screen changed since that /state (tree hash moved) — refetch state");
+        }
+        BatchResult result = new BatchResult();
+        result.batchId = batchId;
+        for (int i = 0; i < actions.size(); i++) {
+            BatchAction a = actions.get(i);
+            ActionResult r = new ActionResult();
+            r.actionId = a.actionId;
+            r.hashBefore = lastTreeHash;
+            try {
+                boolean ok = executeAction(a, treeHash);
+                r.status = ok ? "executed" : "failed";
+                if (!ok) {
+                    r.error = "action returned false";
+                }
+            } catch (Exception e) {
+                r.status = "failed";
+                r.error = e.getMessage() == null ? e.toString() : e.getMessage();
+            }
+            r.hashAfter = lastTreeHash;
+            result.results.add(r);
+            if ("failed".equals(r.status)) {
+                result.stoppedAt = i;
+                result.stopReason = r.error;
+                break;
+            }
+            if (a.expectChange) {
+                if (waitForChange(r.hashBefore, 2000)) {
+                    r.hashAfter = lastTreeHash;
+                    result.stoppedAt = i;
+                    result.stopReason = "screen changed — refetch state for the next batch";
+                    break;
+                }
+                r.status = "failed";
+                r.error = "no screen change within 2s";
+                result.stoppedAt = i;
+                result.stopReason = r.error;
+                break;
+            }
+        }
+        batchCache.put(batchId, result);
+        return result;
+    }
+
+    private boolean executeAction(BatchAction a, int treeHash) throws Exception {
+        if ("click_node".equals(a.type)) {
+            return clickNode(a.nodeId, treeHash);
+        } else if ("tap".equals(a.type)) {
+            return tap(a.x, a.y);
+        } else if ("type_node".equals(a.type)) {
+            return typeNode(a.nodeId, treeHash, a.text);
+        } else if ("type".equals(a.type)) {
+            return typeText(a.text);
+        } else if ("key".equals(a.type)) {
+            return pressKey(a.key);
+        } else if ("swipe".equals(a.type)) {
+            return swipe(a.x1, a.y1, a.x2, a.y2, a.durationMs);
+        } else if ("wait".equals(a.type)) {
+            Thread.sleep(Math.max(0, a.waitMs));
+            return true;
+        }
+        throw new IllegalArgumentException("unknown action type: " + a.type);
+    }
+
+    /** Polls for a tree-hash change (fresh snapshot each poll). */
+    private boolean waitForChange(int hashBefore, long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            currentState();
+            if (lastTreeHash != hashBefore) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Screen size, foreground package, visible texts, and (Phase 1) the
+     * node tree: every visible node with its screen bounds, focus and
+     * input state, plus the focused node and whether the keyboard is up.
+     * The tree is what lets the machine operator decide the next action
+     * without taking a screenshot: "tap the node with this text" instead
+     * of "tap pixel (x, y) found in an image". Synchronized: the tree
+     * walk rebuilds the live-node map that node actions read (Phase 2).
+     */
+    public synchronized State currentState() {
+        State state = new State();
+        state.revision = revision.incrementAndGet();
+        try {
+            Rect bounds = ((WindowManager) getSystemService(WINDOW_SERVICE))
+                    .getCurrentWindowMetrics().getBounds();
+            state.width = bounds.width();
+            state.height = bounds.height();
+        } catch (Exception e) {
+            state.width = -1;
+            state.height = -1;
+        }
+        synchronized (this) {
+            recycleLastNodes();
+            lastRevision = state.revision;
+        }
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) {
+            state.packageName = String.valueOf(root.getPackageName());
+            state.texts = new ArrayList<>();
+            collectTexts(root, state.texts, 20);
+            state.nodes = new ArrayList<>();
+            // Focus is read during the walk (isFocused /
+            // isAccessibilityFocused): no separate findFocus call, so
+            // the focused id can never point at the wrong twin node.
+            String[] focus = new String[1];
+            String[] a11yFocus = new String[1];
+            // The walk keeps the live nodes it visits in lastNodes
+            // (Phase 2): they are recycled on the next snapshot.
+            Map<String, AccessibilityNodeInfo> live = new LinkedHashMap<>();
+            state.truncated = collectNodes(root, null, 0, state.nodes, focus, a11yFocus, live);
+            state.focusedId = focus[0] != null ? focus[0] : a11yFocus[0];
+            state.treeHash = computeTreeHash(state.nodes);
+            synchronized (this) {
+                lastNodes.putAll(live);
+                lastTreeHash = state.treeHash;
+            }
+            // The root is n0 in the map; do not recycle it here.
+        }
+        state.imeVisible = isImeVisible();
+        state.eventSeq = eventSeq.get();
+        return state;
+    }
+
+    private synchronized void recycleLastNodes() {
+        for (AccessibilityNodeInfo n : lastNodes.values()) {
+            try {
+                n.recycle();
+            } catch (Exception ignored) {
+            }
+        }
+        lastNodes.clear();
+    }
+
+    /** Content hash of the tree: changes only when the screen changes. */
+    private static int computeTreeHash(List<Node> nodes) {
+        int h = 17;
+        for (Node n : nodes) {
+            h = 31 * h + n.className.hashCode();
+            h = 31 * h + n.text.hashCode();
+            h = 31 * h + n.left;
+            h = 31 * h + n.top;
+            h = 31 * h + n.right;
+            h = 31 * h + n.bottom;
+            h = 31 * h + (n.clickable ? 1 : 0);
+            h = 31 * h + (n.enabled ? 1 : 0);
+        }
+        return h;
+    }
+
+    /** True when an input-method (keyboard) window is present. */
+    private boolean isImeVisible() {
+        try {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows == null) {
+                return false;
+            }
+            for (AccessibilityWindowInfo w : windows) {
+                try {
+                    if (w.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                        return true;
+                    }
+                } finally {
+                    w.recycle();
+                }
+            }
+        } catch (Exception ignored) {
+            // Best effort only; the field just stays false.
+        }
+        return false;
+    }
+
+    /**
+     * Depth-first walk of the node tree. Node ids are "n0", "n1", ...
+     * in walk order and are only valid for this revision (Phase 1):
+     * a later /state gets a new revision and new ids. Returns true when
+     * the walk stopped early at MAX_NODES / MAX_DEPTH.
+     */
+    private boolean collectNodes(AccessibilityNodeInfo node, String parentId,
+            int depth, List<Node> out, String[] focus, String[] a11yFocus,
+            Map<String, AccessibilityNodeInfo> live) {
+        if (node == null || depth > MAX_DEPTH) {
+            return depth > MAX_DEPTH;
+        }
+        if (out.size() >= MAX_NODES) {
+            return true;
+        }
+        Node n = new Node();
+        n.id = "n" + out.size();
+        n.parentId = parentId;
+        CharSequence cls = node.getClassName();
+        n.className = cls == null ? "" : cls.toString();
+        // Password fields never expose their value: the operator gets
+        // "[REDACTED]" instead (GPT design, Phase 1 privacy rule).
+        n.password = node.isPassword();
+        CharSequence text = node.getText();
+        n.text = n.password ? "[REDACTED]"
+                : (text == null ? "" : text.toString());
+        CharSequence desc = node.getContentDescription();
+        n.contentDescription = desc == null ? "" : desc.toString();
+        Rect r = new Rect();
+        node.getBoundsInScreen(r);
+        n.left = r.left;
+        n.top = r.top;
+        n.right = r.right;
+        n.bottom = r.bottom;
+        n.clickable = node.isClickable();
+        n.focusable = node.isFocusable();
+        n.focused = node.isFocused();
+        n.editable = node.isEditable();
+        n.scrollable = node.isScrollable();
+        n.enabled = node.isEnabled();
+        n.selected = node.isSelected();
+        n.inputType = node.getInputType();
+        CharSequence resId = node.getViewIdResourceName();
+        n.resourceId = resId == null ? "" : resId.toString();
+        n.actions = new ArrayList<>();
+        for (AccessibilityNodeInfo.AccessibilityAction a : node.getActionList()) {
+            String name = actionName(a.getId());
+            if (name != null) {
+                n.actions.add(name);
+            }
+        }
+        out.add(n);
+        // Phase 2: keep the live node so a node action can refresh it
+        // and act on it. It is recycled on the next snapshot.
+        live.put(n.id, node);
+        if (n.focused && focus[0] == null) {
+            focus[0] = n.id;
+        }
+        if (node.isAccessibilityFocused() && a11yFocus[0] == null) {
+            a11yFocus[0] = n.id;
+        }
+        boolean truncated = false;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child == null) {
+                continue;
+            }
+            // No recycle here: the child stays live in the map.
+            if (collectNodes(child, n.id, depth + 1, out, focus, a11yFocus, live)) {
+                truncated = true;
+                break;
+            }
+            if (out.size() >= MAX_NODES) {
+                truncated = true;
+                break;
+            }
+        }
+        return truncated;
+    }
+
+    /** Short names for the actions the operator cares about. */
+    private static String actionName(int id) {
+        switch (id) {
+            case AccessibilityNodeInfo.ACTION_CLICK: return "click";
+            case AccessibilityNodeInfo.ACTION_LONG_CLICK: return "long_click";
+            case AccessibilityNodeInfo.ACTION_FOCUS: return "focus";
+            case AccessibilityNodeInfo.ACTION_CLEAR_FOCUS: return "clear_focus";
+            case AccessibilityNodeInfo.ACTION_SET_TEXT: return "set_text";
+            case AccessibilityNodeInfo.ACTION_SCROLL_FORWARD: return "scroll_forward";
+            case AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD: return "scroll_backward";
+            case AccessibilityNodeInfo.ACTION_SELECT: return "select";
+            case AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS: return "accessibility_focus";
+            default: return null;
+        }
+    }
+
+    private void collectTexts(AccessibilityNodeInfo node, List<String> out, int limit) {
+        if (node == null || out.size() >= limit) {
+            return;
+        }
+        CharSequence text = node.getText();
+        if (text != null && node.isVisibleToUser()) {
+            String s = text.toString().trim();
+            if (!s.isEmpty() && s.length() <= 120) {
+                out.add(s);
+            }
+        }
+        for (int i = 0; i < node.getChildCount() && out.size() < limit; i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            try {
+                collectTexts(child, out, limit);
+            } finally {
+                if (child != null) {
+                    child.recycle();
+                }
+            }
+        }
+    }
+
+    public static class State {
+        public int width = -1;
+        public int height = -1;
+        public String packageName = "";
+        public List<String> texts = new ArrayList<>();
+        /** Phase 1: monotonic snapshot counter; ids are valid only within it. */
+        public int revision = 0;
+        /** Phase 2: content hash — changes only when the screen changes. */
+        public int treeHash = 0;
+        /** Phase 3: latest recorded event seq (0 = none yet). */
+        public long eventSeq = 0;
+        public List<Node> nodes = new ArrayList<>();
+        public String focusedId = null;
+        public boolean imeVisible = false;
+        public boolean truncated = false;
+    }
+
+    /** One node of the screen tree (Phase 1). Bounds are screen pixels. */
+    public static class Node {
+        public String id = "";
+        public String parentId = null;
+        public String className = "";
+        public String text = "";
+        public String contentDescription = "";
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
+        public boolean clickable;
+        public boolean focusable;
+        public boolean focused;
+        public boolean editable;
+        public boolean scrollable;
+        public boolean enabled;
+        public boolean selected;
+        public boolean password;
+        public int inputType;
+        public String resourceId = "";
+        public List<String> actions = new ArrayList<>();
+    }
+
+    /** One recorded accessibility event (Phase 3). */
+    public static class UiEvent {
+        public long seq = 0;
+        /** event.getEventTime(): uptime ms, monotonic on-device. */
+        public long t = 0;
+        public String type = "";
+        public String packageName = "";
+        public String className = "";
+        /** "[REDACTED]" when the source is a password field. */
+        public String text = "";
+        public String desc = "";
+        public int left = -1;
+        public int top = -1;
+        public int right = -1;
+        public int bottom = -1;
+        /** Identical repeats merged into this record. */
+        public int coalesced = 0;
+    }
+
+    /** Result of getEvents: the slice plus the caller's bearings. */
+    public static class EventsResult {
+        public List<UiEvent> events = new ArrayList<>();
+        public long latestSeq = 0;
+        /** True when events the caller never saw were evicted. */
+        public boolean dropped = false;
+        public int treeHash = 0;
+        public int revision = -1;
+    }
+}
