@@ -289,6 +289,29 @@ class AndroidAdapter:
             raise ValueError(f"unknown transport: {transport}")
         self.transport = transport
         self.actions_enabled = actions_enabled
+        # A-3 (v1.9): the most recent /state, so node actions can tell
+        # whether that snapshot was stable before acting on it.
+        self._last_state: dict | None = None
+
+    # -- snapshot guard (A-3) ------------------------------------------------
+    def _ensure_fresh_snapshot(self, tree_hash: int) -> int:
+        """Refetch /state when the last snapshot was unstable.
+
+        A snapshot with snapshot_stable=false may be mid-change, so a
+        node id from it is not trusted: fetch a fresh one. When the
+        fresh tree_hash moved, the screen changed — raise instead of
+        acting on stale ids (the caller refetches and re-plans).
+        Returns the tree_hash to act on (unchanged when it matches).
+        """
+        last = self._last_state
+        if last is None or last.get("snapshot_stable") is not False:
+            return tree_hash
+        fresh = self._state_app()
+        if fresh.get("tree_hash") != tree_hash:
+            raise TransportError(
+                "stale snapshot: the screen changed after an unstable "
+                "/state — refetch state and re-plan the action")
+        return fresh.get("tree_hash", tree_hash)
 
     # -- read-only -----------------------------------------------------------
     def capture_screen(self, scale: float = 0.5, format: str = "jpeg",
@@ -357,6 +380,7 @@ class AndroidAdapter:
         self._require_actions(f"click_node({node_id})")
         if self.transport != "app":
             raise TransportError("click_node is only available on the app transport")
+        tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/click_node", {"node_id": node_id, "tree_hash": tree_hash})
 
     def type_node(self, node_id: str, tree_hash: int, text: str) -> dict:
@@ -364,6 +388,7 @@ class AndroidAdapter:
         self._require_actions(f"type_node({node_id}, {text!r})")
         if self.transport != "app":
             raise TransportError("type_node is only available on the app transport")
+        tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/type_node",
                               {"node_id": node_id, "tree_hash": tree_hash, "text": text})
 
@@ -377,6 +402,7 @@ class AndroidAdapter:
         self._require_actions(f"batch({batch_id}, {len(actions)} actions)")
         if self.transport != "app":
             raise TransportError("batch is only available on the app transport")
+        tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/batch", {
             "batch_id": batch_id, "tree_hash": tree_hash, "actions": actions})
 
@@ -523,6 +549,9 @@ class AndroidAdapter:
     def _state_app(self) -> dict:
         state = self._app_request("GET", "/state")
         state["transport"] = "app"
+        # A-3: remember the snapshot so node actions can check its
+        # stability before acting.
+        self._last_state = state
         return state
 
     def _app_post(self, path: str, payload: dict) -> dict:

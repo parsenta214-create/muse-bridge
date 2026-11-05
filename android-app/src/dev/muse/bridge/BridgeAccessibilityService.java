@@ -6,6 +6,8 @@ import android.graphics.Bitmap;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Display;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
@@ -18,10 +20,14 @@ import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -38,6 +44,46 @@ public class BridgeAccessibilityService extends AccessibilityService {
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
 
+    /**
+     * A-3 (v1.9): the single execution context. Accessibility work
+     * runs on the service main thread (Codex Phase A baseline): HTTP
+     * worker threads never touch AccessibilityNodeInfo directly, they
+     * post to the main thread and wait. runOnMainThread() runs the
+     * task directly when already on the main thread, so a main-thread
+     * caller (waitForChange inside runBatch) cannot deadlock itself.
+     */
+    private Handler mainHandler;
+    private static final long MAIN_THREAD_TIMEOUT_MS = 20000;
+
+    /** Accessibility work timed out waiting for the main thread (-> 503). */
+    public static class ServiceTimeoutException extends Exception {
+        public ServiceTimeoutException(String message) {
+            super(message);
+        }
+    }
+
+    private <T> T runOnMainThread(Callable<T> task) throws Exception {
+        if (mainHandler == null
+                || Looper.myLooper() == Looper.getMainLooper()) {
+            return task.call();
+        }
+        FutureTask<T> future = new FutureTask<>(task);
+        mainHandler.post(future);
+        try {
+            return future.get(MAIN_THREAD_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(true);
+            throw new ServiceTimeoutException(
+                    "accessibility work timed out on the main thread");
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) {
+                throw (Exception) cause;
+            }
+            throw new RuntimeException(cause);
+        }
+    }
+
     /** Monotonic snapshot counter (Phase 1): every /state gets a new revision. */
     private final AtomicInteger revision = new AtomicInteger(0);
 
@@ -46,11 +92,13 @@ public class BridgeAccessibilityService extends AccessibilityService {
     private static final int MAX_DEPTH = 25;
 
     /**
-     * Live nodes from the most recent tree walk (Phase 2). Ids are only
-     * valid within lastRevision; a node action refreshes its node first
-     * and fails when the screen has moved on. The map is recycled and
-     * rebuilt on every currentState() call — live nodes are never held
-     * across a snapshot (GPT design: verify validity right before use).
+     * Live nodes from the most recent tree walk (Phase 2, redefined
+     * in A-3). They are the latest walk's nodes only: no action ever
+     * touches them directly — every node action takes a fresh walk
+     * first (resolveFresh) and uses that walk's nodes inside the
+     * same operation. The map is recycled and rebuilt on every
+     * currentState() call; a walk that fails recycles its partial
+     * map instead of leaking it.
      */
     private final Map<String, AccessibilityNodeInfo> lastNodes = new LinkedHashMap<>();
     private int lastRevision = -1;
@@ -88,6 +136,9 @@ public class BridgeAccessibilityService extends AccessibilityService {
     public void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        // A-3: the main-thread handler is the single execution
+        // context for accessibility work.
+        mainHandler = new Handler(Looper.getMainLooper());
     }
 
     @Override
@@ -416,19 +467,27 @@ public class BridgeAccessibilityService extends AccessibilityService {
         }
     }
 
+    /** Result of a node action: whether it ran, and the snapshot
+     * (fresh walk) it resolved against. */
+    public static class ActionOutcome {
+        public boolean ok;
+        public int snapshotId = -1;
+    }
+
     /**
-     * Resolves a node id against the snapshot the client used. The
-     * check is the tree hash, not the snapshot counter: the hash only
-     * moves when the screen content changes, so a node stays valid
-     * across snapshots of an unchanged screen. refresh() is the
-     * second check — it fails when the node itself went away.
+     * A-3: resolves a node id against a FRESH tree walk taken just
+     * before the action, using the same traversal order (so the ids
+     * match the client's /state). Checks, in order: the client's
+     * tree_hash still matches the fresh walk (else 409 stale), the
+     * node exists in the fresh walk, and it is visible to the user.
+     * The node comes from the fresh walk and is used inside this
+     * operation only — no action ever touches a node held from an
+     * earlier /state.
      */
-    private AccessibilityNodeInfo findLiveNode(String nodeId, int treeHash)
+    private AccessibilityNodeInfo resolveFresh(String nodeId, int treeHash)
             throws StaleRevisionException, NodeNotFoundException {
-        if (lastRevision < 0) {
-            throw new NodeNotFoundException("no /state snapshot yet — fetch /state first");
-        }
-        if (treeHash != lastTreeHash) {
+        State fresh = currentStateInternal();
+        if (treeHash != fresh.treeHash) {
             throw new StaleRevisionException(
                     "screen changed since that /state (tree hash moved) — refetch state");
         }
@@ -436,8 +495,8 @@ public class BridgeAccessibilityService extends AccessibilityService {
         if (node == null) {
             throw new NodeNotFoundException("no node " + nodeId + " in this snapshot");
         }
-        if (!node.refresh()) {
-            throw new NodeNotFoundException("node " + nodeId + " went stale — refetch state");
+        if (!node.isVisibleToUser()) {
+            throw new NodeNotFoundException("node " + nodeId + " is not visible");
         }
         return node;
     }
@@ -445,10 +504,24 @@ public class BridgeAccessibilityService extends AccessibilityService {
     /**
      * Clicks a node by id. When the node itself is not clickable, the
      * handler is often on an ancestor (GPT design), so the first
-     * clickable ancestor is used instead.
+     * clickable ancestor is used instead; a clickable target that is
+     * disabled cannot run (422). Runs on the main thread (A-3).
      */
-    public synchronized boolean clickNode(String nodeId, int treeHash) throws Exception {
-        AccessibilityNodeInfo node = findLiveNode(nodeId, treeHash);
+    public ActionOutcome clickNode(final String nodeId, final int treeHash)
+            throws Exception {
+        return runOnMainThread(new Callable<ActionOutcome>() {
+            @Override
+            public ActionOutcome call() throws Exception {
+                return clickNodeInternal(nodeId, treeHash);
+            }
+        });
+    }
+
+    private synchronized ActionOutcome clickNodeInternal(String nodeId, int treeHash)
+            throws Exception {
+        ActionOutcome out = new ActionOutcome();
+        AccessibilityNodeInfo node = resolveFresh(nodeId, treeHash);
+        out.snapshotId = lastRevision;
         AccessibilityNodeInfo target = node;
         while (target != null && !target.isClickable()) {
             AccessibilityNodeInfo parent = target.getParent();
@@ -458,10 +531,18 @@ public class BridgeAccessibilityService extends AccessibilityService {
             target = parent;
         }
         if (target == null) {
-            return false;
+            out.ok = false;
+            return out;
+        }
+        if (!target.isEnabled()) {
+            if (target != node) {
+                target.recycle();
+            }
+            throw new NodeNotFoundException("node " + nodeId + " is disabled");
         }
         try {
-            return target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            out.ok = target.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+            return out;
         } finally {
             if (target != node) {
                 target.recycle();
@@ -469,17 +550,34 @@ public class BridgeAccessibilityService extends AccessibilityService {
         }
     }
 
-    /** Sets text on an editable node by id. */
-    public synchronized boolean typeNode(String nodeId, int treeHash, String text)
-            throws Exception {
-        AccessibilityNodeInfo node = findLiveNode(nodeId, treeHash);
-        if (!node.isEditable()) {
-            return false;
+    /** Sets text on an editable node by id. Runs on the main thread (A-3). */
+    public ActionOutcome typeNode(final String nodeId, final int treeHash,
+            final String text) throws Exception {
+        return runOnMainThread(new Callable<ActionOutcome>() {
+            @Override
+            public ActionOutcome call() throws Exception {
+                return typeNodeInternal(nodeId, treeHash, text);
+            }
+        });
+    }
+
+    private synchronized ActionOutcome typeNodeInternal(String nodeId, int treeHash,
+            String text) throws Exception {
+        ActionOutcome out = new ActionOutcome();
+        AccessibilityNodeInfo node = resolveFresh(nodeId, treeHash);
+        out.snapshotId = lastRevision;
+        // Password fields accept typed text (that is how a password is
+        // entered); the privacy rule is that their value never leaves
+        // the phone (redacted in /state and /events), not a refusal.
+        if (!node.isEditable() || !node.isEnabled()) {
+            out.ok = false;
+            return out;
         }
         Bundle args = new Bundle();
         args.putCharSequence(
                 AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
-        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        out.ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+        return out;
     }
 
     /** One step of a batch. Only the fields its type needs are set. */
@@ -514,6 +612,8 @@ public class BridgeAccessibilityService extends AccessibilityService {
         public List<ActionResult> results = new ArrayList<>();
         public int stoppedAt = -1;
         public String stopReason = "";
+        /** Revision of the snapshot the entry check used (A-3). */
+        public int snapshotId = -1;
 
         public BatchResult() {
         }
@@ -524,6 +624,7 @@ public class BridgeAccessibilityService extends AccessibilityService {
             this.results = other.results;
             this.stoppedAt = other.stoppedAt;
             this.stopReason = other.stopReason;
+            this.snapshotId = other.snapshotId;
         }
     }
 
@@ -534,9 +635,20 @@ public class BridgeAccessibilityService extends AccessibilityService {
      * moves, the batch stops after that step (the screen changed, so
      * later node ids are invalid — the client refetches /state and
      * sends the next batch). A re-sent batch_id returns the cached
-     * result without re-executing anything (idempotency).
+     * result without re-executing anything (idempotency). Runs on the
+     * main thread (A-3); each node step re-resolves fresh.
      */
-    public synchronized BatchResult runBatch(String batchId, int treeHash,
+    public BatchResult runBatch(final String batchId, final int treeHash,
+            final List<BatchAction> actions) throws Exception {
+        return runOnMainThread(new Callable<BatchResult>() {
+            @Override
+            public BatchResult call() throws Exception {
+                return runBatchInternal(batchId, treeHash, actions);
+            }
+        });
+    }
+
+    private synchronized BatchResult runBatchInternal(String batchId, int treeHash,
             List<BatchAction> actions) throws Exception {
         BatchResult cached = batchCache.get(batchId);
         if (cached != null) {
@@ -553,6 +665,7 @@ public class BridgeAccessibilityService extends AccessibilityService {
         }
         BatchResult result = new BatchResult();
         result.batchId = batchId;
+        result.snapshotId = lastRevision;
         for (int i = 0; i < actions.size(); i++) {
             BatchAction a = actions.get(i);
             ActionResult r = new ActionResult();
@@ -576,7 +689,17 @@ public class BridgeAccessibilityService extends AccessibilityService {
                 break;
             }
             if (a.expectChange) {
-                if (waitForChange(r.hashBefore, 2000)) {
+                boolean changed;
+                try {
+                    changed = waitForChange(r.hashBefore, 2000);
+                } catch (Exception e) {
+                    r.status = "failed";
+                    r.error = e.getMessage() == null ? e.toString() : e.getMessage();
+                    result.stoppedAt = i;
+                    result.stopReason = r.error;
+                    break;
+                }
+                if (changed) {
                     r.hashAfter = lastTreeHash;
                     result.stoppedAt = i;
                     result.stopReason = "screen changed — refetch state for the next batch";
@@ -595,11 +718,11 @@ public class BridgeAccessibilityService extends AccessibilityService {
 
     private boolean executeAction(BatchAction a, int treeHash) throws Exception {
         if ("click_node".equals(a.type)) {
-            return clickNode(a.nodeId, treeHash);
+            return clickNodeInternal(a.nodeId, treeHash).ok;
         } else if ("tap".equals(a.type)) {
             return tap(a.x, a.y);
         } else if ("type_node".equals(a.type)) {
-            return typeNode(a.nodeId, treeHash, a.text);
+            return typeNodeInternal(a.nodeId, treeHash, a.text).ok;
         } else if ("type".equals(a.type)) {
             return typeText(a.text);
         } else if ("key".equals(a.type)) {
@@ -614,7 +737,7 @@ public class BridgeAccessibilityService extends AccessibilityService {
     }
 
     /** Polls for a tree-hash change (fresh snapshot each poll). */
-    private boolean waitForChange(int hashBefore, long timeoutMs) {
+    private boolean waitForChange(int hashBefore, long timeoutMs) throws Exception {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             try {
@@ -637,12 +760,25 @@ public class BridgeAccessibilityService extends AccessibilityService {
      * input state, plus the focused node and whether the keyboard is up.
      * The tree is what lets the machine operator decide the next action
      * without taking a screenshot: "tap the node with this text" instead
-     * of "tap pixel (x, y) found in an image". Synchronized: the tree
-     * walk rebuilds the live-node map that node actions read (Phase 2).
+     * of "tap pixel (x, y) found in an image". Runs on the main thread
+     * (A-3). snapshot_stable is false when an accessibility event
+     * arrived mid-walk: the tree may be mid-change and the VM should
+     * refetch /state before important operations.
      */
-    public synchronized State currentState() {
+    public State currentState() throws Exception {
+        return runOnMainThread(new Callable<State>() {
+            @Override
+            public State call() {
+                return currentStateInternal();
+            }
+        });
+    }
+
+    private synchronized State currentStateInternal() {
         State state = new State();
         state.revision = revision.incrementAndGet();
+        state.snapshotId = state.revision;
+        long seqBefore = eventSeq.get();
         try {
             Rect bounds = ((WindowManager) getSystemService(WINDOW_SERVICE))
                     .getCurrentWindowMetrics().getBounds();
@@ -670,17 +806,41 @@ public class BridgeAccessibilityService extends AccessibilityService {
             // The walk keeps the live nodes it visits in lastNodes
             // (Phase 2): they are recycled on the next snapshot.
             Map<String, AccessibilityNodeInfo> live = new LinkedHashMap<>();
-            state.truncated = collectNodes(root, null, 0, state.nodes, focus, a11yFocus, live);
-            state.focusedId = focus[0] != null ? focus[0] : a11yFocus[0];
-            state.treeHash = computeTreeHash(state.nodes);
-            synchronized (this) {
-                lastNodes.putAll(live);
-                lastTreeHash = state.treeHash;
+            boolean walkOk = false;
+            try {
+                state.truncated = collectNodes(root, null, 0, state.nodes, focus, a11yFocus, live);
+                state.focusedId = focus[0] != null ? focus[0] : a11yFocus[0];
+                state.treeHash = computeTreeHash(state.nodes);
+                synchronized (this) {
+                    lastNodes.putAll(live);
+                    lastTreeHash = state.treeHash;
+                }
+                walkOk = true;
+            } finally {
+                if (!walkOk) {
+                    // A-3: a failed walk recycles its partial nodes
+                    // instead of leaking them; the root is recycled
+                    // only when it never reached the live map.
+                    for (AccessibilityNodeInfo n : live.values()) {
+                        try {
+                            n.recycle();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                    if (!live.containsValue(root)) {
+                        try {
+                            root.recycle();
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                // The root is n0 in the map on success; do not recycle it here.
             }
-            // The root is n0 in the map; do not recycle it here.
         }
         state.imeVisible = isImeVisible();
         state.eventSeq = eventSeq.get();
+        state.snapshotStable = (seqBefore == state.eventSeq);
+        state.snapshotValid = true;
         return state;
     }
 
@@ -748,68 +908,86 @@ public class BridgeAccessibilityService extends AccessibilityService {
             return true;
         }
         Node n = new Node();
-        n.id = "n" + out.size();
-        n.parentId = parentId;
-        CharSequence cls = node.getClassName();
-        n.className = cls == null ? "" : cls.toString();
-        // Password fields never expose their value: the operator gets
-        // "[REDACTED]" instead (GPT design, Phase 1 privacy rule).
-        n.password = node.isPassword();
-        CharSequence text = node.getText();
-        n.text = n.password ? "[REDACTED]"
-                : (text == null ? "" : text.toString());
-        CharSequence desc = node.getContentDescription();
-        n.contentDescription = desc == null ? "" : desc.toString();
-        Rect r = new Rect();
-        node.getBoundsInScreen(r);
-        n.left = r.left;
-        n.top = r.top;
-        n.right = r.right;
-        n.bottom = r.bottom;
-        n.clickable = node.isClickable();
-        n.focusable = node.isFocusable();
-        n.focused = node.isFocused();
-        n.editable = node.isEditable();
-        n.scrollable = node.isScrollable();
-        n.enabled = node.isEnabled();
-        n.selected = node.isSelected();
-        n.inputType = node.getInputType();
-        CharSequence resId = node.getViewIdResourceName();
-        n.resourceId = resId == null ? "" : resId.toString();
-        n.actions = new ArrayList<>();
-        for (AccessibilityNodeInfo.AccessibilityAction a : node.getActionList()) {
-            String name = actionName(a.getId());
-            if (name != null) {
-                n.actions.add(name);
+        boolean added = false;
+        try {
+            n.id = "n" + out.size();
+            n.parentId = parentId;
+            CharSequence cls = node.getClassName();
+            n.className = cls == null ? "" : cls.toString();
+            // Password fields never expose their value: the operator gets
+            // "[REDACTED]" instead (GPT design, Phase 1 privacy rule).
+            n.password = node.isPassword();
+            CharSequence text = node.getText();
+            n.text = n.password ? "[REDACTED]"
+                    : (text == null ? "" : text.toString());
+            CharSequence desc = node.getContentDescription();
+            n.contentDescription = desc == null ? "" : desc.toString();
+            Rect r = new Rect();
+            node.getBoundsInScreen(r);
+            n.left = r.left;
+            n.top = r.top;
+            n.right = r.right;
+            n.bottom = r.bottom;
+            n.clickable = node.isClickable();
+            n.focusable = node.isFocusable();
+            n.focused = node.isFocused();
+            n.editable = node.isEditable();
+            n.scrollable = node.isScrollable();
+            n.enabled = node.isEnabled();
+            n.selected = node.isSelected();
+            n.inputType = node.getInputType();
+            CharSequence resId = node.getViewIdResourceName();
+            n.resourceId = resId == null ? "" : resId.toString();
+            n.actions = new ArrayList<>();
+            for (AccessibilityNodeInfo.AccessibilityAction a : node.getActionList()) {
+                String name = actionName(a.getId());
+                if (name != null) {
+                    n.actions.add(name);
+                }
             }
-        }
-        out.add(n);
-        // Phase 2: keep the live node so a node action can refresh it
-        // and act on it. It is recycled on the next snapshot.
-        live.put(n.id, node);
-        if (n.focused && focus[0] == null) {
-            focus[0] = n.id;
-        }
-        if (node.isAccessibilityFocused() && a11yFocus[0] == null) {
-            a11yFocus[0] = n.id;
-        }
-        boolean truncated = false;
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child == null) {
-                continue;
+            out.add(n);
+            // A-3: the live node belongs to this walk's map; a node
+            // action re-walks before acting, so it never uses a node
+            // held from an earlier snapshot. Recycled on the next
+            // snapshot (or by the walk-level finally when this walk
+            // fails after the put).
+            live.put(n.id, node);
+            added = true;
+            if (n.focused && focus[0] == null) {
+                focus[0] = n.id;
             }
-            // No recycle here: the child stays live in the map.
-            if (collectNodes(child, n.id, depth + 1, out, focus, a11yFocus, live)) {
-                truncated = true;
-                break;
+            if (node.isAccessibilityFocused() && a11yFocus[0] == null) {
+                a11yFocus[0] = n.id;
             }
-            if (out.size() >= MAX_NODES) {
-                truncated = true;
-                break;
+            boolean truncated = false;
+            for (int i = 0; i < node.getChildCount(); i++) {
+                AccessibilityNodeInfo child = node.getChild(i);
+                if (child == null) {
+                    continue;
+                }
+                // No recycle here: the child stays live in the map.
+                if (collectNodes(child, n.id, depth + 1, out, focus, a11yFocus, live)) {
+                    truncated = true;
+                    break;
+                }
+                if (out.size() >= MAX_NODES) {
+                    truncated = true;
+                    break;
+                }
             }
+            return truncated;
+        } catch (Exception e) {
+            // A-3: a node that failed before reaching the live map is
+            // recycled here; one already in the map is recycled by the
+            // walk-level finally in currentStateInternal.
+            if (!added) {
+                try {
+                    node.recycle();
+                } catch (Exception ignored) {
+                }
+            }
+            throw e;
         }
-        return truncated;
     }
 
     /** Short names for the actions the operator cares about. */
@@ -862,6 +1040,15 @@ public class BridgeAccessibilityService extends AccessibilityService {
         public int treeHash = 0;
         /** Phase 3: latest recorded event seq (0 = none yet). */
         public long eventSeq = 0;
+        /** A-3: snapshot id — the same value as revision, exposed so
+         * the client can name the snapshot an action ran against. */
+        public int snapshotId = 0;
+        /** A-3: true when this snapshot is the latest complete walk. */
+        public boolean snapshotValid = false;
+        /** A-3: false when an accessibility event arrived mid-walk
+         * (the tree may be mid-change); the VM should refetch /state
+         * before important operations. */
+        public boolean snapshotStable = false;
         public List<Node> nodes = new ArrayList<>();
         public String focusedId = null;
         public boolean imeVisible = false;

@@ -36,6 +36,13 @@ def _tiny_png() -> bytes:
 
 class MockAppHandler(BaseHTTPRequestHandler):
     requests = []
+    # A-3 (v1.9): how /state answers, per test. "normal" always returns
+    # a stable snapshot; "unstable_then_same" returns an unstable
+    # snapshot first, then the same tree hash stable; "unstable_then_
+    # changed" returns an unstable snapshot first, then a changed tree
+    # hash stable. Reset by the fixture.
+    state_mode = "normal"
+    state_calls = 0
 
     def log_message(self, *args):  # keep test output quiet
         pass
@@ -95,9 +102,26 @@ class MockAppHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return self.wfile.write(png)
         if self.path == "/state":
+            MockAppHandler.state_calls += 1
+            mode = MockAppHandler.state_mode
+            if mode == "unstable_then_changed":
+                tree_hash = 111 if MockAppHandler.state_calls == 1 else 222
+                stable = MockAppHandler.state_calls != 1
+                snap = 7 if MockAppHandler.state_calls == 1 else 8
+            elif mode == "unstable_then_same":
+                tree_hash = 111
+                stable = MockAppHandler.state_calls != 1
+                snap = 7 if MockAppHandler.state_calls == 1 else 8
+            else:
+                tree_hash = 123456
+                stable = True
+                snap = 7
             return self._send_json(200, {"ok": True, "width": 1080, "height": 2340,
                                          "package": "com.example", "texts": ["Hi"],
-                                         "revision": 7, "tree_hash": 123456,
+                                         "revision": 7, "tree_hash": tree_hash,
+                                         "snapshot_id": snap,
+                                         "snapshot_valid": True,
+                                         "snapshot_stable": stable,
                                          "event_seq": 42,
                                          "app_version": "1.9",
                                          "app_version_code": 10,
@@ -156,6 +180,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
 @pytest.fixture()
 def mock_app(monkeypatch):
     MockAppHandler.requests.clear()
+    MockAppHandler.state_mode = "normal"
+    MockAppHandler.state_calls = 0
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockAppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -376,6 +402,55 @@ def test_app_503_hint_mentions_overload_v19(mock_app):
     assert "HTTP 503" in msg
     assert "overloaded" in msg
     assert "wrong token" not in msg
+
+
+def test_app_state_snapshot_fields_v19(mock_app):
+    """A-3 (v1.9): /state carries snapshot_id/snapshot_valid/
+    snapshot_stable, so the client can tell whether the snapshot it
+    holds is trustworthy before acting on its node ids."""
+    adapter = ab.AndroidAdapter(transport="app")
+    state = adapter.get_current_state()
+    assert state["snapshot_id"] == 7
+    assert state["snapshot_valid"] is True
+    assert state["snapshot_stable"] is True
+
+
+def test_app_stable_snapshot_no_refetch_v19(mock_app):
+    """A-3: a stable snapshot needs no refetch before a node action."""
+    adapter = ab.AndroidAdapter(transport="app", actions_enabled=True)
+    state = adapter.get_current_state()
+    assert adapter.click_node("n5", state["tree_hash"])["ok"] is True
+    gets = [r for r in MockAppHandler.requests
+            if r[0] == "GET" and r[1] == "/state"]
+    assert len(gets) == 1
+
+
+def test_app_unstable_snapshot_refetches_same_hash_v19(mock_app):
+    """A-3: an unstable snapshot is refetched before the action; when
+    the tree hash is unchanged the action proceeds (with the refetched
+    hash)."""
+    MockAppHandler.state_mode = "unstable_then_same"
+    adapter = ab.AndroidAdapter(transport="app", actions_enabled=True)
+    state = adapter.get_current_state()
+    assert state["snapshot_stable"] is False
+    assert adapter.click_node("n5", state["tree_hash"])["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/click_node", {"node_id": "n5", "tree_hash": 111}) in posts
+    gets = [r for r in MockAppHandler.requests
+            if r[0] == "GET" and r[1] == "/state"]
+    assert len(gets) == 2
+
+
+def test_app_unstable_snapshot_changed_raises_v19(mock_app):
+    """A-3: an unstable snapshot whose refetch shows a changed tree
+    hash raises instead of acting on stale ids (and posts nothing)."""
+    MockAppHandler.state_mode = "unstable_then_changed"
+    adapter = ab.AndroidAdapter(transport="app", actions_enabled=True)
+    state = adapter.get_current_state()
+    assert state["snapshot_stable"] is False
+    with pytest.raises(ab.TransportError, match="stale snapshot"):
+        adapter.click_node("n5", state["tree_hash"])
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
 
 
 def test_app_events_returns_history(mock_app):

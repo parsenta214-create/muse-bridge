@@ -468,6 +468,9 @@ public class HttpBridgeServer {
                             .put("texts", texts)
                             .put("revision", st.revision)
                             .put("tree_hash", st.treeHash)
+                            .put("snapshot_id", st.snapshotId)
+                            .put("snapshot_valid", st.snapshotValid)
+                            .put("snapshot_stable", st.snapshotStable)
                             .put("nodes", nodes)
                             .put("focused", st.focusedId == null
                                     ? JSONObject.NULL : st.focusedId)
@@ -527,10 +530,12 @@ public class HttpBridgeServer {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
                 try {
-                    boolean ok = svc.clickNode(j.getString("node_id"), j.getInt("tree_hash"));
-                    status = ok ? 200 : 422;
-                    sendJson(out, status, new JSONObject().put("ok", ok)
-                            .put("error", ok ? JSONObject.NULL : "node not clickable"));
+                    BridgeAccessibilityService.ActionOutcome o =
+                            svc.clickNode(j.getString("node_id"), j.getInt("tree_hash"));
+                    status = o.ok ? 200 : 422;
+                    sendJson(out, status, new JSONObject().put("ok", o.ok)
+                            .put("snapshot_id", o.snapshotId)
+                            .put("error", o.ok ? JSONObject.NULL : "node not clickable"));
                 } catch (BridgeAccessibilityService.StaleRevisionException e) {
                     status = 409;
                     sendJson(out, status, new JSONObject().put("ok", false)
@@ -545,11 +550,12 @@ public class HttpBridgeServer {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
                 try {
-                    boolean ok = svc.typeNode(j.getString("node_id"),
+                    BridgeAccessibilityService.ActionOutcome o = svc.typeNode(j.getString("node_id"),
                             j.getInt("tree_hash"), j.getString("text"));
-                    status = ok ? 200 : 422;
-                    sendJson(out, status, new JSONObject().put("ok", ok)
-                            .put("error", ok ? JSONObject.NULL : "node not editable"));
+                    status = o.ok ? 200 : 422;
+                    sendJson(out, status, new JSONObject().put("ok", o.ok)
+                            .put("snapshot_id", o.snapshotId)
+                            .put("error", o.ok ? JSONObject.NULL : "node not editable"));
                 } catch (BridgeAccessibilityService.StaleRevisionException e) {
                     status = 409;
                     sendJson(out, status, new JSONObject().put("ok", false)
@@ -604,6 +610,7 @@ public class HttpBridgeServer {
                     sendJson(out, status, new JSONObject()
                             .put("ok", true)
                             .put("batch_id", br.batchId)
+                            .put("snapshot_id", br.snapshotId)
                             .put("replayed", br.replayed)
                             .put("results", results)
                             .put("stopped_at", br.stoppedAt)
@@ -688,6 +695,13 @@ public class HttpBridgeServer {
             try {
                 sendJson(conn.getOutputStream(), status, new JSONObject()
                         .put("ok", false).put("error", e.getMessage()));
+            } catch (Exception ignored) {
+            }
+        } catch (BridgeAccessibilityService.ServiceTimeoutException e) {
+            // A-3: accessibility work timed out on the main thread.
+            status = 503;
+            try {
+                sendJson(conn.getOutputStream(), status, errorJson(e.getMessage()));
             } catch (Exception ignored) {
             }
         } catch (Exception e) {

@@ -886,6 +886,11 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     5 s header / 10 s body / 45 s total (-> 408), malformed
     JSON -> 400; the VM client classifies 400/408/413/431 as
     input-validation errors instead of blaming the token.
+    Verified live 2026-11-06 03:19 after the user installed v1.9:
+    /state 1.9/10, /health matches, bad token -> 401, oversized
+    Content-Length -> 413 "body too large". The bridge was briefly
+    unreachable right after the update (service restarting);
+    /state + /health both answer again after ~1 min.
 47. A-2 adopted limits (2026-11-06 03:16, Codex Phase A initial
     values, now frozen): HTTP workers 4, worker queue 8, max
     connections 16 (Semaphore, acquired at accept, fail -> close
@@ -901,6 +906,27 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     parse") — reading the request would spend the work the
     shedding is meant to save. Same deviation for the
     connection-cap close.
+48. A-3 adopted model (2026-11-06 03:25, Codex Phase A baseline):
+    single execution context = service main thread; HTTP workers
+    post accessibility work to it via runOnMainThread (20 s timeout
+    -> 503 ServiceTimeoutException) and run directly when already on
+    the main thread (no self-deadlock in waitForChange). Every node
+    action takes a FRESH tree walk just before acting (resolveFresh)
+    and checks tree_hash match (else 409), node exists, and visible;
+    click also requires a clickable ancestor that is enabled;
+    type requires editable + enabled. Password fields accept typed
+    text (entering a password); their value never leaves the phone
+    (redacted in /state and /events). /state gains snapshot_id
+    (= revision), snapshot_valid, snapshot_stable (false when an
+    event arrived mid-walk — the VM refetches /state before
+    important ops); action responses gain snapshot_id. A failed
+    walk recycles its partial nodes (walk-level finally +
+    collectNodes guard for a node that failed before reaching the
+    live map) instead of leaking them. Client rule: an unstable
+    last snapshot is refetched before a node action; a moved
+    tree_hash raises instead of acting. Batch entry check and
+    409/422 contract unchanged; batch carries the entry
+    snapshot_id.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
