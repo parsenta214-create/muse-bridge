@@ -1577,9 +1577,12 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     for every other app. Fix: an intent-based <queries>
     (MAIN + LAUNCHER) in the manifest, which makes all
     launcher apps visible with no QUERY_ALL_PACKAGES. No Java
-    change. Live test on X is still pending (needs the user
-    to install 1.9.13). APK 62,150 bytes, sha256 2c0c1a11…;
-    113 tests pass in the whole suite.
+    change. Verified 2026-11-06 06:19 on 1.9.13: launch_app
+    ("com.twitter.android") ok, and the screenshot confirmed
+    X's timeline in the foreground — the package name was
+    right all along, the missing <queries> was the cause.
+    APK 62,150 bytes, sha256 2c0c1a11…; 113 tests pass in the
+    whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
