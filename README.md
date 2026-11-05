@@ -1082,7 +1082,13 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     started at boot +2 min, i.e. the Termux:Boot script ran it.
     The bridge app was reachable too (health OK, accessibility
     enabled) — whether it auto-restarted (START_STICKY) or the
-    user started it by hand was not established.
+    user started it by hand was not established. Correction
+    (2026-11-06 04:22, user): after the reboot he started the
+    bridge AND Tailscale by hand — so the bridge did not
+    auto-restart, and the SSH path also depended on his manual
+    Tailscale start. Open follow-up: bridge auto-start at boot
+    (BOOT_COMPLETED receiver) and Tailscale Always-on VPN, so the
+    whole chain comes back without him.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
