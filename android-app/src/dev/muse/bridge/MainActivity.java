@@ -98,6 +98,13 @@ public class MainActivity extends Activity {
         Button stop = findViewById(R.id.stop_button);
         Button a11y = findViewById(R.id.accessibility_button);
         Button regen = findViewById(R.id.regenerate_button);
+        Button log = findViewById(R.id.log_button);
+        log.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                startActivity(new Intent(MainActivity.this, LogActivity.class));
+            }
+        });
 
         start.setOnClickListener(new View.OnClickListener() {
             @Override

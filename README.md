@@ -1038,6 +1038,21 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     accept-loop bug (decision 51) is the case this exists for: a
     deaf server now leaves "listen" lines with no accepts in the
     log instead of silence.
+55. On-phone log viewer + .txt export (2026-11-06 04:06, v1.9.4,
+    versionCode 14, user-approved — the offline gap he pointed
+    out: /logs is pull-based, so when the phone is offline neither
+    the VM nor the user could see anything). MainActivity gains a
+    「ログを見る」 button opening LogActivity, which reads the ring
+    buffer directly (no network, fully offline) with a refresh
+    button and a 「TXTで保存」 button. Export uses the system file
+    picker (Storage Access Framework, ACTION_CREATE_DOCUMENT,
+    text/plain, bridge-log-YYYYMMDD-HHmmss.txt) — no storage
+    permission needed; the user picks the destination (e.g.
+    Downloads) and can open or share the file from there.
+    BridgeLog.renderText() builds the shared text (header with app
+    version + export time, current run, then the previous run's
+    tail) used by both the viewer and the export, so both show
+    exactly what GET /logs returns.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

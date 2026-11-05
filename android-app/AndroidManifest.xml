@@ -24,6 +24,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".LogActivity"
+            android:exported="false"
+            android:label="ログ" />
+
         <service
             android:name=".BridgeAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"

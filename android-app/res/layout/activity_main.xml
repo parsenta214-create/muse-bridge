@@ -79,6 +79,11 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/btn_regenerate" />
+    <Button
+        android:id="@+id/log_button"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/btn_log" />
 
     <TextView
         android:layout_width="match_parent"

@@ -15,5 +15,10 @@
     <string name="toast_tile_already_added">もう追加済みだよ。</string>
     <string name="toast_tile_failed">追加できなかったよ。クイック設定の編集から「Muse Bridge」を手動で追加してね。</string>
     <string name="btn_regenerate">Regenerate token</string>
+    <string name="btn_log">ログを見る</string>
+    <string name="btn_log_refresh">更新</string>
+    <string name="btn_log_export">TXTで保存</string>
+    <string name="toast_log_saved">ログを保存したよ。</string>
+    <string name="toast_log_save_failed">保存できなかったよ。もう一度試してね。</string>
     <string name="hint">The bridge listens only on this phone (Tailscale address and localhost). Every request needs the token above. Stop the bridge when you are done.</string>
 </resources>
