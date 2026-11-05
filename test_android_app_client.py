@@ -1002,3 +1002,49 @@ def test_app_press_key_dpad(mock_app):
         assert adapter.press_key(key)["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert ("POST", "/press_key", {"key": "DPAD_DOWN"}) in posts
+
+
+# --------------------------------------------------------------------------
+# Decision 67: scroll_node (v1.9.10).
+# --------------------------------------------------------------------------
+
+def test_app_scroll_node_forward(mock_app):
+    """Decision 67: scroll_node posts node_id + tree_hash + direction
+    and returns ok; the mock echoes any POST, so this pins the
+    client-side request shape."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.scroll_node("n3", 123456, "forward")
+    assert result["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/scroll_node",
+            {"node_id": "n3", "tree_hash": 123456,
+             "direction": "forward"}) in posts
+
+
+def test_app_scroll_node_backward_default(mock_app):
+    """Decision 67: direction defaults to forward; backward passes
+    through as given."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.scroll_node("n3", 123456)["ok"] is True
+    assert adapter.scroll_node("n3", 123456, "backward")["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/scroll_node",
+            {"node_id": "n3", "tree_hash": 123456,
+             "direction": "backward"}) in posts
+
+
+def test_app_scroll_node_bad_direction(mock_app):
+    """Decision 67: an unknown direction raises ValueError before any
+    request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="unknown direction"):
+        adapter.scroll_node("n3", 123456, "sideways")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_scroll_node_needs_gate(mock_app):
+    """Decision 67: scroll_node is an action (it moves the screen),
+    so it needs --allow-actions like click and swipe."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.scroll_node("n3", 123456)

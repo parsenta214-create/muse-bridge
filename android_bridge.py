@@ -540,6 +540,22 @@ class AndroidAdapter:
         return self._app_post("/type_node",
                               {"node_id": node_id, "tree_hash": tree_hash, "text": text})
 
+    def scroll_node(self, node_id: str, tree_hash: int,
+                    direction: str = "forward") -> dict:
+        """Scroll a node by id (decision 67, v1.9.10): ACTION_SCROLL_FORWARD
+        or ACTION_SCROLL_BACKWARD on the node or its first scrollable
+        ancestor. direction is "forward" or "backward" (anything else
+        raises ValueError before any request). Never retried: a second
+        scroll would move the list twice."""
+        if direction not in ("forward", "backward"):
+            raise ValueError(f"unknown direction: {direction!r} "
+                             "(expected 'forward' or 'backward')")
+        self._require_actions(f"scroll_node({node_id}, {direction})")
+        tree_hash = self._ensure_fresh_snapshot(tree_hash)
+        return self._app_post("/scroll_node",
+                              {"node_id": node_id, "tree_hash": tree_hash,
+                               "direction": direction})
+
     def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
         """Run several actions in one request (Phase 2).
 

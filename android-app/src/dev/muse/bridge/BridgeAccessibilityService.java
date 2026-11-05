@@ -478,6 +478,64 @@ public class BridgeAccessibilityService extends AccessibilityService {
     }
 
     /**
+     * Scrolls a node by id (decision 67, v1.9.10): ACTION_SCROLL_FORWARD
+     * or ACTION_SCROLL_BACKWARD on the node or its first scrollable
+     * ancestor (the scroll handler is often on an ancestor, like the
+     * clickable one). A node that is not scrollable cannot run (422).
+     * Runs on the main thread (A-3).
+     */
+    public ActionOutcome scrollNode(final String nodeId, final int treeHash,
+            final String direction) throws Exception {
+        return runOnMainThread(new Callable<ActionOutcome>() {
+            @Override
+            public ActionOutcome call() throws Exception {
+                return scrollNodeInternal(nodeId, treeHash, direction);
+            }
+        });
+    }
+
+    private synchronized ActionOutcome scrollNodeInternal(String nodeId, int treeHash,
+            String direction) throws Exception {
+        int action;
+        if ("forward".equalsIgnoreCase(direction)) {
+            action = AccessibilityNodeInfo.ACTION_SCROLL_FORWARD;
+        } else if ("backward".equalsIgnoreCase(direction)) {
+            action = AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD;
+        } else {
+            throw new IllegalArgumentException("unknown direction: " + direction);
+        }
+        ActionOutcome out = new ActionOutcome();
+        AccessibilityNodeInfo node = resolveFresh(nodeId, treeHash);
+        out.snapshotId = lastRevision;
+        AccessibilityNodeInfo target = node;
+        while (target != null && !target.isScrollable()) {
+            AccessibilityNodeInfo parent = target.getParent();
+            if (target != node) {
+                target.recycle();
+            }
+            target = parent;
+        }
+        if (target == null) {
+            out.ok = false;
+            return out;
+        }
+        if (!target.isEnabled()) {
+            if (target != node) {
+                target.recycle();
+            }
+            throw new NodeNotFoundException("node " + nodeId + " is disabled");
+        }
+        try {
+            out.ok = target.performAction(action);
+            return out;
+        } finally {
+            if (target != node) {
+                target.recycle();
+            }
+        }
+    }
+
+    /**
      * Set text on the currently focused editable field. Returns false when
      * there is no focused editable field (tap the field first).
      */

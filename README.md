@@ -1484,6 +1484,25 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     X — DPAD_DOWN x5 again, texts identical before/after,
     focus stayed None this time. Same verdict, confirmed
     twice.
+67. Scroll by node (2026-11-06, v1.9.10 / code 20): after
+    DPAD proved unable to scroll X's timeline, add the last
+    non-swipe scroll method — POST /scroll_node {node_id,
+    tree_hash, direction "forward"|"backward"} sends
+    ACTION_SCROLL_FORWARD/BACKWARD on the node or its first
+    scrollable ancestor (same ancestor fallback as click_node,
+    same A-3 discipline: fresh walk, 409 on stale tree_hash,
+    422 on a missing/invisible/disabled node, 422 "node not
+    scrollable" when no scrollable ancestor exists, 400 on an
+    unknown direction). VM client: scroll_node(node_id,
+    tree_hash, direction="forward"), gated by --allow-actions,
+    never retried (a second scroll would move the list twice),
+    direction validated client-side (ValueError before any
+    request). Out of scope for v1: a scroll action type inside
+    /batch, and a "first scrollable node" convenience (the
+    caller picks the node from /state, where nodes carry
+    "scrollable"). Live test on X's timeline is still pending
+    (needs the user to install 1.9.10). APK 62,150 bytes,
+    sha256 27331efc…; 103 tests pass in the whole suite.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

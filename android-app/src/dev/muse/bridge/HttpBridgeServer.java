@@ -69,6 +69,8 @@ import java.util.concurrent.TimeUnit;
  *   POST /press_key       {"key":"HOME"|"BACK"|"RECENTS"|"POWER"|
  *                         "DPAD_UP"|"DPAD_DOWN"|"DPAD_LEFT"|"DPAD_RIGHT"|
  *                         "DPAD_CENTER"} (v1.9.9: DPAD keys)
+ *   POST /scroll_node     {"node_id":"..","tree_hash":..,
+ *                         "direction":"forward"|"backward"} (v1.9.10)
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
@@ -687,6 +689,35 @@ public class HttpBridgeServer {
                     status = 422;
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", e.getMessage()));
+                }
+            } else if ("/scroll_node".equals(path) && "POST".equals(method)) {
+                // Decision 67 (v1.9.10): scroll a node (or its first
+                // scrollable ancestor). 409 when the screen moved on.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                String direction = j.optString("direction", "forward");
+                if (!"forward".equalsIgnoreCase(direction)
+                        && !"backward".equalsIgnoreCase(direction)) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "unknown direction: " + direction));
+                } else {
+                    try {
+                        BridgeAccessibilityService.ActionOutcome o = svc.scrollNode(
+                                j.getString("node_id"), j.getInt("tree_hash"), direction);
+                        status = o.ok ? 200 : 422;
+                        sendJson(out, status, new JSONObject().put("ok", o.ok)
+                                .put("snapshot_id", o.snapshotId)
+                                .put("error", o.ok ? JSONObject.NULL : "node not scrollable"));
+                    } catch (BridgeAccessibilityService.StaleRevisionException e) {
+                        status = 409;
+                        sendJson(out, status, new JSONObject().put("ok", false)
+                                .put("error", e.getMessage()));
+                    } catch (BridgeAccessibilityService.NodeNotFoundException e) {
+                        status = 422;
+                        sendJson(out, status, new JSONObject().put("ok", false)
+                                .put("error", e.getMessage()));
+                    }
                 }
             } else if ("/batch".equals(path) && "POST".equals(method)) {
                 // Phase 2 (A-4): several actions in one request
