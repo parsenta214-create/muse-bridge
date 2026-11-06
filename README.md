@@ -1969,6 +1969,26 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     is now stored in ~/.ssh/known_hosts; termux_exec.sh works.
     push_apk.sh / termux_exec.sh are usable again. Tests: 197
     passed.
+87. Muse Bridge v2.0 startup spec adopted (2026-11-06, Saardeim
+    decision, GPT consultation CONS-20261106-021). Management
+    plane (HTTP/auth/logs/notifications/health) separated from
+    operation plane (AccessibilityService screen control).
+    MINIMAL is the standard startup state; FULL ACCESS is an
+    explicit switch; BANKING SAFE MODE is a named operational
+    constraint on MINIMAL (no AccessibilityService, screen
+    operation APIs answer unavailable, banking apps take
+    priority). Per-module health levels HEALTHY/DEGRADED/
+    CRITICAL/RECOVERING. Exponential-backoff auto-recovery.
+    Tailscale IP reported via /health, no hardcoded IP
+    (MagicDNS unverified). Termux SSH is an independent
+    module. Separate watchdog process deferred.
+    P0 approved and started: (1) HTTP/a11y dependency
+    separation, (2) MINIMAL as standard startup, (3)
+    per-module Health API. Note: HTTP/a11y separation is
+    largely already implemented (server runs without a11y,
+    verified live 2026-11-06); remaining P0-1 pieces are
+    /launch_app (P1-05) and structured "unavailable"
+    responses.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
