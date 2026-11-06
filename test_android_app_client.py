@@ -68,9 +68,13 @@ def _validate_node_action_args(action: str, args: dict):
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             return f"{action} needs integer {key}"
         if isinstance(v, float):
-            if not v.is_integer() or abs(v) > 2**31 - 1:
+            if not v.is_integer():
                 return f"{action} needs integer {key} (got {v!r})"
             v = int(v)
+        # P1-07 fix round 2 (CONS-033): the 32-bit range matches
+        # the Java server exactly at both edges (-2**31 .. 2**31-1).
+        if v < -(2**31) or v > 2**31 - 1:
+            return f"{action} needs integer {key} (got {v!r})"
         if minimum is not None and v < minimum:
             return f"{action} needs {key} >= {minimum}"
         if maximum is not None and v > maximum:
@@ -1840,18 +1844,23 @@ def test_app_node_action_raw_bad_args_are_400(mock_app):
 
 
 def test_app_node_action_large_int_arg_rejected():
-    """P1-07 fix round (CONS-032): the 32-bit range check must
-    apply to Python int values too — a Python int is arbitrary
-    precision, so 2**40 used to pass the client while the Java
-    server's requireIntArg rejects it. 2**31 - 1 is the largest
-    accepted int; 2**31 is rejected. (No mock_app needed: the
-    client raises before any request.)"""
+    """P1-07 fix round (CONS-032) + fix round 2 (CONS-033): the
+    32-bit range check must apply to Python int values too — a
+    Python int is arbitrary precision, so 2**40 used to pass the
+    client while the Java server's requireIntArg rejects it. The
+    range matches the server exactly at both edges: -2**31
+    (Integer.MIN_VALUE) is accepted, -(2**31) - 1 is rejected;
+    2**31 - 1 is the largest accepted int, 2**31 is rejected.
+    (No mock_app needed: the client raises before any request.)"""
     require = ab.AndroidAdapter._require_int_arg
     with pytest.raises(ValueError, match="needs integer"):
         require("scroll_to_position", "row", 2**40)
     with pytest.raises(ValueError, match="needs integer"):
         require("scroll_to_position", "row", 2**31)
     assert require("scroll_to_position", "row", 2**31 - 1) == 2**31 - 1
+    with pytest.raises(ValueError, match="needs integer"):
+        require("scroll_to_position", "row", -(2**31) - 1)
+    assert require("scroll_to_position", "row", -(2**31)) == -(2**31)
     assert require("scroll_to_position", "row", 0) == 0
 
 
@@ -1902,6 +1911,46 @@ def test_p1_06_accept_loop_checks_generation():
     loop condition must contain the generation equality check."""
     src = _java_source("HttpBridgeServer.java")
     assert "&& acceptGeneration == serverLifecycleGeneration" in src
+
+
+def test_p1_03_request_log_never_carries_arbitrary_path():
+    """P1-03 fix round 2 (CONS-033): the per-request Logcat line
+    in the finally block must never carry the raw request target
+    — only known endpoints are logged by name, anything else
+    logs as "UNKNOWN". Three source-level guards:
+    (1) the finally-block Log.i call interpolates
+    loggablePath(path), not the raw path;
+    (2) the KNOWN_PATHS set contains exactly the endpoints in
+    the handler's if/else chain — a new endpoint that is added
+    to the chain but not to the set fails the suite (fail-closed
+    in the safe direction: it would log as UNKNOWN);
+    (3) loggablePath returns the path for known endpoints and
+    "UNKNOWN" otherwise.
+
+    HONEST LIMIT (CONS-033): no Python test can read Logcat, so
+    this does not observe the real Logcat output — it proves the
+    sanitising mechanism is present in the Java source. The
+    mechanism is verified by compilation, dex inspection (the
+    "UNKNOWN" string and loggablePath are present), and code
+    inspection; a live-phone Logcat capture is still the only
+    way to observe the real Logcat line.
+    """
+    import re
+    src = _java_source("HttpBridgeServer.java")
+    # (1) the request log goes through loggablePath, never raw path.
+    assert 'Log.i(TAG, method + " " + loggablePath(path) + " -> " + status);' in src
+    assert 'Log.i(TAG, method + " " + path + " -> " + status);' not in src
+    # (2) KNOWN_PATHS matches the handler chain exactly.
+    chain = set(re.findall(r'"(/[^"]*)"\.equals\(path\)', src))
+    start = src.index("KNOWN_PATHS = new HashSet<>(Arrays.asList(")
+    end = src.index("));", start)
+    known = set(re.findall(r'"(/[^"]*)"', src[start:end]))
+    assert chain, "no endpoints found in the handler chain"
+    assert known == chain, (sorted(known - chain), sorted(chain - known))
+    # (3) loggablePath maps unknown paths to "UNKNOWN".
+    helper = src[src.index("static String loggablePath("):]
+    helper = helper[:helper.index("}")]
+    assert 'KNOWN_PATHS.contains(path) ? path : "UNKNOWN"' in helper
 
 
 # --------------------------------------------------------------------------

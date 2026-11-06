@@ -719,15 +719,14 @@ class AndroidAdapter:
                 raise ValueError(
                     f"{action} needs integer {key} (got {value!r})")
             value = int(value)
-        # P1-07 fix round (CONS-032): the 32-bit range check must
-        # apply to int values too — a Python int is arbitrary
-        # precision, so e.g. 2**40 used to pass the client while
-        # the Java server's requireIntArg rejects out-of-int-range
-        # values. (Client is stricter than the server by one value
-        # at the negative edge: -2**31 is rejected here but
-        # accepted by the server. Fail-closed, and every int arg
-        # in practice has minimum >= 0, so it cannot matter.)
-        if abs(value) > 2**31 - 1:
+        # P1-07 fix round (CONS-032) + fix round 2 (CONS-033):
+        # the 32-bit range check must apply to int values too — a
+        # Python int is arbitrary precision, so e.g. 2**40 used to
+        # pass the client while the Java server's requireIntArg
+        # rejects out-of-int-range values. The range matches the
+        # server exactly at both edges: Integer.MIN_VALUE (-2**31)
+        # through Integer.MAX_VALUE (2**31 - 1).
+        if value < -(2**31) or value > 2**31 - 1:
             raise ValueError(
                 f"{action} needs integer {key} (got {value!r})")
         if minimum is not None and value < minimum:

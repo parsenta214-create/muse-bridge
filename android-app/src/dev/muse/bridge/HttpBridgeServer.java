@@ -63,7 +63,8 @@ import java.util.concurrent.TimeUnit;
  *
  * Binds to the Tailscale IPv4 address when present, plus 127.0.0.1.
  * Every request needs the runtime token in the X-Bridge-Token header.
- * Only the method, path, and status are logged — never the token or body.
+ * Only the method, a known endpoint name (anything else logs as
+ * "UNKNOWN"), and status are logged — never the token or body.
  *
  * Endpoints (coordinates are screen pixels):
  *   GET  /health          -> {"ok":true, ...} (v1.8: also
@@ -148,6 +149,30 @@ public class HttpBridgeServer {
             "page_up", "page_down", "page_left", "page_right",
             "press_and_hold", "set_progress", "scroll_to_position",
             "set_text"));
+
+    // P1-03 fix round 2 (CONS-033): the request path logged in the
+    // finally block must never be the raw request target — any
+    // arbitrary path (a typo, a probe, a future path-parameter
+    // endpoint) would land verbatim in Logcat. Only these known
+    // endpoints (the handler's if/else chain, exactly) are logged
+    // by name; anything else logs as "UNKNOWN". Fail-closed: if
+    // the handler gains a new endpoint, it logs as UNKNOWN until
+    // this list is updated — and the source-level guard in
+    // test_android_app_client.py fails the suite until it is.
+    private static final Set<String> KNOWN_PATHS = new HashSet<>(Arrays.asList(
+            "/health", "/capture_screen", "/state", "/logs",
+            "/events", "/notifications", "/notification_action",
+            "/click_node", "/type_node", "/scroll_node",
+            "/node_action", "/launch_app", "/open", "/clipboard",
+            "/install_status", "/install_apk", "/repair_termux",
+            "/batch", "/click", "/swipe", "/type_text",
+            "/press_key", "/notify", "/operation_end"));
+
+    /** Loggable form of a request path: the path itself when it is
+     * a known endpoint, "UNKNOWN" otherwise. */
+    static String loggablePath(String path) {
+        return KNOWN_PATHS.contains(path) ? path : "UNKNOWN";
+    }
 
     public interface TokenProvider {
         String currentToken();
@@ -1713,7 +1738,11 @@ public class HttpBridgeServer {
             if (opGeneration >= 0) {
                 operationFinished(opGeneration);
             }
-            Log.i(TAG, method + " " + path + " -> " + status);
+            // P1-03 fix round 2 (CONS-033): never log the raw request
+            // target — loggablePath() returns the endpoint name for
+            // known endpoints and "UNKNOWN" for anything else, so an
+            // arbitrary path can never land in Logcat.
+            Log.i(TAG, method + " " + loggablePath(path) + " -> " + status);
             try {
                 conn.close();
             } catch (Exception ignored) {
