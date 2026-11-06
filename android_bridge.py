@@ -191,6 +191,20 @@ class TransportError(RuntimeError):
     pass
 
 
+class AccessibilityUnavailableError(TransportError):
+    """The bridge answered 503 with reason ACCESSIBILITY_DISABLED:
+    the AccessibilityService is off on the phone (MINIMAL /
+    BANKING SAFE mode). .reason and .required_mode carry the
+    server's structured fields. A TransportError subclass, so
+    existing `except TransportError` handlers still catch it.
+    P0-1 (v2.0)."""
+    def __init__(self, message, reason="ACCESSIBILITY_DISABLED",
+                 required_mode="FULL_ACCESS"):
+        super().__init__(message)
+        self.reason = reason
+        self.required_mode = required_mode
+
+
 # --------------------------------------------------------------------------
 # Retry policy for the bridge client (client improvement 1).
 # --------------------------------------------------------------------------
@@ -247,6 +261,12 @@ APP_SLOW_CALL_S = 10.0
 
 def _is_retryable_bridge_error(exc: BaseException) -> bool:
     """True when a bridge call failed transiently and may be retried."""
+    # P0-1 (v2.0): a structured a11y-off 503 is NOT transient —
+    # enabling the service is a manual user action, so retrying
+    # only burns attempts and backoff time. Bare 503s (overload,
+    # no reason field) still retry below.
+    if isinstance(exc, AccessibilityUnavailableError):
+        return False
     status = retry.extract_status(exc)
     if status is not None:
         return status in APP_RETRYABLE_STATUS
@@ -391,21 +411,24 @@ def _app_opener():
     return urllib.request.build_opener()
 
 
-def check_app() -> dict:
-    """Report bridge-app transport prerequisites (one read-only HTTP probe).
+def get_health_detail() -> dict:
+    """GET /health, validated by bridge_protocol.parse_health.
 
-    The probe is a GET /health, so it retries transient failures
-    (same policy as the adapter's reads).
+    Returns the full parsed health dict (all fields the server
+    sent, incl. mode/overall_status/modules/capabilities/
+    tailscale_ips on v2.0.0+ servers) plus "seconds". Raises
+    TransportError on transport/auth failure and ProtocolError
+    on a malformed body. Old servers simply omit the new keys
+    (parse_health treats them as optional); callers must use
+    .get() for them. P0-3 (v2.0).
     """
     import urllib.error
     import urllib.request
 
     if not APP_TOKEN:
-        return {
-            "ok": False,
-            "detail": f"ANDROID_APP_TOKEN is not set (app URL is {APP_URL}); "
-                      "enter the token from the phone's Muse Bridge app",
-        }
+        raise TransportError(
+            f"ANDROID_APP_TOKEN is not set (app URL is {APP_URL}); "
+            "enter the token from the phone's Muse Bridge app")
 
     def probe():
         req = urllib.request.Request(
@@ -419,29 +442,62 @@ def check_app() -> dict:
     try:
         data, _attempts, _total = _call_with_bridge_retry(probe, "GET", "/health")
     except urllib.error.HTTPError as exc:
-        return {"ok": False, "detail": f"app returned HTTP {exc.code} (wrong token?)",
-                "seconds": round(time.monotonic() - probe_start, 3)}
+        raise TransportError(
+            f"app returned HTTP {exc.code} (wrong token?)") from exc
     except Exception as exc:  # noqa: BLE001 - report the probe failure
-        return {"ok": False, "detail": f"cannot reach the app at {APP_URL}: {exc}",
-                "seconds": round(time.monotonic() - probe_start, 3)}
+        raise TransportError(
+            f"cannot reach the app at {APP_URL}: {exc}") from exc
     seconds = round(time.monotonic() - probe_start, 3)
     # Step 3: the /health response is validated by the protocol
     # module. A malformed health body is a failed check, not a
     # reachable bridge.
+    parsed = bridge_protocol.parse_health(data)
+    parsed["seconds"] = seconds
+    return parsed
+
+
+def check_app() -> dict:
+    """Report bridge-app transport prerequisites (one read-only HTTP probe).
+
+    The probe is a GET /health, so it retries transient failures
+    (same policy as the adapter's reads). P0-3 (v2.0): the return
+    now also carries mode/overall_status/modules/capabilities/
+    tailscale_ips (None on old servers); the ok/detail contract
+    is unchanged.
+    """
+    if not APP_TOKEN:
+        return {
+            "ok": False,
+            "detail": f"ANDROID_APP_TOKEN is not set (app URL is {APP_URL}); "
+                      "enter the token from the phone's Muse Bridge app",
+        }
+
+    probe_start = time.monotonic()
     try:
-        bridge_protocol.parse_health(data)
+        data = get_health_detail()
+    except TransportError as exc:
+        return {"ok": False, "detail": str(exc),
+                "seconds": round(time.monotonic() - probe_start, 3)}
     except bridge_protocol.ProtocolError as exc:
         return {"ok": False, "detail": f"app health check failed: {exc}",
-                "seconds": seconds}
+                "seconds": round(time.monotonic() - probe_start, 3)}
+    seconds = data.get("seconds", round(time.monotonic() - probe_start, 3))
+    extra = {
+        "mode": data.get("mode"),
+        "overall_status": data.get("overall_status"),
+        "modules": data.get("modules"),
+        "capabilities": data.get("capabilities"),
+        "tailscale_ips": data.get("tailscale_ips"),
+    }
     if data.get("ok") and data.get("accessibility"):
         return {"ok": True, "detail": "app reachable, accessibility service enabled",
                 "notification_listener": data.get("notification_listener"),
-                "seconds": seconds}
+                "seconds": seconds, **extra}
     if data.get("ok"):
         return {"ok": None,
                 "detail": "app reachable but the accessibility service is not enabled on the phone",
                 "notification_listener": data.get("notification_listener"),
-                "seconds": seconds}
+                "seconds": seconds, **extra}
     return {"ok": False, "detail": f"app health check failed: {data}",
             "seconds": seconds}
 
@@ -1059,6 +1115,25 @@ class AndroidAdapter:
             # so callers and logs can classify without re-parsing
             # the status.
             code = bridge_protocol.error_code_for_status(exc.code)
+            # P0-1 (v2.0): a structured a11y-off 503 raises the
+            # dedicated subclass so callers can tell "a11y off"
+            # from "server down" / "overloaded" without parsing
+            # the message. A bare 503 (no reason field) keeps the
+            # old behaviour — it may be overload, which retries.
+            if exc.code == 503:
+                try:
+                    body = json.loads(detail) if detail else {}
+                except (ValueError, TypeError):
+                    body = {}
+                if isinstance(body, dict) and body.get("reason") == "ACCESSIBILITY_DISABLED":
+                    raise AccessibilityUnavailableError(
+                        f"app returned HTTP 503 [{code}] for {method} {path}: "
+                        f"accessibility service not enabled "
+                        f"(reason=ACCESSIBILITY_DISABLED, "
+                        f"required_mode={body.get('required_mode', 'FULL_ACCESS')}; "
+                        f"detail: {body.get('detail', '')})",
+                        reason="ACCESSIBILITY_DISABLED",
+                        required_mode=body.get("required_mode", "FULL_ACCESS")) from exc
             # A-1 (v1.9): the bridge now rejects bad input with its own
             # statuses; the hint must not blame the token for those.
             if exc.code == 401:

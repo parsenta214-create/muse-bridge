@@ -321,6 +321,46 @@ class TestParseFunctionsValid(unittest.TestCase):
         }
         self.assertEqual(parse_health(raw), raw)
 
+    def test_parse_health_extended_v2(self) -> None:
+        """P0-3 (v2.0): the extended /health body (mode,
+        overall_status, modules, capabilities, tailscale_ips)
+        parses and round-trips."""
+        raw = {
+            "ok": True,
+            "service": "muse-bridge",
+            "version": 1,
+            "app_version": "1.9.0",
+            "app_version_code": 19,
+            "accessibility": False,
+            "notification_listener": True,
+            "mode": "MINIMAL",
+            "overall_status": "HEALTHY",
+            "modules": {"http": "HEALTHY", "tailscale": "HEALTHY",
+                        "accessibility": "DISABLED",
+                        "notification_access": "GRANTED",
+                        "termux_ssh": "UNKNOWN"},
+            "capabilities": {"screenshot": False, "tap": False,
+                             "swipe": False, "text_input": False,
+                             "notification": True, "notification_post": True,
+                             "http_api": True, "launch_app": True,
+                             "install_apk": True},
+            "tailscale_ips": ["100.111.74.42"],
+        }
+        self.assertEqual(parse_health(raw), raw)
+
+    def test_parse_health_old_server_no_extension(self) -> None:
+        """P0-3 (v2.0): a body without the new fields (an old
+        server) still parses — the extension is optional."""
+        raw = {
+            "ok": True,
+            "service": "muse-bridge",
+            "version": 1,
+            "app_version": "1.9.0",
+            "app_version_code": 19,
+            "accessibility": True,
+        }
+        self.assertEqual(parse_health(raw), raw)
+
     def test_parse_state_valid(self) -> None:
         raw = {
             "ok": True,
@@ -439,6 +479,39 @@ class TestParseFunctionsInvalid(unittest.TestCase):
         wrong_ver = dict(base, version="1")
         with self.assertRaises(ValueError):
             parse_health(wrong_ver)
+
+    def test_parse_health_extension_invalid(self) -> None:
+        """P0-3 (v2.0): a present-but-invalid extension field is
+        a protocol error."""
+        base = {
+            "ok": True,
+            "service": "muse-bridge",
+            "version": 1,
+            "app_version": "1.9.0",
+            "app_version_code": 19,
+            "accessibility": True,
+        }
+        # Bad mode
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, mode="SUPERUSER"))
+        # Bad overall_status
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, overall_status="FINE"))
+        # Bad module value
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, modules={"http": "OK"}))
+        # Bad capability type
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, capabilities={"screenshot": "yes"}))
+        # Bad tailscale_ips type
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, tailscale_ips="100.111.74.42"))
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, tailscale_ips=[123]))
+        # Unknown keys inside modules/capabilities are ignored.
+        ok = dict(base, modules={"http": "HEALTHY", "future_module": "X"},
+                  capabilities={"screenshot": True, "future_cap": 1})
+        self.assertEqual(parse_health(ok), ok)
 
     def test_parse_state_missing_field_or_invalid_node(self) -> None:
         base = {

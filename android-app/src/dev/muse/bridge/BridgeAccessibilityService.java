@@ -482,35 +482,6 @@ public class BridgeAccessibilityService extends AccessibilityService {
     }
 
     /**
-     * Launches an app by package name (decision 69, v1.9.12):
-     * the package's launcher intent, started from this service
-     * (FLAG_ACTIVITY_NEW_TASK, required outside an activity).
-     * Runs on the HTTP worker thread — no accessibility work, so
-     * no main-thread hop. Returns false when Android refuses the
-     * start (background-activity-start restriction); throws
-     * IllegalArgumentException when the package is not installed
-     * or has no launcher activity.
-     */
-    public boolean launchApp(String pkg) {
-        if (pkg == null || pkg.isEmpty()) {
-            throw new IllegalArgumentException("package must not be empty");
-        }
-        Intent intent = getPackageManager().getLaunchIntentForPackage(pkg);
-        if (intent == null) {
-            throw new IllegalArgumentException(
-                    "package not installed or has no launcher: " + pkg);
-        }
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        try {
-            startActivity(intent);
-            return true;
-        } catch (ActivityNotFoundException | SecurityException e) {
-            BridgeLog.log("launch_blocked", pkg);
-            return false;
-        }
-    }
-
-    /**
      * Scrolls a node by id (decision 67, v1.9.10): ACTION_SCROLL_FORWARD
      * or ACTION_SCROLL_BACKWARD on the node or its first scrollable
      * ancestor (the scroll handler is often on an ancestor, like the

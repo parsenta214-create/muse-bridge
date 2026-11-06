@@ -9,6 +9,8 @@
     <string name="btn_start">Start bridge</string>
     <string name="btn_stop">Stop bridge</string>
     <string name="btn_accessibility">Open accessibility settings</string>
+    <string name="btn_mode_minimal">Banking safe: OFF — tap to turn on</string>
+    <string name="btn_mode_banking_safe">Banking safe: ON — tap to turn off</string>
     <string name="btn_notification">Open notification access settings</string>
     <string name="btn_add_tile">クイック設定に追加</string>
     <string name="tile_label">Muse Bridge</string>

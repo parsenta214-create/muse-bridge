@@ -34,6 +34,48 @@ def _tiny_png() -> bytes:
     )
 
 
+def _a11y_off_body(path: str) -> dict:
+    """P0-1 (v2.0): the structured a11y-off 503 body the real
+    server sends when the AccessibilityService is off."""
+    return {"ok": False, "status": "unavailable",
+            "reason": "ACCESSIBILITY_DISABLED",
+            "required_mode": "FULL_ACCESS",
+            "detail": f"accessibility service is not enabled; {path} needs FULL_ACCESS",
+            "error": "accessibility service not enabled"}
+
+
+def _health_body(accessibility: bool, banking_safe: bool = False) -> dict:
+    """P0-3 (v2.0): the extended /health body the real v2.0.0
+    server sends. a11y on -> mode FULL_ACCESS, screen caps on;
+    a11y off -> mode MINIMAL (or BANKING_SAFE when the user
+    picked it), screen caps off, overall HEALTHY (a11y off is
+    normal in MINIMAL)."""
+    a11y = bool(accessibility)
+    if a11y:
+        mode = "FULL_ACCESS"
+    elif banking_safe:
+        mode = "BANKING_SAFE"
+    else:
+        mode = "MINIMAL"
+    return {"ok": True, "service": "muse-bridge",
+            "version": 1, "accessibility": a11y,
+            "notification_listener": True,
+            "app_version": "1.9.5",
+            "app_version_code": 15,
+            "mode": mode,
+            "overall_status": "HEALTHY",
+            "modules": {"http": "HEALTHY", "tailscale": "HEALTHY",
+                        "accessibility": "ENABLED" if a11y else "DISABLED",
+                        "notification_access": "GRANTED",
+                        "termux_ssh": "UNKNOWN"},
+            "capabilities": {"screenshot": a11y, "tap": a11y,
+                             "swipe": a11y, "text_input": a11y,
+                             "notification": True, "notification_post": True,
+                             "http_api": True, "launch_app": True,
+                             "install_apk": True},
+            "tailscale_ips": ["100.111.74.42"]}
+
+
 class MockAppHandler(BaseHTTPRequestHandler):
     requests = []
     # Test hook for the retry policy: {(method, path): N} — answer
@@ -56,6 +98,17 @@ class MockAppHandler(BaseHTTPRequestHandler):
     state_mode = "normal"
     state_calls = 0
     text_after = 0
+    # P0-1 (v2.0): when False, the mock behaves as if the
+    # AccessibilityService is off on the phone — /health still
+    # answers 200 (with accessibility: false) and the
+    # a11y-dependent endpoints answer the structured 503 body,
+    # while the available endpoints keep answering 200.
+    # Reset by the fixture.
+    accessibility = True
+    # P0-2 (v2.0): when True (and accessibility is False), the
+    # mock's /health reports mode BANKING_SAFE. Reset by the
+    # fixture.
+    banking_safe = False
 
     def log_message(self, *args):  # keep test output quiet
         pass
@@ -89,12 +142,19 @@ class MockAppHandler(BaseHTTPRequestHandler):
         elif fail > 0:
             MockAppHandler.fail_next[key] -= 1
             return self._send_json(503, {"ok": False, "error": "overloaded (test hook)"})
+        # P0-1 (v2.0): a11y-off mode. /health still answers 200
+        # (accessibility: false); the a11y-dependent GETs answer
+        # the structured 503 body; the available GETs (/logs,
+        # /notifications, /clipboard) fall through to normal handling.
+        if not MockAppHandler.accessibility:
+            base = self.path.split("?")[0]
+            if base == "/health":
+                return self._send_json(200, _health_body(
+                    False, MockAppHandler.banking_safe))
+            if base in ("/state", "/capture_screen", "/events"):
+                return self._send_json(503, _a11y_off_body(base))
         if self.path == "/health":
-            return self._send_json(200, {"ok": True, "service": "muse-bridge",
-                                         "version": 1, "accessibility": True,
-                                         "notification_listener": True,
-                                         "app_version": "1.9.5",
-                                         "app_version_code": 15})
+            return self._send_json(200, _health_body(True))
         if self.path.startswith("/logs"):
             # v1.9.3: debug log (current run + previous run's tail).
             return self._send_json(200, {"ok": True,
@@ -289,6 +349,17 @@ class MockAppHandler(BaseHTTPRequestHandler):
         elif fail > 0:
             MockAppHandler.fail_next[key] -= 1
             return self._send_json(503, {"ok": False, "error": "overloaded (test hook)"})
+        # P0-1 (v2.0): a11y-off mode. The a11y-dependent POSTs
+        # answer the structured 503 body; the available POSTs
+        # (/launch_app, /open, /install_apk, /notify,
+        # /notification_action, /clipboard) fall through to normal
+        # handling.
+        if not MockAppHandler.accessibility:
+            base = self.path.split("?")[0]
+            if base in ("/batch", "/click", "/swipe", "/type_text",
+                        "/press_key", "/click_node", "/type_node",
+                        "/scroll_node", "/node_action"):
+                return self._send_json(503, _a11y_off_body(base))
         if self.path == "/batch":
             # A-4 (v1.9): a realistic batch response, with the status,
             # payload hash, and completed/failed action ids. Step 4:
@@ -328,6 +399,8 @@ def mock_app(monkeypatch):
     MockAppHandler.state_mode = "normal"
     MockAppHandler.state_calls = 0
     MockAppHandler.text_after = 0
+    MockAppHandler.accessibility = True
+    MockAppHandler.banking_safe = False
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockAppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1355,6 +1428,185 @@ def test_app_launch_app_needs_gate(mock_app):
     adapter = ab.AndroidAdapter(actions_enabled=False)
     with pytest.raises(PermissionError):
         adapter.launch_app("com.twitter.android")
+
+
+# --------------------------------------------------------------------------
+# P0-1 (v2.0): HTTP / Accessibility dependency separation.
+# --------------------------------------------------------------------------
+
+def test_app_launch_app_without_a11y(mock_app):
+    """P0-1: /launch_app works with the AccessibilityService off
+    (it needs only startActivity from the server's context)."""
+    MockAppHandler.accessibility = False
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.launch_app("com.twitter.android")["ok"] is True
+
+
+@pytest.mark.parametrize("method,path,payload", [
+    ("GET", "/state", None),
+    ("GET", "/capture_screen", None),
+    ("GET", "/events", None),
+    ("POST", "/click", {"x": 500, "y": 800}),
+    ("POST", "/swipe", {"x1": 100, "y1": 200, "x2": 300, "y2": 400, "duration_ms": 300}),
+    ("POST", "/type_text", {"text": "hello"}),
+    ("POST", "/press_key", {"key": "HOME"}),
+    ("POST", "/click_node", {"node_id": "n1", "tree_hash": 123456}),
+    ("POST", "/type_node", {"node_id": "n1", "tree_hash": 123456, "text": "hi"}),
+    ("POST", "/scroll_node", {"node_id": "n1", "tree_hash": 123456, "direction": "forward"}),
+    ("POST", "/node_action", {"node_id": "n1", "tree_hash": 123456, "action": "focus"}),
+    ("POST", "/batch", {"batch_id": "b-1", "protocol_version": 1,
+                        "tree_hash": 123456, "actions": []}),
+])
+def test_app_a11y_off_structured_503(mock_app, method, path, payload):
+    """P0-1: with a11y off, every a11y-dependent endpoint answers
+    the structured 503 body, and the client raises
+    AccessibilityUnavailableError carrying reason/required_mode."""
+    MockAppHandler.accessibility = False
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.AccessibilityUnavailableError) as excinfo:
+        adapter._app_request(method, path, payload)
+    assert excinfo.value.reason == "ACCESSIBILITY_DISABLED"
+    assert excinfo.value.required_mode == "FULL_ACCESS"
+    assert path in str(excinfo.value)
+    # It is still a TransportError, so existing handlers catch it.
+    assert isinstance(excinfo.value, ab.TransportError)
+
+
+def test_app_a11y_off_no_retry(mock_app):
+    """P0-1: a structured a11y-off 503 is not retried — enabling
+    the service is a manual user action, so retrying only burns
+    attempts and backoff time. GET /state and POST /batch each
+    send exactly one request."""
+    MockAppHandler.accessibility = False
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.AccessibilityUnavailableError):
+        adapter.get_current_state()
+    with pytest.raises(ab.AccessibilityUnavailableError):
+        adapter.batch("b-1", 123456,
+                      [{"action_id": "a1", "type": "tap", "x": 1, "y": 2}])
+    gets = [r for r in MockAppHandler.requests
+            if r[0] == "GET" and r[1] == "/state"]
+    assert len(gets) == 1
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/batch"]
+    assert len(posts) == 1
+
+
+def test_app_a11y_off_available_endpoints(mock_app):
+    """P0-1: with a11y off, the endpoints that do not need the
+    service still answer 200 — /health, /logs, /notifications,
+    /open, /install_apk, GET/POST /clipboard, /launch_app,
+    /notify, /notification_action."""
+    MockAppHandler.accessibility = False
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert ab.check_app()["ok"] is None  # reachable, a11y off
+    assert adapter.logs()["ok"] is True
+    assert adapter.notifications()["ok"] is True
+    assert adapter.open("https://example.com")["ok"] is True
+    assert adapter.install_apk(url="https://example.com/app.apk")["ok"] is True
+    assert adapter.get_clipboard()["ok"] is True
+    assert adapter.set_clipboard("MUSEテスト")["ok"] is True
+    assert adapter.launch_app("com.twitter.android")["ok"] is True
+    assert adapter.notify("Title", "Body")["ok"] is True
+    assert adapter.notification_action("key-1", "open")["ok"] is True
+
+
+def test_app_launch_blocked_not_misclassified(mock_app):
+    """P0-1: /launch_app's own "launch blocked by the system" 503
+    (a bare body, no reason field) must raise plain TransportError,
+    not AccessibilityUnavailableError — it is a different failure."""
+    MockAppHandler.fail_next[("POST", "/launch_app")] = (503, 1)
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.launch_app("com.twitter.android")
+    assert not isinstance(excinfo.value, ab.AccessibilityUnavailableError)
+    assert "ACCESSIBILITY_DISABLED" not in str(excinfo.value)
+
+
+# --------------------------------------------------------------------------
+# P0-3 (v2.0): per-module Health API.
+# --------------------------------------------------------------------------
+
+def test_app_check_app_carries_health_detail(mock_app):
+    """P0-3: check_app() returns the same ok/detail as before
+    AND carries the new /health fields (mode, overall_status,
+    modules, capabilities, tailscale_ips)."""
+    result = ab.check_app()
+    assert result["ok"] is True
+    assert result["detail"] == "app reachable, accessibility service enabled"
+    assert result["mode"] == "FULL_ACCESS"
+    assert result["overall_status"] == "HEALTHY"
+    assert result["modules"]["accessibility"] == "ENABLED"
+    assert result["modules"]["termux_ssh"] == "UNKNOWN"
+    assert result["capabilities"]["screenshot"] is True
+    assert result["capabilities"]["launch_app"] is True
+    assert result["tailscale_ips"] == ["100.111.74.42"]
+
+
+def test_app_check_app_a11y_off_carries_minimal(mock_app):
+    """P0-3: with a11y off, check_app() returns ok=None (as
+    before) and mode MINIMAL with the screen capabilities off
+    — a11y off is normal in MINIMAL, so overall stays HEALTHY."""
+    MockAppHandler.accessibility = False
+    result = ab.check_app()
+    assert result["ok"] is None
+    assert result["mode"] == "MINIMAL"
+    assert result["overall_status"] == "HEALTHY"
+    assert result["modules"]["accessibility"] == "DISABLED"
+    assert result["capabilities"]["screenshot"] is False
+    assert result["capabilities"]["tap"] is False
+    assert result["capabilities"]["launch_app"] is True
+    assert result["capabilities"]["http_api"] is True
+
+
+def test_app_get_health_detail(mock_app):
+    """P0-3: get_health_detail() returns the full parsed /health
+    dict (plus seconds)."""
+    detail = ab.get_health_detail()
+    assert detail["ok"] is True
+    assert detail["mode"] == "FULL_ACCESS"
+    assert detail["overall_status"] == "HEALTHY"
+    assert detail["modules"]["tailscale"] == "HEALTHY"
+    assert detail["capabilities"]["install_apk"] is True
+    assert detail["tailscale_ips"] == ["100.111.74.42"]
+    assert isinstance(detail["seconds"], float)
+
+
+def test_app_old_server_health_still_works(mock_app, monkeypatch):
+    """P0-3: an old server (no new /health fields) still works —
+    check_app() returns the same ok/detail, and the new keys
+    are None."""
+    import test_android_app_client as tac
+    monkeypatch.setattr(tac, "_health_body", lambda a11y, banking_safe=False: {
+        "ok": True, "service": "muse-bridge", "version": 1,
+        "accessibility": True, "notification_listener": True,
+        "app_version": "1.9.5", "app_version_code": 15})
+    result = ab.check_app()
+    assert result["ok"] is True
+    assert result["mode"] is None
+    assert result["overall_status"] is None
+    assert result["modules"] is None
+    assert result["capabilities"] is None
+    assert result["tailscale_ips"] is None
+
+
+# --------------------------------------------------------------------------
+# P0-2 (v2.0): MINIMAL as the standard startup state.
+# --------------------------------------------------------------------------
+
+def test_app_check_app_banking_safe_mode(mock_app):
+    """P0-2: with a11y off and banking-safe picked, /health
+    reports mode BANKING_SAFE (and the screen capabilities
+    stay off). The mode is a persisted preference; the client
+    just reports it."""
+    MockAppHandler.accessibility = False
+    MockAppHandler.banking_safe = True
+    result = ab.check_app()
+    assert result["ok"] is None
+    assert result["mode"] == "BANKING_SAFE"
+    assert result["overall_status"] == "HEALTHY"
+    assert result["capabilities"]["screenshot"] is False
+    assert result["capabilities"]["launch_app"] is True
 
 
 # --------------------------------------------------------------------------

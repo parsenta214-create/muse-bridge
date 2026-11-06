@@ -186,6 +186,31 @@ def _require_batch_outcome_status(value: Any, name: str) -> str:
     return value
 
 
+def _require_enum(value: Any, name: str, allowed: tuple) -> str:
+    """Require a string in the given allowed set (P0-3, v2.0)."""
+    if not isinstance(value, str) or value not in allowed:
+        raise ProtocolError(f"{name} must be one of {allowed}")
+    return value
+
+
+# P0-3 (v2.0): the /health extension vocabularies. The server
+# sends these on v2.0.0+; older servers omit them (optional).
+HEALTH_MODES = ("MINIMAL", "FULL_ACCESS", "BANKING_SAFE")
+HEALTH_OVERALL_STATUSES = ("HEALTHY", "DEGRADED", "CRITICAL", "RECOVERING")
+HEALTH_MODULE_VALUES = {
+    "http": ("HEALTHY", "RECOVERING"),
+    "tailscale": ("HEALTHY", "UNAVAILABLE"),
+    "accessibility": ("ENABLED", "DISABLED"),
+    "notification_access": ("GRANTED", "GRANTED_NOT_CONNECTED", "NOT_GRANTED"),
+    "termux_ssh": ("UNKNOWN",),
+}
+HEALTH_CAPABILITY_KEYS = (
+    "screenshot", "tap", "swipe", "text_input",
+    "notification", "notification_post", "http_api",
+    "launch_app", "install_apk",
+)
+
+
 def _require_dict(value: Any, name: str) -> dict[str, Any]:
     if isinstance(value, (str, bytes)):
         try:
@@ -544,6 +569,34 @@ def parse_health(data: dict[str, Any]) -> dict[str, Any]:
     _require_str(d["app_version"], "health.app_version", non_empty=True)
     _require_int(d["app_version_code"], "health.app_version_code", min_value=0)
     _require_bool(d["accessibility"], "health.accessibility")
+    # P0-3 (v2.0): the /health extension fields are OPTIONAL —
+    # v1.9.x servers do not send them, and the client must keep
+    # working against an old server. When present, each value is
+    # validated; unknown keys inside modules/capabilities are
+    # ignored (a newer server may add one).
+    if "notification_listener" in d:
+        _require_bool(d["notification_listener"], "health.notification_listener")
+    if "mode" in d:
+        _require_enum(d["mode"], "health.mode", HEALTH_MODES)
+    if "overall_status" in d:
+        _require_enum(d["overall_status"], "health.overall_status",
+                      HEALTH_OVERALL_STATUSES)
+    if "modules" in d:
+        modules = _require_dict(d["modules"], "health.modules")
+        for key, allowed in HEALTH_MODULE_VALUES.items():
+            if key in modules:
+                _require_enum(modules[key], f"health.modules.{key}", allowed)
+    if "capabilities" in d:
+        caps = _require_dict(d["capabilities"], "health.capabilities")
+        for key in HEALTH_CAPABILITY_KEYS:
+            if key in caps:
+                _require_bool(caps[key], f"health.capabilities.{key}")
+    if "tailscale_ips" in d:
+        ips = d["tailscale_ips"]
+        if not isinstance(ips, list):
+            raise ProtocolError("health.tailscale_ips must be a list")
+        for ip in ips:
+            _require_str(ip, "health.tailscale_ips[]")
     return dict(d)
 
 

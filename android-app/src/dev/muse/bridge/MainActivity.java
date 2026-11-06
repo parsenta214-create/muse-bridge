@@ -34,6 +34,7 @@ public class MainActivity extends Activity {
     private TextView addressText;
     private TextView tokenText;
     private TextView versionText;
+    private Button modeButton;
 
     /** Returns the runtime token, generating and storing one on first use. */
     public static String getOrCreateToken(Context ctx) {
@@ -44,6 +45,27 @@ public class MainActivity extends Activity {
             prefs.edit().putString(KEY_TOKEN, token).apply();
         }
         return token;
+    }
+
+    /** P0-2/P0-3 (v2.0): the persisted startup mode. Only the two
+     * a11y-off modes are persisted — FULL_ACCESS is derived from
+     * the live a11y state (see HttpBridgeServer.currentMode), so
+     * it is never stored. Unknown values fall back to MINIMAL.
+     * The token key is untouched; no secret is ever stored here. */
+    public static final String KEY_MODE = "mode";
+    public static final String MODE_MINIMAL = "MINIMAL";
+    public static final String MODE_BANKING_SAFE = "BANKING_SAFE";
+
+    public static String getPersistedMode(Context ctx) {
+        String m = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_MODE, MODE_MINIMAL);
+        return MODE_BANKING_SAFE.equals(m) ? MODE_BANKING_SAFE : MODE_MINIMAL;
+    }
+
+    public static void setPersistedMode(Context ctx, String mode) {
+        String m = MODE_BANKING_SAFE.equals(mode) ? MODE_BANKING_SAFE : MODE_MINIMAL;
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putString(KEY_MODE, m).apply();
     }
 
     /** Best-effort Tailscale IPv4 address (100.x), or null when absent. */
@@ -135,6 +157,22 @@ public class MainActivity extends Activity {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
             }
         });
+        // P0-2 (v2.0): toggle the persisted mode between MINIMAL
+        // and BANKING SAFE. The mode only takes effect while the
+        // accessibility service is off (a11y on means FULL ACCESS);
+        // the preference is sticky, so it re-appears when a11y
+        // goes off. The bridge never enables a11y itself.
+        modeButton = findViewById(R.id.mode_button);
+        modeButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                String current = getPersistedMode(MainActivity.this);
+                setPersistedMode(MainActivity.this,
+                        MODE_BANKING_SAFE.equals(current)
+                                ? MODE_MINIMAL : MODE_BANKING_SAFE);
+                refresh();
+            }
+        });
         Button notif = findViewById(R.id.notification_button);
         notif.setOnClickListener(new View.OnClickListener() {
             @Override
@@ -212,9 +250,18 @@ public class MainActivity extends Activity {
 
         StringBuilder status = new StringBuilder();
         status.append(BridgeService.isRunning() ? "Bridge: running" : "Bridge: stopped");
+        // P0-2 (v2.0): the effective mode. a11y on means FULL
+        // ACCESS; a11y off means the persisted MINIMAL /
+        // BANKING SAFE.
+        boolean a11yOn = isAccessibilityEnabled(this);
+        String mode = a11yOn ? "FULL ACCESS" : getPersistedMode(this);
+        status.append("\nMode: ").append(mode);
+        if (!a11yOn && MODE_BANKING_SAFE.equals(mode)) {
+            status.append(" — screen control is off, banking apps take priority");
+        }
         status.append("\nAccessibility service: ")
-                .append(isAccessibilityEnabled(this) ? "enabled" : "NOT enabled");
-        if (!isAccessibilityEnabled(this)) {
+                .append(a11yOn ? "enabled" : "NOT enabled");
+        if (!a11yOn) {
             status.append(" — open accessibility settings and turn on Muse Bridge");
         }
         status.append("\nNotification access: ")
@@ -224,6 +271,11 @@ public class MainActivity extends Activity {
             status.append(" — open notification access settings and turn on Muse Bridge");
         }
         statusText.setText(status.toString());
+
+        // P0-2 (v2.0): the mode button shows the persisted mode
+        // (what applies when a11y is off) and what a tap does.
+        modeButton.setText(MODE_BANKING_SAFE.equals(getPersistedMode(this))
+                ? R.string.btn_mode_banking_safe : R.string.btn_mode_minimal);
 
         String ip = findTailscaleIp();
         addressText.setText(ip != null

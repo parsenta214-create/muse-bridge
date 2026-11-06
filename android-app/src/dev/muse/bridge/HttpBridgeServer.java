@@ -544,6 +544,22 @@ public class HttpBridgeServer {
 
             BridgeAccessibilityService svc = BridgeAccessibilityService.getInstance();
             if ("/health".equals(path)) {
+                // P0-3 (v2.0): the extended health body. All 7
+                // legacy fields are kept byte-identical; the 5 new
+                // fields (mode, overall_status, modules,
+                // capabilities, tailscale_ips) are appended.
+                boolean a11yOn = svc != null;
+                boolean listenerGranted =
+                        BridgeNotificationListener.isAccessGranted(context);
+                boolean listenerConnected =
+                        BridgeNotificationListener.getInstance() != null;
+                String mode = currentMode(a11yOn);
+                List<String> tailscaleIps = boundTailscaleIps();
+                JSONObject modules = buildModules(a11yOn, listenerGranted,
+                        listenerConnected, tailscaleIps);
+                JSONObject caps = buildCapabilities(a11yOn, listenerGranted,
+                        listenerConnected);
+                String overall = overallStatus(modules);
                 status = 200;
                 sendJson(out, status, new JSONObject()
                         .put("ok", true)
@@ -551,14 +567,19 @@ public class HttpBridgeServer {
                         .put("version", 1)
                         .put("app_version", AppVersion.name(context))
                         .put("app_version_code", AppVersion.code(context))
-                        .put("accessibility", svc != null)
-                        .put("notification_listener",
-                                BridgeNotificationListener.isAccessGranted(context)));
+                        .put("accessibility", a11yOn)
+                        .put("notification_listener", listenerGranted)
+                        .put("mode", mode)
+                        .put("overall_status", overall)
+                        .put("modules", modules)
+                        .put("capabilities", caps)
+                        .put("tailscale_ips", new JSONArray(tailscaleIps)));
             } else if ("/capture_screen".equals(path)) {
                 if (svc == null) {
                     status = 503;
-                    sendJson(out, status, new JSONObject().put("ok", false)
-                            .put("error", "accessibility service not enabled"));
+                    sendJson(out, status, unavailableJson(
+                            "accessibility service is not enabled; "
+                                    + "/capture_screen needs FULL_ACCESS"));
                 } else {
                     // v1.2: ?scale=0.5&format=jpeg&quality=80 for a light
                     // routine shot; defaults keep the old full-res PNG.
@@ -577,8 +598,9 @@ public class HttpBridgeServer {
             } else if ("/state".equals(path)) {
                 if (svc == null) {
                     status = 503;
-                    sendJson(out, status, new JSONObject().put("ok", false)
-                            .put("error", "accessibility service not enabled"));
+                    sendJson(out, status, unavailableJson(
+                            "accessibility service is not enabled; "
+                                    + "/state needs FULL_ACCESS"));
                 } else {
                     BridgeAccessibilityService.State st = svc.currentState();
                     JSONArray texts = new JSONArray();
@@ -674,8 +696,9 @@ public class HttpBridgeServer {
                 // caller never saw — refetch /state instead.
                 if (svc == null) {
                     status = 503;
-                    sendJson(out, status, new JSONObject().put("ok", false)
-                            .put("error", "accessibility service not enabled"));
+                    sendJson(out, status, unavailableJson(
+                            "accessibility service is not enabled; "
+                                    + "/events needs FULL_ACCESS"));
                 } else {
                     long since = parseLong(queryParam(query, "since"), 0);
                     int limit = parseInt(queryParam(query, "limit"), 100);
@@ -911,10 +934,13 @@ public class HttpBridgeServer {
                 // no launcher; 503 when Android refuses the start
                 // (background-activity-start restriction) — fall back
                 // to tapping the home-screen icon.
+                // P0-1 (v2.0): deliberately no requireService() —
+                // launching needs only startActivity from this
+                // server's own context, so it works even when the
+                // accessibility service is off (P1-05 fixed).
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
-                requireService(svc);
                 try {
-                    boolean ok = svc.launchApp(j.getString("package"));
+                    boolean ok = launchApp(j.getString("package"));
                     status = ok ? 200 : 503;
                     sendJson(out, status, new JSONObject().put("ok", ok)
                             .put("error", ok ? JSONObject.NULL
@@ -1227,10 +1253,12 @@ public class HttpBridgeServer {
             } catch (Exception ignored) {
             }
         } catch (ServiceUnavailable e) {
+            // P0-1 (v2.0): the structured "a11y off" body — one
+            // edit covers all requireService endpoints.
             status = 503;
             try {
-                sendJson(conn.getOutputStream(), status, new JSONObject()
-                        .put("ok", false).put("error", e.getMessage()));
+                sendJson(conn.getOutputStream(), status,
+                        unavailableJson("accessibility service is not enabled"));
             } catch (Exception ignored) {
             }
         } catch (BridgeAccessibilityService.ServiceTimeoutException e) {
@@ -1412,6 +1440,89 @@ public class HttpBridgeServer {
         }
     }
 
+    /** P0-3 (v2.0): the current startup mode. a11y on wins
+     * (FULL_ACCESS); a11y off falls back to the persisted
+     * MINIMAL / BANKING_SAFE. */
+    private String currentMode(boolean a11yOn) {
+        if (a11yOn) return "FULL_ACCESS";
+        return MainActivity.getPersistedMode(context);
+    }
+
+    /** P0-3 (v2.0): per-module status for /health. */
+    private JSONObject buildModules(boolean a11yOn, boolean listenerGranted,
+                                    boolean listenerConnected,
+                                    List<String> tailscaleIps)
+            throws org.json.JSONException {
+        String http = state == ServerState.STARTING ? "RECOVERING" : "HEALTHY";
+        String tailscale = tailscaleIps.isEmpty() ? "UNAVAILABLE" : "HEALTHY";
+        String accessibility = a11yOn ? "ENABLED" : "DISABLED";
+        String notificationAccess;
+        if (!listenerGranted) {
+            notificationAccess = "NOT_GRANTED";
+        } else if (!listenerConnected) {
+            notificationAccess = "GRANTED_NOT_CONNECTED";
+        } else {
+            notificationAccess = "GRANTED";
+        }
+        return new JSONObject()
+                .put("http", http)
+                .put("tailscale", tailscale)
+                .put("accessibility", accessibility)
+                .put("notification_access", notificationAccess)
+                .put("termux_ssh", "UNKNOWN");
+    }
+
+    /** P0-3 (v2.0): what the VM can do right now. `notification`
+     * is the listener READ path (/notifications); `notification_post`
+     * is the /notify path (POST_NOTIFICATIONS permission). */
+    private JSONObject buildCapabilities(boolean a11yOn, boolean listenerGranted,
+                                         boolean listenerConnected)
+            throws org.json.JSONException {
+        boolean notificationRead = listenerGranted && listenerConnected;
+        NotificationManager nm = (NotificationManager)
+                context.getSystemService(Context.NOTIFICATION_SERVICE);
+        boolean notificationPost = nm != null && nm.areNotificationsEnabled();
+        return new JSONObject()
+                .put("screenshot", a11yOn)
+                .put("tap", a11yOn)
+                .put("swipe", a11yOn)
+                .put("text_input", a11yOn)
+                .put("notification", notificationRead)
+                .put("notification_post", notificationPost)
+                .put("http_api", true)
+                .put("launch_app", true)
+                .put("install_apk", true);
+    }
+
+    /** P0-3 (v2.0): the overall status for /health. CRITICAL is
+     * never emitted here — a broken HTTP server returns nothing
+     * and broken auth returns 401 before this handler runs, so
+     * CRITICAL is a VM-side verdict (see the P0 spec). */
+    private String overallStatus(JSONObject modules) {
+        if (state == ServerState.STARTING) return "RECOVERING";
+        if ("UNAVAILABLE".equals(modules.optString("tailscale"))
+                || "NOT_GRANTED".equals(modules.optString("notification_access"))
+                || "GRANTED_NOT_CONNECTED".equals(modules.optString("notification_access"))) {
+            return "DEGRADED";
+        }
+        return "HEALTHY";
+    }
+
+    /** P0-3 (v2.0): the bound non-loopback addresses (the 100.*
+     * Tailscale addresses from bindAddresses()). 127.0.0.1 is
+     * excluded. Bound-at-start: the list goes stale if Tailscale
+     * assigns a new IP afterwards (re-bind is P1). */
+    public synchronized List<String> boundTailscaleIps() {
+        List<String> out = new ArrayList<>();
+        for (ServerSocket ss : listeners) {
+            InetAddress a = ss.getInetAddress();
+            if (a != null && !a.isLoopbackAddress() && a.getHostAddress() != null) {
+                out.add(a.getHostAddress());
+            }
+        }
+        return out;
+    }
+
     /**
      * Opens a URI with ACTION_VIEW (decision 74, v1.9.15): a web
      * URL, or an app's deep link when the URI's scheme belongs
@@ -1429,6 +1540,35 @@ public class HttpBridgeServer {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
         return true;
+    }
+
+    /**
+     * Launches an app by package name (decision 69, v1.9.12;
+     * moved from BridgeAccessibilityService in P0-1, v2.0).
+     * Runs on this server's own application context, so it
+     * needs no accessibility service — the same reason /open
+     * works with a11y off. Returns false when Android refuses
+     * the start (background-activity-start restriction); throws
+     * IllegalArgumentException when the package is not installed
+     * or has no launcher activity.
+     */
+    private boolean launchApp(String pkg) {
+        if (pkg == null || pkg.isEmpty()) {
+            throw new IllegalArgumentException("package must not be empty");
+        }
+        Intent intent = context.getPackageManager().getLaunchIntentForPackage(pkg);
+        if (intent == null) {
+            throw new IllegalArgumentException(
+                    "package not installed or has no launcher: " + pkg);
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            context.startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException | SecurityException e) {
+            BridgeLog.log("launch_blocked", pkg);
+            return false;
+        }
     }
 
     /**
@@ -1535,6 +1675,21 @@ public class HttpBridgeServer {
 
     private static JSONObject errorJson(String message) throws org.json.JSONException {
         return new JSONObject().put("ok", false).put("error", message);
+    }
+
+    /** P0-1 (v2.0): the structured "a11y off" body. `detail`
+     * names the endpoint that needs the service. The `error`
+     * field is kept alongside the new fields so
+     * bridge_protocol.parse_error_body keeps working (it
+     * requires "ok" and "error"). */
+    private static JSONObject unavailableJson(String detail) throws org.json.JSONException {
+        return new JSONObject()
+                .put("ok", false)
+                .put("status", "unavailable")
+                .put("reason", "ACCESSIBILITY_DISABLED")
+                .put("required_mode", "FULL_ACCESS")
+                .put("detail", detail)
+                .put("error", "accessibility service not enabled");
     }
 
     /** A-4: unknown JSON fields are rejected (400 via JSONException)
