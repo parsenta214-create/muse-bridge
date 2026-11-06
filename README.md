@@ -2072,6 +2072,26 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     adding a package is a code change + test.
     Krungthai NEXT is not on the initial list
     (package unconfirmed).
+92. Version bump to v2.2.0 / code 35
+    (2026-11-06 21:02 +07, Saardeim requested
+    a version-management update after installing
+    the P0-4 build): the P0-4 build was built
+    as v2.1.0 / code 34, the same version as
+    the operation-notifications build, so the
+    two builds were indistinguishable (same
+    filename, "2つ目" download). Bumped to
+    v2.2.0 / code 35 (minor bump for the new
+    P0-4 feature: launch result semantics +
+    deny list, consistent with v2.1.0 being a
+    minor bump for operation notifications).
+    Source unchanged except the version
+    constant in build.sh and the matching mock
+    in test_bridge_protocol.py. Full suite
+    245 passed. APK v2.2.0 / code 35, SHA-256
+    212432ad6a824075b689be73237d5f6e8b8bdd8a00cfd26135fef292df6c9205.
+    The P0 freeze version is still TBD at
+    freeze; v2.2.0 is the live-verification
+    build.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
