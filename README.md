@@ -1648,6 +1648,11 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     URI → ValueError before any request. APK 66,249 bytes,
     sha256 5e691fa8…; 116 tests pass. D-1 remaining:
     clipboard read/write, notification open/reply.
+    Live test 2026-11-06 07:04 on 1.9.19:
+    open("https://www.google.com") ok; the screenshot
+    showed Google's homepage in the browser. (/state's
+    foreground package came back None — the screenshot was
+    the proof.)
 75. Install an APK — POST /install_apk + GET /install_status
     (2026-11-06, v1.9.16 / code 26). `POST /install_apk
     {"url": "https://...apk"}` downloads the APK on the
@@ -1676,6 +1681,13 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     66,248 bytes, sha256 b8171ab0…; 122 tests pass.
     This endpoint also covers future bridge self-updates
     (same flow, the bridge's own APK as the path or URL).
+    Live test 2026-11-06 07:05 on 1.9.19: the download
+    and the commit worked (113,880,067 bytes in ~27 s,
+    committed 07:05:38) but the install failed instantly
+    with status=-1 and no message — the manifest lacked
+    REQUEST_INSTALL_PACKAGES (fixed in decision 79).
+    Retry after 1.9.20 + the Settings toggle, with the
+    1022 URL (latest) to also rule out a downgrade.
 76. Clipboard read/write — GET / POST /clipboard
     (2026-11-06, v1.9.17 / code 27). `GET /clipboard`
     returns {"ok": true, "text": "..."|null, "truncated":
@@ -1694,6 +1706,12 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     retried; a non-string raises ValueError before any
     request. APK 66,246 bytes, sha256 4ddb4f0a…; 127 tests
     pass. D-1 remaining: notification open/reply.
+    Live test 2026-11-06 07:04 on 1.9.19: set ok, but
+    get returned null right after the successful set —
+    the Android 10+ background-read restriction is
+    confirmed (the read is blocked while the app runs in
+    the background). Writing works; reading does not
+    (in the background).
 77. Notification open/reply — POST /notification_action
     (2026-11-06, v1.9.18 / code 28). `POST
     /notification_action {"key": "...", "action": "open"}`
@@ -1715,6 +1733,31 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     70,342 bytes, sha256 d635b11c…; 131 tests pass.
     Phase D-1 is complete (open / install_apk / clipboard /
     notification action).
+    Live test 2026-11-06 07:05 on 1.9.19: open (Tailscale
+    "Connected") — send() succeeded and "notification
+    opened" was logged, but the foreground did not change
+    in the screenshot (cause unconfirmed — possibly a
+    background-activity-start block). A second open (the
+    Muse chat notification) correctly answered 422 — that
+    notification was already gone.
+79. Install permission — REQUEST_INSTALL_PACKAGES
+    (2026-11-06, v1.9.20 / code 30). The first live
+    Termux install (decision 75) downloaded and committed
+    fine but failed instantly with status=-1 and no
+    message: the manifest never declared
+    REQUEST_INSTALL_PACKAGES, which PackageInstaller
+    sessions need. Fix: the permission is now declared.
+    The user must also allow "Install unknown apps" for
+    Muse Bridge in Settings (Settings > Apps > Muse Bridge
+    > Install unknown apps > Allow) — a Settings-side
+    approval. The install-result receiver now also logs
+    the hidden EXTRA_LEGACY_STATUS code (literal key —
+    it is not in the public SDK) so the next failure
+    names its reason (e.g. -25 version downgrade, -7
+    update incompatible / signature). APK 70,345 bytes,
+    sha256 2b97e701…; 131 tests pass. After 1.9.20, the
+    Termux install is retried with the 1022 URL (latest)
+    to also rule out a downgrade.
 78. Startup crash fix — registerReceiver exported flag
     (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
     crashed the instant START BRIDGE was tapped, with no

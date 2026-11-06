@@ -10,6 +10,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Decision 79 (v1.9.20): PackageInstaller sessions need
+         this declared, or the install fails at commit time.
+         The user must also allow "Install unknown apps" for
+         Muse Bridge in Settings (a Settings-side approval). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <!-- Decision 70 (v1.9.13): Android 11+ package visibility —
          without this, getLaunchIntentForPackage() returns null for

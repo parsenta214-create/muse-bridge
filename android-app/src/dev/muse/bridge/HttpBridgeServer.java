@@ -157,15 +157,29 @@ public class HttpBridgeServer {
                     PackageInstaller.STATUS_FAILURE);
             String msg = intent.getStringExtra(
                     PackageInstaller.EXTRA_STATUS_MESSAGE);
+            // Decision 79 (v1.9.20): also read the legacy
+            // INSTALL_FAILED_* code — the status alone came back
+            // as -1 with no message on the first Termux install,
+            // which says nothing about the cause. A negative
+            // legacy code is the real reason (e.g. -25 version
+            // downgrade, -7 update incompatible / signature).
+            // EXTRA_LEGACY_STATUS is a hidden API, so use its
+            // literal key ("android.content.pm.extra.LEGACY_STATUS").
+            int legacy = intent.getIntExtra(
+                    "android.content.pm.extra.LEGACY_STATUS", 0);
+            String pkg = intent.getStringExtra(
+                    PackageInstaller.EXTRA_PACKAGE_NAME);
+            String detail = "status=" + st + " legacy=" + legacy
+                    + (pkg == null ? "" : " pkg=" + pkg)
+                    + (msg == null ? "" : " " + msg);
             if (st == PackageInstaller.STATUS_SUCCESS) {
                 installStatus = "installed";
-                installDetail = msg == null ? "" : msg;
+                installDetail = detail;
                 BridgeLog.log("install_result", "success");
             } else {
                 installStatus = "failed";
-                installDetail = msg == null ? "status=" + st : msg;
-                BridgeLog.log("install_result", "failed status=" + st
-                        + (msg == null ? "" : " " + msg));
+                installDetail = detail;
+                BridgeLog.log("install_result", "failed " + detail);
             }
             installRunning = false;
         }
