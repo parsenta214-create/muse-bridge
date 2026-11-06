@@ -2028,6 +2028,30 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Release conditioned on live verification of §7.3
     items 14–15 (stop/restart race, STARTING
     old-worker) plus the rest of the checklist.
+90. P0-4 ADOPTED (2026-11-06 19:50 +07, Saardeim
+    decision, CONS-20261106-026): /launch_app
+    background-launch fix — A (honest reporting) +
+    B (foreground verification, conditional) +
+    limited C (FULL_ACCESS launcher operation is
+    P1). Launch result states launched /
+    unconfirmed / unavailable / failed; `ok` true
+    only when `launched`; response carries
+    `status`, `foreground_confirmed`, `verification`.
+    FULL_ACCESS verifies via the AccessibilityService
+    (foreground package); MINIMAL reports
+    `unconfirmed` / VERIFICATION_UNAVAILABLE
+    (UsageStats is P1). Capabilities add
+    `launch_app_guaranteed: false` and
+    `foreground_verification`. The old acceptance
+    "KBank launches with a11y OFF" is REMOVED.
+    Banking apps (e.g. KBank / K PLUS) and other
+    apps where heavy security is expected are
+    EXCLUDED from the /launch_app target scope
+    from the start (Saardeim 2026-11-06 19:51
+    +07) — they are not launch targets at all.
+    The live launch test uses a normal app (e.g. X).
+    P0 freeze follows after P0-4 is implemented
+    and live-verified.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
