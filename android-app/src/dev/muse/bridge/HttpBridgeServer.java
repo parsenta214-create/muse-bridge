@@ -280,6 +280,20 @@ public class HttpBridgeServer {
     // began) is stale and must not touch the new session's
     // counter — operationFinished() ignores it by generation.
     private long operationGeneration = 0;
+    // v2.1 fix (CONS-024 P1-NEW): server-lifecycle generation.
+    // Distinct from the operation-session generation above: the
+    // session generation changes when a session ends, the
+    // lifecycle generation changes when the server starts a new
+    // lifecycle (stop -> start). A request accepted in an old
+    // lifecycle must not start (or end) a session in the new
+    // one, even if its worker outlives the stop and reaches
+    // noteOperation()/endOperation() after the restart. The
+    // generation is captured at accept time and carried through
+    // handle(); noteOperation()/endOperation() refuse a
+    // mismatched generation. Volatile: bumped in synchronized
+    // start(), read in the accept thread (no lock) and under
+    // operationLock in noteOperation()/endOperation().
+    private volatile long serverLifecycleGeneration = 0;
 
     /** Auto-end task: ends the session only when nothing is in
      * flight and the last activity is at least the timeout old;
@@ -341,6 +355,13 @@ public class HttpBridgeServer {
         if (state == ServerState.RUNNING || state == ServerState.STARTING) {
             return state == ServerState.RUNNING;
         }
+        // v2.1 fix (CONS-024 P1-NEW): a new lifecycle. Bump
+        // before state becomes STARTING, so any request accepted
+        // by this lifecycle's accept threads carries the new
+        // generation, and any worker accepted in an old lifecycle
+        // is refused by the generation check even if it reaches
+        // noteOperation() during the STARTING window.
+        serverLifecycleGeneration++;
         state = ServerState.STARTING;
         // v2.1 fix (CONS-023 P2): clear operation notifications
         // left in the shade by a previous process BEFORE the
@@ -420,6 +441,15 @@ public class HttpBridgeServer {
                 operationAutoEndFuture = null;
             }
             operationActive = false;
+            // v2.1 fix (CONS-024 P1-NEW): invalidate the session
+            // — an in-flight request's finally must become stale
+            // (generation mismatch) and the counter must not leak
+            // into the next lifecycle. GPT's stop/restart trace:
+            // A gen 1 inFlight 1 -> stop (inFlight 0, gen 2) ->
+            // start -> B gen 3 inFlight 1 -> A finishes, stale,
+            // ignored -> B finishes, inFlight 0.
+            operationInFlight = 0;
+            operationGeneration++;
         }
         if (operationScheduler != null) {
             operationScheduler.shutdownNow();
@@ -469,6 +499,15 @@ public class HttpBridgeServer {
         while (state == ServerState.RUNNING || state == ServerState.STARTING) {
             try {
                 final Socket conn = ss.accept();
+                // v2.1 fix (CONS-024 P1-NEW): capture the server
+                // lifecycle generation at accept time. A worker
+                // that outlives its lifecycle (accepted before
+                // stop(), handled after restart) carries the old
+                // generation and is refused by noteOperation() /
+                // endOperation() — capturing at the top of
+                // handle() would be too late, handle() itself
+                // runs after the restart.
+                final long lifecycleGeneration = serverLifecycleGeneration;
                 if (pool == null || pool.isShutdown()) {
                     try {
                         conn.close();
@@ -494,7 +533,7 @@ public class HttpBridgeServer {
                         @Override
                         public void run() {
                             try {
-                                int st = handle(conn);
+                                int st = handle(conn, lifecycleGeneration);
                                 if (st >= 400) {
                                     BridgeLog.logThrottled("http-" + st,
                                             "http-" + st, "");
@@ -546,7 +585,7 @@ public class HttpBridgeServer {
         }
     }
 
-    private int handle(Socket conn) {
+    private int handle(Socket conn, long lifecycleGeneration) {
         String method = "?";
         String path = "?";
         int status = 500;
@@ -558,6 +597,10 @@ public class HttpBridgeServer {
         // noted none); the finally block passes it to
         // operationFinished() so a stale request cannot touch
         // another session's counter (CONS-023 P1).
+        // v2.1 fix (CONS-024 P1-NEW): lifecycleGeneration is the
+        // server lifecycle captured at accept time; noteOperation()
+        // and endOperation() refuse a mismatch with the current
+        // lifecycle (a request that outlived a stop/restart).
         long opGeneration = -1;
         try {
             InputStream in = conn.getInputStream();
@@ -940,7 +983,7 @@ public class HttpBridgeServer {
                             // the foreground app — show "操作中".
                             // ("reply" sends a message without
                             // changing the screen, so no hook.)
-                            opGeneration = noteOperation("通知を開いています");
+                            opGeneration = noteOperation(lifecycleGeneration, "通知を開いています");
                             err = BridgeNotificationListener.openNotification(key);
                         } else if ("reply".equals(action)) {
                             String text = j.getString("text");
@@ -965,7 +1008,7 @@ public class HttpBridgeServer {
                 String nodeId = j.getString("node_id");
                 int nodeTreeHash = j.getInt("tree_hash");
                 // v2.1: the operation is accepted — show "操作中".
-                opGeneration = noteOperation("タップ中");
+                opGeneration = noteOperation(lifecycleGeneration, "タップ中");
                 try {
                     BridgeAccessibilityService.ActionOutcome o =
                             svc.clickNode(nodeId, nodeTreeHash);
@@ -991,7 +1034,7 @@ public class HttpBridgeServer {
                 String nodeText = j.getString("text");
                 // v2.1: the operation is accepted — show "操作中".
                 // The typed text never goes into the notification.
-                opGeneration = noteOperation("文字を入力中");
+                opGeneration = noteOperation(lifecycleGeneration, "文字を入力中");
                 try {
                     BridgeAccessibilityService.ActionOutcome o = svc.typeNode(nodeId,
                             nodeTreeHash, nodeText);
@@ -1023,7 +1066,7 @@ public class HttpBridgeServer {
                     String nodeId = j.getString("node_id");
                     int nodeTreeHash = j.getInt("tree_hash");
                     // v2.1: the operation is accepted — show "操作中".
-                    opGeneration = noteOperation("スクロール中");
+                    opGeneration = noteOperation(lifecycleGeneration, "スクロール中");
                     try {
                         BridgeAccessibilityService.ActionOutcome o = svc.scrollNode(
                                 nodeId, nodeTreeHash, direction);
@@ -1061,7 +1104,7 @@ public class HttpBridgeServer {
                 }
                 // v2.1: the operation is accepted — show "操作中"
                 // with the action name (fixed enum, safe).
-                opGeneration = noteOperation("操作を実行中（" + actionName + "）");
+                opGeneration = noteOperation(lifecycleGeneration, "操作を実行中（" + actionName + "）");
                 try {
                     BridgeAccessibilityService.ActionOutcome o = svc.nodeAction(
                             nodeId, nodeTreeHash, actionName, args);
@@ -1097,7 +1140,7 @@ public class HttpBridgeServer {
                 // v2.1: the operation is accepted — show "操作中"
                 // with the app label (falls back to the package
                 // name when no label exists).
-                opGeneration = noteOperation("アプリを起動中：" + operationAppLabel(pkg));
+                opGeneration = noteOperation(lifecycleGeneration, "アプリを起動中：" + operationAppLabel(pkg));
                 try {
                     boolean ok = launchApp(pkg);
                     status = ok ? 200 : 503;
@@ -1123,7 +1166,7 @@ public class HttpBridgeServer {
                 // v2.1: the operation is accepted — show "操作中".
                 // The URI itself never goes into the notification
                 // (it can carry tokens).
-                opGeneration = noteOperation("リンクを開いています");
+                opGeneration = noteOperation(lifecycleGeneration, "リンクを開いています");
                 try {
                     boolean ok = openUri(uri);
                     status = ok ? 200 : 422;
@@ -1300,7 +1343,7 @@ public class HttpBridgeServer {
                     int batchTreeHash = j.getInt("tree_hash");
                     // v2.1: the actions parsed — show "操作中" for
                     // the whole batch (never a per-action summary).
-                    opGeneration = noteOperation("複数の操作を実行中");
+                    opGeneration = noteOperation(lifecycleGeneration, "複数の操作を実行中");
                     BridgeAccessibilityService.BatchResult br = svc.runBatch(
                             batchId, protocolVersion, batchTreeHash, actions);
                     JSONArray results = new JSONArray();
@@ -1355,7 +1398,7 @@ public class HttpBridgeServer {
                 int x = j.getInt("x");
                 int y = j.getInt("y");
                 // v2.1: the operation is accepted — show "操作中".
-                opGeneration = noteOperation("タップ中");
+                opGeneration = noteOperation(lifecycleGeneration, "タップ中");
                 boolean ok = svc.tap(x, y);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
@@ -1368,7 +1411,7 @@ public class HttpBridgeServer {
                 int y2 = j.getInt("y2");
                 long durationMs = j.optLong("duration_ms", 300);
                 // v2.1: the operation is accepted — show "操作中".
-                opGeneration = noteOperation("スワイプ中");
+                opGeneration = noteOperation(lifecycleGeneration, "スワイプ中");
                 boolean ok = svc.swipe(x1, y1, x2, y2, durationMs);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
@@ -1378,7 +1421,7 @@ public class HttpBridgeServer {
                 String text = j.getString("text");
                 // v2.1: the operation is accepted — show "操作中".
                 // The typed text never goes into the notification.
-                opGeneration = noteOperation("文字を入力中");
+                opGeneration = noteOperation(lifecycleGeneration, "文字を入力中");
                 boolean ok = svc.typeText(text);
                 status = ok ? 200 : 422;
                 sendJson(out, status, new JSONObject().put("ok", ok)
@@ -1399,7 +1442,7 @@ public class HttpBridgeServer {
                 }
                 // v2.1: the operation is accepted — show "操作中"
                 // with the key name (fixed enum, safe).
-                opGeneration = noteOperation("キー操作中（" + key + "）");
+                opGeneration = noteOperation(lifecycleGeneration, "キー操作中（" + key + "）");
                 boolean ok = svc.pressKey(key);
                 status = ok ? 200 : 422;
                 sendJson(out, status, new JSONObject().put("ok", ok)
@@ -1427,7 +1470,7 @@ public class HttpBridgeServer {
                 if (body.length > 0) {
                     new JSONObject(new String(body, StandardCharsets.UTF_8));
                 }
-                boolean wasActive = endOperation();
+                boolean wasActive = endOperation(lifecycleGeneration);
                 BridgeLog.log("operation_end", wasActive ? "ended" : "idle");
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", true)
@@ -1589,9 +1632,21 @@ public class HttpBridgeServer {
      * generation first, so an in-flight request from the previous
      * session is recognised as stale when its finally runs. When
      * notifications are disabled the tracker state is still
-     * maintained and the miss is logged once (throttled). */
-    private long noteOperation(String label) {
+     * maintained and the miss is logged once (throttled). The
+     * lifecycleGeneration argument is the server lifecycle
+     * captured when this request was accepted; a mismatch with
+     * the current lifecycle means the request outlived a
+     * stop/restart and is refused without touching any state
+     * (CONS-024 P1-NEW) — this also covers the STARTING window,
+     * where the state check alone would pass. */
+    private long noteOperation(long lifecycleGeneration, String label) {
         synchronized (operationLock) {
+            // v2.1 fix (CONS-024 P1-NEW): a request accepted in
+            // an old lifecycle must not start a session in the
+            // new one — refuse before touching any tracker state.
+            if (lifecycleGeneration != serverLifecycleGeneration) {
+                return -1;
+            }
             if (state != ServerState.RUNNING && state != ServerState.STARTING) {
                 return -1;
             }
@@ -1644,8 +1699,15 @@ public class HttpBridgeServer {
     /** Explicit end of the current operation session (POST
      * /operation_end). Returns true when a session was active
      * (and "操作終了" was posted), false when idle. */
-    private boolean endOperation() {
+    private boolean endOperation(long lifecycleGeneration) {
         synchronized (operationLock) {
+            // v2.1 fix (CONS-024 P1-NEW): same lifecycle rule as
+            // noteOperation() — a stale /operation_end accepted
+            // before stop() must not end a session that began
+            // after the restart.
+            if (lifecycleGeneration != serverLifecycleGeneration) {
+                return false;
+            }
             return endOperationLocked();
         }
     }
