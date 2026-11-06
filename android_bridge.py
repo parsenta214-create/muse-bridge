@@ -86,17 +86,51 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Tunnel proxy (ProxyCommand helper)
 # --------------------------------------------------------------------------
 
+def _proxy_auth_header() -> str | None:
+    """Proxy-Authorization value from the env proxy URL, or None.
+
+    The tunnel proxy (port 3130) requires the same credentials as the
+    runtime egress proxy (port 3128); the bridge HTTP path already
+    sends them (urllib reads them from the env proxy URL), but
+    proxy_connect() did not — that is why SSH broke while bridge
+    HTTP kept working. The credentials live only in the environment;
+    this function never writes them to a file or prints them.
+    """
+    import base64
+    import urllib.parse
+    for key in ("https_proxy", "HTTPS_PROXY", "http_proxy", "HTTP_PROXY"):
+        url = os.environ.get(key, "")
+        if not url:
+            continue
+        parsed = urllib.parse.urlparse(url)
+        user = parsed.username
+        if user is None:
+            return None
+        # urlparse already percent-decodes username/password.
+        password = parsed.password or ""
+        token = base64.b64encode(
+            f"{user}:{password}".encode("utf-8")).decode("ascii")
+        return f"Basic {token}"
+    return None
+
+
 def proxy_connect(host: str, port: int, timeout: float = 30) -> object:
     """Open a CONNECT tunnel to host:port through the Tailscale proxy.
 
-    Returns a connected socket. Raises on failure. Sends no credentials.
+    Returns a connected socket. Raises on failure. Sends the proxy
+    credentials from the env proxy URL when present (the tunnel
+    proxy requires them; see _proxy_auth_header).
     """
     sock = socket.create_connection((TUNNEL_PROXY_HOST, TUNNEL_PROXY_PORT), timeout=timeout)
-    req = (
-        f"CONNECT {host}:{port} HTTP/1.1\r\n"
-        f"Host: {host}:{port}\r\n"
-        "Proxy-Connection: keep-alive\r\n\r\n"
-    ).encode()
+    lines = [
+        f"CONNECT {host}:{port} HTTP/1.1",
+        f"Host: {host}:{port}",
+    ]
+    auth = _proxy_auth_header()
+    if auth is not None:
+        lines.append(f"Proxy-Authorization: {auth}")
+    lines.append("Proxy-Connection: keep-alive")
+    req = ("\r\n".join(lines) + "\r\n\r\n").encode()
     sock.sendall(req)
     sock.settimeout(timeout)
     resp = b""

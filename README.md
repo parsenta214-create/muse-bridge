@@ -1952,6 +1952,23 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     equals the server's, verified live on 1.9.22).
     Tests: 195 passed. GPT review CONS-020: all
     P0/P1 fixed. No APK change (Python only).
+86. Termux SSH route repaired (2026-11-06, no version change).
+    Root cause: proxy_connect() sent the CONNECT request with NO
+    credentials, while the tunnel proxy (port 3130) requires the
+    same credentials as the runtime egress proxy (port 3128) —
+    that is why SSH broke while bridge HTTP kept working
+    (urllib reads the credentials from the env proxy URL).
+    Fix: _proxy_auth_header() reads the credentials from the env
+    proxy URL and proxy_connect() sends them as
+    Proxy-Authorization: Basic. The credential is never written
+    to a file or printed. Two new tests (auth sent when the URL
+    has credentials, no header without them). Live verified:
+    ssh to Termux works again (whoami u0_a388, uptime ok);
+    the phone host key fingerprint matches the verified one
+    (SHA256:6pBDn1mQxz8au3AChwWZ/h6X3zdnOnp4bQ373Gii5Zs) and
+    is now stored in ~/.ssh/known_hosts; termux_exec.sh works.
+    push_apk.sh / termux_exec.sh are usable again. Tests: 197
+    passed.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
