@@ -99,9 +99,9 @@ public class MainActivity extends Activity {
     /** Tailscale IPv4 range 100.64.0.0/10 (CGNAT): first octet
      * 100, second octet 64–127. CONS-029 P1-3 fix: the old
      * startsWith("100.") matched all of 100.0.0.0/8. This is
-     * the Tailscale IP DETECTION only — the server bind check
-     * (HttpBridgeServer.bindAddresses, CONS-014 P1-02) is a
-     * separate item and is NOT changed here. */
+     * the Tailscale IP DETECTION; the server bind check
+     * (HttpBridgeServer.bindAddresses) uses the same test
+     * (CONS-014 P1-02). */
     public static boolean isTailscaleIp(String ip) {
         if (ip == null) return false;
         String[] parts = ip.split("\\.");

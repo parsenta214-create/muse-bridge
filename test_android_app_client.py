@@ -45,6 +45,64 @@ def _a11y_off_body(path: str) -> dict:
             "error": "accessibility service not enabled"}
 
 
+# P1-07 (CONS-014): the mock's mirror of the server's
+# /node_action arg validation (nodeActionArgs). Returns an
+# error message, or None when the args are valid. The client
+# validates the same rules before sending, so the mock only
+# sees these from a raw request.
+_NODE_ACTION_ARG_KEYS = {
+    "set_selection": ("start", "end"),
+    "set_progress": ("value",),
+    "scroll_to_position": ("row",),
+    "press_and_hold": ("duration_ms",),
+    "set_text": ("text",),
+}
+
+
+def _validate_node_action_args(action: str, args: dict):
+    """Mirror of the server's integer/range checks. Bools are
+    not integers; a fractional float (1.8) is rejected instead
+    of truncating; an integral float (2.0) is accepted."""
+    def int_arg(key, minimum=None, maximum=None):
+        v = args[key]
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return f"{action} needs integer {key}"
+        if isinstance(v, float):
+            if not v.is_integer() or abs(v) > 2**31 - 1:
+                return f"{action} needs integer {key} (got {v!r})"
+            v = int(v)
+        if minimum is not None and v < minimum:
+            return f"{action} needs {key} >= {minimum}"
+        if maximum is not None and v > maximum:
+            return f"{action} needs {key} <= {maximum}"
+        return None
+
+    if action == "set_selection":
+        for key in ("start", "end"):
+            err = int_arg(key, minimum=0)
+            if err is not None:
+                return err
+    elif action == "set_progress":
+        v = args.get("value")
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return "set_progress needs numeric value"
+        if not 0.0 <= v <= 1.0:
+            return "set_progress value must be between 0.0 and 1.0"
+    elif action == "scroll_to_position":
+        err = int_arg("row", minimum=0)
+        if err is not None:
+            return err
+    elif action == "press_and_hold":
+        if "duration_ms" in args:
+            err = int_arg("duration_ms", minimum=1, maximum=60000)
+            if err is not None:
+                return err
+    elif action == "set_text":
+        if not isinstance(args.get("text"), str):
+            return "set_text needs text"
+    return None
+
+
 def _health_body(accessibility: bool, banking_safe: bool = False,
                  can_install_apk: bool = True,
                  tailscale_stale: bool = False) -> dict:
@@ -237,10 +295,14 @@ class MockAppHandler(BaseHTTPRequestHandler):
                 tailscale_stale=MockAppHandler.tailscale_stale))
         if self.path.startswith("/logs"):
             # v1.9.3: debug log (current run + previous run's tail).
+            # P1-03 (CONS-014): the listen line carries a MASKED
+            # IP (100.111.*.*), mirroring the real server's
+            # BridgeLog.sanitize — a full IP must never appear
+            # in a log line.
             return self._send_json(200, {"ok": True,
                                          "app_version": "1.9.5",
                                          "app_version_code": 15,
-                                         "lines": ["[11-06 03:55:00] listen 100.111.74.42:8080",
+                                         "lines": ["[11-06 03:55:00] listen 100.111.*.*:8080",
                                                    "[11-06 03:55:00] server RUNNING",
                                                    "[11-06 03:55:01] batch completed 1/1"],
                                          "previous_lines": ["[11-06 03:50:00] server STOPPED"]})
@@ -549,6 +611,41 @@ class MockAppHandler(BaseHTTPRequestHandler):
                     "banner": "SSH-2.0-OpenSSH_10.2",
                     "latency_ms": 12, "error": ""},
                 "steps": ["termux-wake-lock", "sshd"]})
+        if self.path == "/scroll_node":
+            # P1-04 (CONS-014): direction is required — a missing
+            # direction is a 400, not a silent scroll forward.
+            # The value itself is still validated.
+            if "direction" not in payload:
+                return self._send_json(400, {"ok": False,
+                                             "error": "missing direction"})
+            if payload.get("direction") not in ("forward", "backward"):
+                return self._send_json(400, {
+                    "ok": False,
+                    "error": f"unknown direction: {payload.get('direction')}"})
+            return self._send_json(200, {"ok": True, "snapshot_id": 7})
+        if self.path == "/node_action":
+            # P1-07 (CONS-014): mirror the server's arg
+            # validation — non-object args, unknown keys,
+            # non-integer numbers, and out-of-range values are
+            # all 400. The client validates the same rules
+            # before sending, so these paths are only reachable
+            # by a raw request (which is what the tests post).
+            args = payload.get("args", None)
+            if "args" in payload and not isinstance(args, dict):
+                return self._send_json(400, {"ok": False,
+                                             "error": "args must be an object"})
+            args = args or {}
+            action = payload.get("action", "")
+            allowed = _NODE_ACTION_ARG_KEYS.get(action, ())
+            for key in args:
+                if key not in allowed:
+                    return self._send_json(400, {
+                        "ok": False,
+                        "error": f"unknown argument for {action}: {key}"})
+            err = _validate_node_action_args(action, args)
+            if err is not None:
+                return self._send_json(400, {"ok": False, "error": err})
+            return self._send_json(200, {"ok": True, "snapshot_id": 7})
         return self._send_json(200, {"ok": True, "echo": payload})
 
 
@@ -1190,6 +1287,22 @@ def test_app_logs_returns_lines_v193(mock_app):
     assert len(gets) == 1
 
 
+def test_app_logs_never_carry_full_ips_or_packages(mock_app):
+    """P1-03 (CONS-014): no log line may carry a full IPv4
+    address or a package name — IPs are masked to two octets
+    by BridgeLog.sanitize, and package names are dropped at
+    the call sites. The listen line is masked, not full."""
+    import re
+    adapter = ab.AndroidAdapter()
+    result = adapter.logs()
+    lines = result["lines"] + result["previous_lines"]
+    assert lines[0] == "[11-06 03:55:00] listen 100.111.*.*:8080"
+    ipv4 = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
+    for line in lines:
+        assert not ipv4.search(line), line
+        assert "com." not in line, line
+
+
 def test_app_events_returns_history(mock_app):
     """Phase 3 (v1.6): /events returns the recorded history with
     seq, type, package, text, bounds, and the coalesced count;
@@ -1491,6 +1604,34 @@ def test_app_scroll_node_needs_gate(mock_app):
         adapter.scroll_node("n3", 123456)
 
 
+def test_app_scroll_node_missing_direction_is_400(mock_app):
+    """P1-04 (CONS-014): a missing direction is a 400, not a
+    silent scroll forward. The client always sends a direction,
+    so this posts raw (bypassing the client method)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.TransportError, match="missing direction"):
+        adapter._app_post("/scroll_node",
+                          {"node_id": "n3", "tree_hash": 123456})
+
+
+def test_app_scroll_node_bad_direction_raw_is_400(mock_app):
+    """P1-04 (CONS-014): the value validation is unchanged — a
+    present but unknown direction is still a 400."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.TransportError, match="unknown direction"):
+        adapter._app_post("/scroll_node",
+                          {"node_id": "n3", "tree_hash": 123456,
+                           "direction": "sideways"})
+
+
+def test_app_scroll_node_with_direction_raw(mock_app):
+    """P1-04 (CONS-014): a present, valid direction scrolls."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter._app_post("/scroll_node",
+                             {"node_id": "n3", "tree_hash": 123456,
+                              "direction": "backward"})["ok"] is True
+
+
 # --------------------------------------------------------------------------
 # Decision 68: generic node_action (v1.9.11).
 # --------------------------------------------------------------------------
@@ -1575,6 +1716,102 @@ def test_app_node_action_all_names_known(mock_app):
             args = {"text": "x"}
         assert adapter.node_action("n3", 123456, name, args)["ok"] is True
     assert len(ab.AndroidAdapter.NODE_ACTIONS) == 32
+
+
+def test_app_node_action_fractional_arg_rejected(mock_app):
+    """P1-07 (CONS-014): a fractional number (1.8) is rejected
+    instead of truncating — before any request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="needs integer"):
+        adapter.node_action("n3", 123456, "set_selection",
+                            {"start": 1.8, "end": 5})
+    with pytest.raises(ValueError, match="needs integer"):
+        adapter.node_action("n3", 123456, "scroll_to_position",
+                            {"row": 2.5})
+    with pytest.raises(ValueError, match="needs integer"):
+        adapter.node_action("n3", 123456, "press_and_hold",
+                            {"duration_ms": 500.5})
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_node_action_integral_float_accepted(mock_app):
+    """P1-07 (CONS-014): an integral float (2.0) IS an integer —
+    it is accepted and normalised to int on the wire."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.node_action("n3", 123456, "set_selection",
+                               {"start": 2.0, "end": 5})["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/node_action",
+            {"node_id": "n3", "tree_hash": 123456,
+             "action": "set_selection",
+             "args": {"start": 2, "end": 5}}) in posts
+
+
+def test_app_node_action_range_checks(mock_app):
+    """P1-07 (CONS-014): out-of-range args fail before any
+    request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+        adapter.node_action("n3", 123456, "set_progress", {"value": 1.5})
+    with pytest.raises(ValueError, match="between 0.0 and 1.0"):
+        adapter.node_action("n3", 123456, "set_progress", {"value": -0.1})
+    with pytest.raises(ValueError, match=">= 0"):
+        adapter.node_action("n3", 123456, "scroll_to_position", {"row": -1})
+    with pytest.raises(ValueError, match=">= 0"):
+        adapter.node_action("n3", 123456, "set_selection",
+                            {"start": -1, "end": 5})
+    with pytest.raises(ValueError, match="needs duration_ms"):
+        adapter.node_action("n3", 123456, "press_and_hold",
+                            {"duration_ms": 0})
+    with pytest.raises(ValueError, match="needs duration_ms"):
+        adapter.node_action("n3", 123456, "press_and_hold",
+                            {"duration_ms": 60001})
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_node_action_unknown_arg_rejected(mock_app):
+    """P1-07 (CONS-014): an unknown argument key is rejected
+    before any request is sent — including on a no-arg action."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="unknown argument"):
+        adapter.node_action("n3", 123456, "set_progress",
+                            {"value": 0.5, "speed": 2})
+    with pytest.raises(ValueError, match="unknown argument"):
+        adapter.node_action("n3", 123456, "click", {"force": True})
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_node_action_non_object_args_rejected(mock_app):
+    """P1-07 (CONS-014): non-object args are rejected before
+    any request is sent."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="args must be an object"):
+        adapter.node_action("n3", 123456, "click", ["force"])
+    with pytest.raises(ValueError, match="args must be an object"):
+        adapter.node_action("n3", 123456, "click", "fast")
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_app_node_action_raw_bad_args_are_400(mock_app):
+    """P1-07 (CONS-014): the server's validation — a raw request
+    with non-object args, an unknown key, a fractional number,
+    or an out-of-range value is a 400."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    base = {"node_id": "n3", "tree_hash": 123456}
+    with pytest.raises(ab.TransportError, match="args must be an object"):
+        adapter._app_post("/node_action", {**base, "action": "click",
+                                           "args": "fast"})
+    with pytest.raises(ab.TransportError, match="unknown argument"):
+        adapter._app_post("/node_action", {**base, "action": "click",
+                                           "args": {"force": True}})
+    with pytest.raises(ab.TransportError, match="needs integer"):
+        adapter._app_post("/node_action",
+                          {**base, "action": "set_selection",
+                           "args": {"start": 1.8, "end": 5}})
+    with pytest.raises(ab.TransportError, match="between 0.0 and 1.0"):
+        adapter._app_post("/node_action",
+                          {**base, "action": "set_progress",
+                           "args": {"value": 2.0}})
 
 
 # --------------------------------------------------------------------------

@@ -22,9 +22,13 @@ import java.util.Map;
  * same token auth as every other endpoint.
  *
  * Content rule (allowlist): only event names, counts, and short
- * error messages. Never request bodies, node text, or tokens. The
- * log() entry point sanitizes every line (single line, bounded),
- * so a careless caller cannot leak them.
+ * error messages. Never request bodies, node text, or tokens.
+ * P1-03 (CONS-014): IP addresses are masked to the first two
+ * octets by sanitize(); exception messages, package names,
+ * URLs, and file names are dropped at the call sites instead
+ * of being logged — the log must never carry them. The
+ * log() entry point sanitizes every line (single line, bounded,
+ * masked), so a careless caller cannot leak them.
  *
  * Only key events are recorded (server start/stop, bind results,
  * accept failures, connection-cap sheds, overload 503s, HTTP error
@@ -45,6 +49,17 @@ public class BridgeLog {
     private static final long THROTTLE_MS = 10_000;
     private static final int MAX_EVENT_LEN = 64;
     private static final int MAX_DETAIL_LEN = 200;
+    // P1-03 (CONS-014): central PII masking for every log line.
+    // An IPv4 address is masked to its first two octets
+    // (100.111.74.42 -> 100.111.*.*); a run of 32+ hex chars
+    // (a token-shaped value) is replaced outright. Callers must
+    // still not pass user data, but a careless caller can no
+    // longer leak a full IP or a token through this choke point.
+    private static final java.util.regex.Pattern IPV4_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "\\b(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\b");
+    private static final java.util.regex.Pattern LONG_HEX_PATTERN =
+            java.util.regex.Pattern.compile("\\b[0-9a-fA-F]{32,}\\b");
 
     private static final Deque<String> lines = new ArrayDeque<>();
     private static final List<String> previousLines = new ArrayList<>();
@@ -153,8 +168,15 @@ public class BridgeLog {
                 + " " + sanitize(detail, MAX_DETAIL_LEN);
     }
 
-    /** Single line, bounded, no control characters, no token-shaped
-     * values: a detail is an event description, never a payload. */
+    /** Single line, bounded, no control characters, no full IP
+     * addresses, no token-shaped values: a detail is an event
+     * description, never a payload. P1-03 (CONS-014): sanitize
+     * used to only replace control characters, so a full IP
+     * (listen/bind-failed) or an exception message carrying user
+     * data could reach the log file. The masking here is the
+     * choke point; call sites additionally drop the PII they
+     * used to pass (exception messages, package names, URLs,
+     * file names). */
     private static String sanitize(String s, int maxLen) {
         if (s == null) {
             return "";
@@ -164,7 +186,10 @@ public class BridgeLog {
             char c = s.charAt(i);
             out.append((c < 0x20 || c == 0x7f) ? ' ' : c);
         }
-        return out.toString().trim();
+        String cleaned = out.toString().trim();
+        cleaned = IPV4_PATTERN.matcher(cleaned).replaceAll("$1.$2.*.*");
+        cleaned = LONG_HEX_PATTERN.matcher(cleaned).replaceAll("[token]");
+        return cleaned;
     }
 
     private static List<String> readTail(File f, int maxLines) {

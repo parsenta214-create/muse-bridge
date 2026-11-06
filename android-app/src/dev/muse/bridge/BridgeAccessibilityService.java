@@ -696,49 +696,71 @@ public class BridgeAccessibilityService extends AccessibilityService {
 
     /**
      * Builds the argument Bundle for an action (decision 68). Only
-     * four actions take args; the rest take none. A missing or
+     * five actions take args; the rest take none. A missing or
      * wrongly-typed required arg is an IllegalArgumentException
      * (-> HTTP 400), never a silent default.
+     *
+     * P1-07 (CONS-014): unknown argument keys are rejected
+     * (they used to be ignored silently); numeric args must be
+     * integers (1.8 used to truncate via intValue()); and the
+     * ranged args are bounded (set_progress 0.0–1.0,
+     * scroll_to_position row >= 0, set_selection start/end
+     * >= 0, press_and_hold duration_ms 1..60000).
      */
     private static Bundle nodeActionArgs(String name, JSONObject args) {
         Bundle b = new Bundle();
         if (args == null) {
             args = new JSONObject();
         }
-        if ("set_selection".equals(name)) {
-            Object start = args.opt("start");
-            Object end = args.opt("end");
-            if (!(start instanceof Number) || !(end instanceof Number)) {
+        java.util.Set<String> allowed = allowedNodeActionArgs(name);
+        java.util.Iterator<String> keys = args.keys();
+        while (keys.hasNext()) {
+            String k = keys.next();
+            if (!allowed.contains(k)) {
                 throw new IllegalArgumentException(
-                        "set_selection needs integer start and end");
+                        "unknown argument for " + name + ": " + k);
+            }
+        }
+        if ("set_selection".equals(name)) {
+            int start = requireIntArg(args, "start", name);
+            int end = requireIntArg(args, "end", name);
+            if (start < 0 || end < 0) {
+                throw new IllegalArgumentException(
+                        "set_selection needs start and end >= 0");
             }
             b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT,
-                    ((Number) start).intValue());
+                    start);
             b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT,
-                    ((Number) end).intValue());
+                    end);
         } else if ("set_progress".equals(name)) {
             Object value = args.opt("value");
             if (!(value instanceof Number)) {
                 throw new IllegalArgumentException("set_progress needs numeric value");
             }
-            b.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE,
-                    ((Number) value).floatValue());
-        } else if ("scroll_to_position".equals(name)) {
-            Object row = args.opt("row");
-            if (!(row instanceof Number)) {
-                throw new IllegalArgumentException("scroll_to_position needs integer row");
+            double v = ((Number) value).doubleValue();
+            if (Double.isNaN(v) || Double.isInfinite(v) || v < 0.0 || v > 1.0) {
+                throw new IllegalArgumentException(
+                        "set_progress value must be between 0.0 and 1.0");
             }
-            b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT,
-                    ((Number) row).intValue());
+            b.putFloat(AccessibilityNodeInfo.ACTION_ARGUMENT_PROGRESS_VALUE,
+                    (float) v);
+        } else if ("scroll_to_position".equals(name)) {
+            int row = requireIntArg(args, "row", name);
+            if (row < 0) {
+                throw new IllegalArgumentException(
+                        "scroll_to_position needs row >= 0");
+            }
+            b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT, row);
         } else if ("press_and_hold".equals(name)) {
             Object duration = args.opt("duration_ms");
-            if (duration != null && !(duration instanceof Number)) {
-                throw new IllegalArgumentException(
-                        "press_and_hold duration_ms must be an integer");
-            }
             if (duration != null) {
+                int ms = requireIntArg(args, "duration_ms", name);
+                if (ms < 1 || ms > 60000) {
+                    throw new IllegalArgumentException(
+                            "press_and_hold duration_ms must be 1..60000");
+                }
                 b.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_PRESS_AND_HOLD_DURATION_MILLIS_INT,
-                        ((Number) duration).intValue());
+                        ms);
             }
         } else if ("set_text".equals(name)) {
             Object text = args.opt("text");
@@ -749,6 +771,53 @@ public class BridgeAccessibilityService extends AccessibilityService {
                     (String) text);
         }
         return b;
+    }
+
+    /** P1-07 (CONS-014): the argument keys each action accepts. */
+    private static java.util.Set<String> allowedNodeActionArgs(String name) {
+        switch (name) {
+            case "set_selection":
+                return new java.util.HashSet<>(
+                        java.util.Arrays.asList("start", "end"));
+            case "set_progress":
+                return new java.util.HashSet<>(
+                        java.util.Arrays.asList("value"));
+            case "scroll_to_position":
+                return new java.util.HashSet<>(
+                        java.util.Arrays.asList("row"));
+            case "press_and_hold":
+                return new java.util.HashSet<>(
+                        java.util.Arrays.asList("duration_ms"));
+            case "set_text":
+                return new java.util.HashSet<>(
+                        java.util.Arrays.asList("text"));
+            default:
+                return java.util.Collections.emptySet();
+        }
+    }
+
+    /**
+     * P1-07 (CONS-014): an integer argument. A JSON decimal
+     * (1.8) used to truncate silently via Number.intValue(); a
+     * missing or non-numeric value is a different error. An
+     * integral double (2.0) IS an integer and is accepted, but
+     * 1.8, NaN, infinities, and out-of-int-range values are
+     * rejected with IllegalArgumentException (-> HTTP 400).
+     */
+    private static int requireIntArg(JSONObject args, String key, String action) {
+        Object v = args.opt(key);
+        if (!(v instanceof Number)) {
+            throw new IllegalArgumentException(
+                    action + " needs integer " + key);
+        }
+        double d = ((Number) v).doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d)
+                || d != Math.floor(d)
+                || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException(
+                    action + " needs integer " + key + " (got " + v + ")");
+        }
+        return (int) d;
     }
 
     /**
@@ -1442,9 +1511,29 @@ public class BridgeAccessibilityService extends AccessibilityService {
             int depth, List<Node> out, String[] focus, String[] a11yFocus,
             Map<String, AccessibilityNodeInfo> live) {
         if (node == null || depth > MAX_DEPTH) {
+            // P1-01 (CONS-014): this early return happens BEFORE
+            // the node reaches the live map, so nobody else will
+            // recycle it — and the parent obtained it via
+            // getChild(), so the parent will not recycle it
+            // either. Recycle it here, or it leaks. (The root
+            // can never reach this path: depth 0, out empty.)
+            if (node != null) {
+                try {
+                    node.recycle();
+                } catch (Exception ignored) {
+                }
+            }
             return depth > MAX_DEPTH;
         }
         if (out.size() >= MAX_NODES) {
+            // P1-01 (CONS-014): same leak — the node is not
+            // registered in the live map on this path, so it
+            // must be recycled here. (The root can never reach
+            // this path: out starts empty.)
+            try {
+                node.recycle();
+            } catch (Exception ignored) {
+            }
             return true;
         }
         Node n = new Node();

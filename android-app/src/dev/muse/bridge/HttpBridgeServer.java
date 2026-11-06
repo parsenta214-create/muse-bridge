@@ -260,13 +260,19 @@ public class HttpBridgeServer {
                 } else {
                     installStatus = "failed";
                     installDetail = detail + " (no confirmation intent)";
-                    BridgeLog.log("install_result", "failed " + detail);
+                    // P1-03 (CONS-014): the log carries the status
+                    // code only — `detail` holds the package name
+                    // and the installer's message. (installDetail
+                    // itself keeps the detail: it is the
+                    // /install_status API answer to the operator,
+                    // behind token auth, not the log file.)
+                    BridgeLog.log("install_result", "failed status=" + st);
                     installRunning = false;
                 }
             } else {
                 installStatus = "failed";
                 installDetail = detail;
-                BridgeLog.log("install_result", "failed " + detail);
+                BridgeLog.log("install_result", "failed status=" + st);
                 installRunning = false;
             }
         }
@@ -391,6 +397,12 @@ public class HttpBridgeServer {
                 new ArrayBlockingQueue<Runnable>(HTTP_QUEUE),
                 new ThreadPoolExecutor.AbortPolicy());
         List<InetAddress> addrs = bindAddresses();
+        // P1-06 (CONS-014): each accept thread is bound to the
+        // lifecycle generation current at its creation. An old
+        // thread that wakes after a stop/restart sees the
+        // mismatch and exits instead of spinning on its closed
+        // socket while the new lifecycle is STARTING/RUNNING.
+        final long acceptGeneration = serverLifecycleGeneration;
         for (InetAddress addr : addrs) {
             try {
                 ServerSocket ss = new ServerSocket();
@@ -401,7 +413,7 @@ public class HttpBridgeServer {
                 Thread t = new Thread(new Runnable() {
                     @Override
                     public void run() {
-                        acceptLoop(sock);
+                        acceptLoop(sock, acceptGeneration);
                     }
                 }, "muse-bridge-accept-" + addr.getHostAddress());
                 acceptThreads.add(t);
@@ -410,8 +422,11 @@ public class HttpBridgeServer {
                 BridgeLog.log("listen", addr.getHostAddress() + ":" + port);
             } catch (Exception e) {
                 Log.w(TAG, "cannot bind " + addr.getHostAddress() + ": " + e.getMessage());
+                // P1-03 (CONS-014): log the exception class only —
+                // the message may carry user data. The IP is
+                // masked to two octets by BridgeLog.sanitize().
                 BridgeLog.log("bind-failed",
-                        addr.getHostAddress() + ": " + e.getMessage());
+                        addr.getHostAddress() + ": " + e.getClass().getSimpleName());
             }
         }
         if (listeners.isEmpty()) {
@@ -483,7 +498,13 @@ public class HttpBridgeServer {
                 for (InetAddress addr : Collections.list(ni.getInetAddresses())) {
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
                         String ip = addr.getHostAddress();
-                        if (ip != null && ip.startsWith("100.")) {
+                        // P1-02 (CONS-014): the old startsWith("100.")
+                        // matched all of 100.0.0.0/8, but 100.64.0.0/10
+                        // is also Carrier-Grade NAT — a non-Tailscale
+                        // interface could be bound by mistake. Use the
+                        // same 100.64.0.0/10 test as the Tailscale IP
+                        // detection (MainActivity.isTailscaleIp).
+                        if (ip != null && MainActivity.isTailscaleIp(ip)) {
                             out.add(addr);
                         }
                     }
@@ -498,7 +519,7 @@ public class HttpBridgeServer {
         return out;
     }
 
-    private void acceptLoop(ServerSocket ss) {
+    private void acceptLoop(ServerSocket ss, long acceptGeneration) {
         // A-2: this thread only accepts. HTTP handling runs on the
         // bounded worker pool; the connection slot is released when
         // the worker finishes (or immediately when we shed the load).
@@ -507,8 +528,18 @@ public class HttpBridgeServer {
         // old "RUNNING only" condition made the thread exit at once
         // (the socket stayed bound but deaf, and start() still
         // reported running). It now runs until STOPPING/STOPPED.
+        // P1-06 (CONS-014): the loop is also bound to the
+        // lifecycle generation captured at thread creation. A
+        // stop() closes this socket, so a blocked accept() throws;
+        // if a new start() has already set the state back to
+        // STARTING/RUNNING by the time the old thread wakes, the
+        // generation mismatch (and the closed socket) ends the
+        // loop instead of letting the old thread spin on the
+        // closed socket and log "accept failed" forever.
         final ThreadPoolExecutor pool = workers;
-        while (state == ServerState.RUNNING || state == ServerState.STARTING) {
+        while ((state == ServerState.RUNNING || state == ServerState.STARTING)
+                && acceptGeneration == serverLifecycleGeneration
+                && !ss.isClosed()) {
             try {
                 final Socket conn = ss.accept();
                 // v2.1 fix (CONS-024 P1-NEW): capture the server
@@ -565,10 +596,17 @@ public class HttpBridgeServer {
                     sendOverload(conn);
                 }
             } catch (Exception e) {
-                if (state == ServerState.RUNNING || state == ServerState.STARTING) {
+                // P1-06 (CONS-014): an accept failure from a stale
+                // thread (its socket was closed by stop() and a new
+                // lifecycle already started) is expected, not an
+                // error — log it only when this thread still
+                // belongs to the current lifecycle.
+                if (acceptGeneration == serverLifecycleGeneration
+                        && (state == ServerState.RUNNING
+                            || state == ServerState.STARTING)) {
                     Log.w(TAG, "accept failed: " + e.getMessage());
                     BridgeLog.logThrottled("accept-failed", "accept-failed",
-                            e.getMessage());
+                            e.getClass().getSimpleName());
                 }
             }
         }
@@ -1083,32 +1121,42 @@ public class HttpBridgeServer {
                 // scrollable ancestor). 409 when the screen moved on.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
-                String direction = j.optString("direction", "forward");
-                if (!"forward".equalsIgnoreCase(direction)
-                        && !"backward".equalsIgnoreCase(direction)) {
+                // P1-04 (CONS-014): direction is REQUIRED — a
+                // missing direction used to default to "forward"
+                // and scroll without being asked. 400 when absent;
+                // the value itself is still validated below.
+                if (!j.has("direction")) {
                     status = 400;
                     sendJson(out, status, new JSONObject().put("ok", false)
-                            .put("error", "unknown direction: " + direction));
+                            .put("error", "missing direction"));
                 } else {
-                    String nodeId = j.getString("node_id");
-                    int nodeTreeHash = j.getInt("tree_hash");
-                    // v2.1: the operation is accepted — show "操作中".
-                    opGeneration = noteOperation(lifecycleGeneration, "スクロール中");
-                    try {
-                        BridgeAccessibilityService.ActionOutcome o = svc.scrollNode(
-                                nodeId, nodeTreeHash, direction);
-                        status = o.ok ? 200 : 422;
-                        sendJson(out, status, new JSONObject().put("ok", o.ok)
-                                .put("snapshot_id", o.snapshotId)
-                                .put("error", o.ok ? JSONObject.NULL : "node not scrollable"));
-                    } catch (BridgeAccessibilityService.StaleRevisionException e) {
-                        status = 409;
+                    String direction = j.optString("direction", "forward");
+                    if (!"forward".equalsIgnoreCase(direction)
+                            && !"backward".equalsIgnoreCase(direction)) {
+                        status = 400;
                         sendJson(out, status, new JSONObject().put("ok", false)
-                                .put("error", e.getMessage()));
-                    } catch (BridgeAccessibilityService.NodeNotFoundException e) {
-                        status = 422;
-                        sendJson(out, status, new JSONObject().put("ok", false)
-                                .put("error", e.getMessage()));
+                                .put("error", "unknown direction: " + direction));
+                    } else {
+                        String nodeId = j.getString("node_id");
+                        int nodeTreeHash = j.getInt("tree_hash");
+                        // v2.1: the operation is accepted — show "操作中".
+                        opGeneration = noteOperation(lifecycleGeneration, "スクロール中");
+                        try {
+                            BridgeAccessibilityService.ActionOutcome o = svc.scrollNode(
+                                    nodeId, nodeTreeHash, direction);
+                            status = o.ok ? 200 : 422;
+                            sendJson(out, status, new JSONObject().put("ok", o.ok)
+                                    .put("snapshot_id", o.snapshotId)
+                                    .put("error", o.ok ? JSONObject.NULL : "node not scrollable"));
+                        } catch (BridgeAccessibilityService.StaleRevisionException e) {
+                            status = 409;
+                            sendJson(out, status, new JSONObject().put("ok", false)
+                                    .put("error", e.getMessage()));
+                        } catch (BridgeAccessibilityService.NodeNotFoundException e) {
+                            status = 422;
+                            sendJson(out, status, new JSONObject().put("ok", false)
+                                    .put("error", e.getMessage()));
+                        }
                     }
                 }
             } else if ("/node_action".equals(path) && "POST".equals(method)) {
@@ -1116,6 +1164,17 @@ public class HttpBridgeServer {
                 // name, with optional args. 409 when the screen moved on.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
+                // P1-07 (CONS-014): args must be an object when
+                // present. optJSONObject() silently turns a
+                // non-object value (number, string, array) into
+                // null, which the old code then treated as "no
+                // args" — reject it explicitly with 400 instead.
+                if (j.has("args") && !(j.opt("args") instanceof JSONObject)) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "args must be an object"));
+                    return status;
+                }
                 JSONObject args = j.optJSONObject("args");
                 String nodeId = j.getString("node_id");
                 int nodeTreeHash = j.getInt("tree_hash");
@@ -1177,7 +1236,10 @@ public class HttpBridgeServer {
                 // getLaunchIntentForPackage. HTTP 403, old error
                 // format (a policy refusal, not a launch outcome).
                 if (LAUNCH_DENY_LIST.contains(pkg)) {
-                    BridgeLog.log("launch_denied", pkg);
+                    // P1-03 (CONS-014): the package name is not
+                    // logged — the 403 answer to the VM already
+                    // names it. The log records the denial only.
+                    BridgeLog.log("launch_denied", "");
                     status = 403;
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", "launch denied: " + pkg
@@ -1204,7 +1266,9 @@ public class HttpBridgeServer {
                             && pkg.equals(foregroundPackageSafe(svc,
                                     LAUNCH_PRE_READ_TIMEOUT_MS));
                     if (wasForeground) {
-                        BridgeLog.log("launch_already_foreground", pkg);
+                        // P1-03 (CONS-014): no package name in the
+                        // log — the launch answer to the VM names it.
+                        BridgeLog.log("launch_already_foreground", "");
                     }
                     boolean issued = launchApp(pkg);
                     if (!issued) {
@@ -2476,7 +2540,8 @@ public class HttpBridgeServer {
             BridgeAccessibilityService svc, long requestTimeMs,
             boolean wasForeground) throws org.json.JSONException {
         if (svc == null) {
-            BridgeLog.log("launch_unverified", pkg);
+            // P1-03 (CONS-014): no package name in the log.
+            BridgeLog.log("launch_unverified", "");
             return launchResultJson(pkg, false, "unconfirmed",
                     "VERIFICATION_UNAVAILABLE", null, "none");
         }
@@ -2500,8 +2565,10 @@ public class HttpBridgeServer {
                 break;
             }
             if (pkg.equals(foregroundPackageSafe(svc, remainingMs))) {
+                // P1-03 (CONS-014): no package name in the log —
+                // only whether it was already in front.
                 BridgeLog.log("launch_confirmed", wasForeground
-                        ? pkg + " (already foreground)" : pkg);
+                        ? "already foreground" : "");
                 return launchResultJson(pkg, true, "launched",
                         null, Boolean.TRUE, "accessibility");
             }
@@ -2510,7 +2577,8 @@ public class HttpBridgeServer {
                 break;
             }
         }
-        BridgeLog.log("launch_unconfirmed", pkg);
+        // P1-03 (CONS-014): no package name in the log.
+        BridgeLog.log("launch_unconfirmed", "");
         return launchResultJson(pkg, false, "unconfirmed",
                 "FOREGROUND_NOT_CONFIRMED", Boolean.FALSE, "accessibility");
     }
@@ -2544,7 +2612,8 @@ public class HttpBridgeServer {
             context.startActivity(intent);
             return true;
         } catch (ActivityNotFoundException | SecurityException e) {
-            BridgeLog.log("launch_blocked", pkg);
+            // P1-03 (CONS-014): no package name in the log.
+            BridgeLog.log("launch_blocked", "");
             return false;
         }
     }
@@ -2556,8 +2625,9 @@ public class HttpBridgeServer {
      * then hands it to PackageInstaller and commits. The
      * commit shows the system confirmation dialog; the result
      * (installed / failed) arrives on installReceiver. The
-     * downloaded file is deleted after the commit. Never logs
-     * the APK bytes, only the URL and sizes.
+     * downloaded file is deleted after the commit. P1-03
+     * (CONS-014): the log carries only the byte count — never
+     * the URL, the file name, or the failure message.
      */
     private void runInstall(String url, String apkPath) {
         installRunning = true;
@@ -2567,7 +2637,10 @@ public class HttpBridgeServer {
             if (url != null) {
                 installStatus = "downloading";
                 installDetail = url;
-                BridgeLog.log("install_download_start", url);
+                // P1-03 (CONS-014): never log the URL — it may
+                // carry query parameters or tokens. The VM that
+                // requested the install already knows it.
+                BridgeLog.log("install_download_start", "");
                 String name = url.substring(url.lastIndexOf('/') + 1);
                 if (name.isEmpty() || name.contains("..")) {
                     name = "app.apk";
@@ -2629,13 +2702,19 @@ public class HttpBridgeServer {
             }
             installStatus = "committed";
             installDetail = "waiting for the install confirmation";
-            BridgeLog.log("install_committed", apk.getName());
+            // P1-03 (CONS-014): never log the APK file name.
+            BridgeLog.log("install_committed", "");
         } catch (Exception e) {
             installStatus = "failed";
             installDetail = e.getMessage() == null
                     ? e.getClass().getSimpleName() : e.getMessage();
             installRunning = false;
-            BridgeLog.log("install_failed", installDetail);
+            // P1-03 (CONS-014): log the exception class only —
+            // the message may carry a path or other user data.
+            // (installDetail keeps the message: it is the
+            // /install_status API answer to the operator,
+            // behind token auth, not the log file.)
+            BridgeLog.log("install_failed", e.getClass().getSimpleName());
         }
     }
 

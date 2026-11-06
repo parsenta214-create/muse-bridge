@@ -694,6 +694,64 @@ class AndroidAdapter:
         "set_progress": ("value",),
         "scroll_to_position": ("row",),
     }
+    # P1-07 (CONS-014): the argument keys each action accepts —
+    # mirrors the server's nodeActionArgs. Only these keys are
+    # sent; anything else is a ValueError before any request.
+    NODE_ACTION_ARG_KEYS = {
+        "set_selection": ("start", "end"),
+        "set_progress": ("value",),
+        "scroll_to_position": ("row",),
+        "press_and_hold": ("duration_ms",),
+        "set_text": ("text",),
+    }
+
+    @staticmethod
+    def _require_int_arg(action: str, key: str, value, minimum=None,
+                         maximum=None):
+        """P1-07 (CONS-014): an integer argument — bools are not
+        integers here, and a fractional float (1.8) is rejected
+        instead of truncating. An integral float (2.0) is accepted
+        and normalised to int, mirroring the server."""
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{action} needs integer {key}")
+        if isinstance(value, float):
+            if not value.is_integer() or abs(value) > 2**31 - 1:
+                raise ValueError(
+                    f"{action} needs integer {key} (got {value!r})")
+            value = int(value)
+        if minimum is not None and value < minimum:
+            raise ValueError(f"{action} needs {key} >= {minimum}")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{action} needs {key} <= {maximum}")
+        return value
+
+    def _validate_node_action_args(self, action: str, args: dict) -> None:
+        """P1-07 (CONS-014): integer/range checks mirroring the
+        server's nodeActionArgs. Raises ValueError before any
+        request is sent. Integral floats are normalised to int
+        in place."""
+        if action == "set_selection":
+            for key in ("start", "end"):
+                args[key] = self._require_int_arg(
+                    action, key, args[key], minimum=0)
+        elif action == "set_progress":
+            v = args["value"]
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise ValueError("set_progress needs numeric value")
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(
+                    "set_progress value must be between 0.0 and 1.0")
+        elif action == "scroll_to_position":
+            args["row"] = self._require_int_arg(
+                action, "row", args["row"], minimum=0)
+        elif action == "press_and_hold":
+            if "duration_ms" in args:
+                args["duration_ms"] = self._require_int_arg(
+                    action, "duration_ms", args["duration_ms"],
+                    minimum=1, maximum=60000)
+        elif action == "set_text":
+            if not isinstance(args["text"], str):
+                raise ValueError("set_text needs text")
 
     def node_action(self, node_id: str, tree_hash: int, action: str,
                     args: dict | None = None) -> dict:
@@ -708,12 +766,21 @@ class AndroidAdapter:
         --allow-actions, never retried."""
         if action not in self.NODE_ACTIONS:
             raise ValueError(f"unknown action: {action!r}")
+        # P1-07 (CONS-014): args must be an object when present —
+        # the server rejects a non-object with 400 instead of
+        # silently treating it as "no args".
+        if args is not None and not isinstance(args, dict):
+            raise ValueError("args must be an object")
         args = dict(args or {})
+        for key in args:
+            if key not in self.NODE_ACTION_ARG_KEYS.get(action, ()):
+                raise ValueError(f"unknown argument for {action}: {key!r}")
         for required in self.NODE_ACTION_ARGS.get(action, ()):
             if required not in args:
                 raise ValueError(f"{action} needs argument: {required}")
         if action == "set_text" and "text" not in args:
             raise ValueError("set_text needs argument: text")
+        self._validate_node_action_args(action, args)
         self._require_actions(f"node_action({node_id}, {action})")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
         return self._app_post("/node_action",
