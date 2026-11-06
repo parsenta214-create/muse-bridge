@@ -1142,6 +1142,21 @@ public class HttpBridgeServer {
                 // accessibility service is off (P1-05 fixed).
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 String pkg = j.getString("package");
+                // P0-4 deny list (Saardeim decision 2026-11-06
+                // 20:16, README decision 91): refuse BEFORE any
+                // launch attempt and BEFORE the operation
+                // notification hook — a refused launch posts no
+                // "操作中" notification and never reaches
+                // getLaunchIntentForPackage. HTTP 403, old error
+                // format (a policy refusal, not a launch outcome).
+                if (LAUNCH_DENY_LIST.contains(pkg)) {
+                    BridgeLog.log("launch_denied", pkg);
+                    status = 403;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "launch denied: " + pkg
+                                    + " is on the deny list"));
+                    return status;
+                }
                 // v2.1: the operation is accepted — show "操作中"
                 // with the app label (falls back to the package
                 // name when no label exists).
@@ -1151,9 +1166,16 @@ public class HttpBridgeServer {
                     // the start, and note whether the target is
                     // already in front — the verification below only
                     // counts observations after this request.
-                    long requestTimeMs = System.currentTimeMillis();
+                    // P0-4 fix (CONS-027 P2 #5): elapsedRealtime
+                    // (monotonic) — the window is a duration, so a
+                    // wall-clock correction must not move it. The
+                    // pre-request read is bounded (500 ms): it is
+                    // informational only and must not delay the
+                    // launch on a main-thread stall.
+                    long requestTimeMs = android.os.SystemClock.elapsedRealtime();
                     boolean wasForeground = svc != null
-                            && pkg.equals(foregroundPackageSafe(svc));
+                            && pkg.equals(foregroundPackageSafe(svc,
+                                    LAUNCH_PRE_READ_TIMEOUT_MS));
                     if (wasForeground) {
                         BridgeLog.log("launch_already_foreground", pkg);
                     }
@@ -2122,16 +2144,46 @@ public class HttpBridgeServer {
     private static final long[] LAUNCH_VERIFY_OFFSETS_MS = {500, 1000, 2000, 3000};
     private static final long LAUNCH_VERIFY_MAX_MS = 3000;
 
+    /** P0-4 fix (CONS-027 P1 #1): the pre-request foreground
+     * read (wasForeground) is informational only — it must not
+     * let a main-thread stall delay the launch itself. It waits
+     * at most this long; a timeout just means "not observed". */
+    private static final long LAUNCH_PRE_READ_TIMEOUT_MS = 500;
+
+    /** P0-4 deny list (Saardeim decision 2026-11-06 20:16,
+     * README decision 91, GPT P1 #4 in CONS-20261106-027):
+     * banking apps and other apps where heavy security is
+     * expected are NOT launch targets at all. An explicit,
+     * hard-coded set of package names — no auto-detection
+     * (banking apps cannot be reliably auto-detected). Adding
+     * a package is a code change + test. Checked in the
+     * /launch_app handler BEFORE any launch attempt and BEFORE
+     * the operation notification hook, so a refused launch
+     * posts no "操作中" notification. Krungthai NEXT is
+     * deliberately NOT on the list — its package name is
+     * unconfirmed. Initial list verified 2026-11-06. */
+    private static final Set<String> LAUNCH_DENY_LIST =
+            new HashSet<>(Arrays.asList(
+                    "com.kasikorn.retail.mbanking.wap", // K PLUS (KBank)
+                    "com.bbl.mobilebanking", // Bualuang mBanking
+                    "com.scb.phone", // SCB EASY
+                    "com.krungsri.kma")); // KMA (Krungsri)
+
     /** P0-4: read the foreground package, never throwing. A
      * failure to read (service timeout, no active window) is a
      * missed observation, not a launch failure — the caller keeps
-     * polling and only claims `launched` on a positive match. */
-    private String foregroundPackageSafe(BridgeAccessibilityService svc) {
+     * polling and only claims `launched` on a positive match.
+     * P0-4 fix (CONS-027 P1 #1): `timeoutMs` bounds how long
+     * this read may wait — the caller passes the remaining
+     * verification budget, so one main-thread stall cannot
+     * overrun the ~3 s window. */
+    private String foregroundPackageSafe(BridgeAccessibilityService svc,
+            long timeoutMs) {
         if (svc == null) {
             return null;
         }
         try {
-            return svc.getForegroundPackage();
+            return svc.getForegroundPackage(timeoutMs);
         } catch (Exception e) {
             BridgeLog.log("launch_fg_read_failed",
                     e.getClass().getSimpleName());
@@ -2171,9 +2223,17 @@ public class HttpBridgeServer {
      * when the app was already in front (wasForeground) still
      * counts as launched: the requested end state is achieved.
      * startActivity() not throwing is NEVER the success condition.
-     * A single slow poll (main-thread stall) can overrun the
-     * window; the deadline check after each poll then stops
-     * further polling, so the answer stays truthful, only later.
+     *
+     * P0-4 fix (CONS-027 P1 #1 + P2 #5): the verification
+     * window is measured with SystemClock.elapsedRealtime()
+     * (monotonic — immune to wall-clock corrections), and the
+     * remaining budget is propagated into every foreground
+     * read, so a main-thread stall cannot overrun the window:
+     * each read waits at most the time left, and the whole
+     * /launch_app response stays within ~3–4 s. A read that
+     * times out is a missed poll (unconfirmed), never a false
+     * success. The poll offsets (500/1000/2000/3000 ms) and
+     * the ~3 s window are unchanged.
      */
     private JSONObject verifyLaunchForeground(String pkg,
             BridgeAccessibilityService svc, long requestTimeMs,
@@ -2183,8 +2243,10 @@ public class HttpBridgeServer {
             return launchResultJson(pkg, false, "unconfirmed",
                     "VERIFICATION_UNAVAILABLE", null, "none");
         }
+        long deadlineMs = requestTimeMs + LAUNCH_VERIFY_MAX_MS;
         for (long offset : LAUNCH_VERIFY_OFFSETS_MS) {
-            long wait = requestTimeMs + offset - System.currentTimeMillis();
+            long wait = requestTimeMs + offset
+                    - android.os.SystemClock.elapsedRealtime();
             if (wait > 0) {
                 try {
                     Thread.sleep(wait);
@@ -2193,13 +2255,21 @@ public class HttpBridgeServer {
                     break;
                 }
             }
-            if (pkg.equals(foregroundPackageSafe(svc))) {
+            // Remaining budget bounds this read: a stalled main
+            // thread cannot push the response past the deadline.
+            long remainingMs = deadlineMs
+                    - android.os.SystemClock.elapsedRealtime();
+            if (remainingMs <= 0) {
+                break;
+            }
+            if (pkg.equals(foregroundPackageSafe(svc, remainingMs))) {
                 BridgeLog.log("launch_confirmed", wasForeground
                         ? pkg + " (already foreground)" : pkg);
                 return launchResultJson(pkg, true, "launched",
                         null, Boolean.TRUE, "accessibility");
             }
-            if (System.currentTimeMillis() - requestTimeMs >= LAUNCH_VERIFY_MAX_MS) {
+            if (android.os.SystemClock.elapsedRealtime() - requestTimeMs
+                    >= LAUNCH_VERIFY_MAX_MS) {
                 break;
             }
         }

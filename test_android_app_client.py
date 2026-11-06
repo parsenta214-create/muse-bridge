@@ -8,6 +8,7 @@ constant, never a real credential).
 import json
 import struct
 import threading
+import time
 import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -118,6 +119,43 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # mock always answers VERIFICATION_UNAVAILABLE, like the
     # real server. Reset by the fixture.
     launch_outcome = "launched"
+    # P0-4 deny list (Saardeim decision 2026-11-06 20:16,
+    # README decision 91): mirrors the Java LAUNCH_DENY_LIST —
+    # the mock refuses these packages with 403 before any launch
+    # attempt and before the operation notification.
+    LAUNCH_DENY_LIST = frozenset({
+        "com.kasikorn.retail.mbanking.wap",
+        "com.bbl.mobilebanking",
+        "com.scb.phone",
+        "com.krungsri.kma",
+    })
+    # P0-4 fix (CONS-027 P1 #3): per-package launch outcomes,
+    # so two simultaneous requests for different packages can
+    # be told apart ("launched", "unconfirmed",
+    # "foreground_left" — the target left before the post-request
+    # poll — or "no_window" — getRootInActiveWindow() null).
+    # Values answer the same wire shape as "unconfirmed" where
+    # the server-side cause differs; the name documents the
+    # scenario. Reset by the fixture.
+    launch_outcomes = {}
+    # Counters proving what a request did: launch_attempts counts
+    # launches actually attempted, operation_notifications counts
+    # "操作中" notifications posted. A refused (deny-listed)
+    # launch increments neither. Guarded by a lock because the
+    # mock serves concurrent requests. Reset by the fixture.
+    counter_lock = threading.Lock()
+    launch_attempts = 0
+    operation_notifications = 0
+    # P0-4 fix (CONS-027 P1 #3): when True, the service "goes
+    # away" mid-verification — the handler answers as the real
+    # server does when its reads start failing (unconfirmed /
+    # FOREGROUND_NOT_CONFIRMED, never launched). Reset by the
+    # fixture.
+    disconnect_during_launch = False
+    # P0-4 fix (CONS-027 P1 #1): artificial delay (seconds)
+    # before the /launch_app answer, modelling a slow
+    # verification window. Reset by the fixture.
+    launch_delay_s = 0.0
 
     def log_message(self, *args):  # keep test output quiet
         pass
@@ -409,6 +447,42 @@ class MockAppHandler(BaseHTTPRequestHandler):
             # but not confirmed; a11y off -> verification is
             # unavailable (UsageStats is P1).
             pkg = payload.get("package", "")
+            # P0-4 deny list: refused before any launch attempt
+            # and before the operation notification — no launch
+            # is attempted and no "操作中" is posted.
+            if pkg in MockAppHandler.LAUNCH_DENY_LIST:
+                return self._send_json(403, {
+                    "ok": False,
+                    "error": f"launch denied: {pkg} is on the deny list"})
+            # P0-4 fix (CONS-027 P1 #1): model a slow
+            # verification window (the full ~3 s window
+            # elapsing) — the answer still arrives, no hang.
+            if MockAppHandler.launch_delay_s:
+                time.sleep(MockAppHandler.launch_delay_s)
+            # P0-4 fix (CONS-027 P1 #3): the service goes away
+            # mid-verification. The request started with a11y
+            # on, so the reads failing surface as missed polls
+            # (unconfirmed / FOREGROUND_NOT_CONFIRMED), not as
+            # VERIFICATION_UNAVAILABLE — exactly like the real
+            # server, whose captured service reference goes
+            # stale. Never launched.
+            if MockAppHandler.disconnect_during_launch:
+                MockAppHandler.accessibility = False
+                with MockAppHandler.counter_lock:
+                    MockAppHandler.operation_notifications += 1
+                    MockAppHandler.launch_attempts += 1
+                return self._send_json(200, {
+                    "ok": False, "status": "unconfirmed",
+                    "reason": "FOREGROUND_NOT_CONFIRMED",
+                    "accepted": True, "package": pkg,
+                    "launch_requested": True,
+                    "foreground_confirmed": False,
+                    "verification": "accessibility"})
+            # The operation notification is posted only once the
+            # request is accepted (deny check passed).
+            with MockAppHandler.counter_lock:
+                MockAppHandler.operation_notifications += 1
+                MockAppHandler.launch_attempts += 1
             if not MockAppHandler.accessibility:
                 return self._send_json(200, {
                     "ok": False, "status": "unconfirmed",
@@ -416,7 +490,9 @@ class MockAppHandler(BaseHTTPRequestHandler):
                     "accepted": True, "package": pkg,
                     "launch_requested": True,
                     "foreground_confirmed": None, "verification": "none"})
-            if MockAppHandler.launch_outcome == "unconfirmed":
+            outcome = MockAppHandler.launch_outcomes.get(
+                pkg, MockAppHandler.launch_outcome)
+            if outcome in ("unconfirmed", "foreground_left", "no_window"):
                 return self._send_json(200, {
                     "ok": False, "status": "unconfirmed",
                     "reason": "FOREGROUND_NOT_CONFIRMED",
@@ -443,6 +519,11 @@ def mock_app(monkeypatch):
     MockAppHandler.accessibility = True
     MockAppHandler.banking_safe = False
     MockAppHandler.launch_outcome = "launched"
+    MockAppHandler.launch_outcomes = {}
+    MockAppHandler.launch_attempts = 0
+    MockAppHandler.operation_notifications = 0
+    MockAppHandler.disconnect_during_launch = False
+    MockAppHandler.launch_delay_s = 0.0
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockAppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -966,6 +1047,14 @@ def test_bridge_error_classifier_new_format():
     assert not ab._is_retryable_bridge_error(ab.TransportError(
         "app returned HTTP 401 [UNAUTHORIZED] for GET /state: {} "
         "(wrong token, or the token changed on the phone)"))
+    # P0-4 deny list: a 403 (package on the deny list) is a
+    # policy refusal, never retried.
+    assert not ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 403 [FORBIDDEN] for POST /launch_app: "
+        '{"ok": false, "error": "launch denied: com.kasikorn.'
+        'retail.mbanking.wap is on the deny list"} (forbidden — '
+        "the bridge refused the request (e.g. a launch "
+        "deny-listed package))"))
 
 
 def test_app_last_call_records_success(mock_app):
@@ -1522,6 +1611,156 @@ def test_app_launch_app_without_a11y(mock_app):
     assert result["launch_requested"] is True
     assert result["foreground_confirmed"] is None
     assert result["verification"] == "none"
+
+
+@pytest.mark.parametrize("package", [
+    "com.kasikorn.retail.mbanking.wap",  # K PLUS (KBank)
+    "com.bbl.mobilebanking",  # Bualuang mBanking
+    "com.scb.phone",  # SCB EASY
+    "com.krungsri.kma",  # KMA (Krungsri)
+])
+def test_app_launch_app_deny_list(mock_app, package):
+    """P0-4 deny list (Saardeim decision 2026-11-06 20:16,
+    README decision 91): a deny-listed package is refused with
+    HTTP 403 before any launch attempt and before the operation
+    notification. The 403 surfaces as a TransportError, is never
+    retried (last_call attempts == 1), and no launch was
+    attempted and no operation notification was posted. A
+    non-denied package is processed normally afterwards."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.launch_app(package)
+    assert "403" in str(excinfo.value)
+    assert "deny list" in str(excinfo.value)
+    assert MockAppHandler.launch_attempts == 0
+    assert MockAppHandler.operation_notifications == 0
+    assert adapter.last_call is not None
+    assert adapter.last_call["attempts"] == 1
+    assert adapter.last_call["status"] == 403
+    # A non-denied package is processed normally.
+    result = adapter.launch_app("com.twitter.android")
+    assert result["status"] == "launched"
+    assert MockAppHandler.launch_attempts == 1
+    assert MockAppHandler.operation_notifications == 1
+
+
+def test_app_launch_app_concurrent(mock_app):
+    """P0-4 fix (CONS-027 P1 #3): two simultaneous /launch_app
+    requests — each request's verification is tied to its own
+    timestamp + package, so the answers must not cross: the
+    package whose foreground is observed answers launched, the
+    other answers unconfirmed, and neither answer is swapped.
+    (The mock serves both on separate threads, like the real
+    server's worker pool.)"""
+    MockAppHandler.launch_outcomes = {
+        "com.twitter.android": "launched",
+        "com.example.other": "unconfirmed",
+    }
+    results = {}
+    errors = []
+
+    def run(package):
+        try:
+            adapter = ab.AndroidAdapter(actions_enabled=True)
+            results[package] = adapter.launch_app(package)
+        except Exception as exc:  # noqa: BLE001 - collected, asserted below
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=run, args=("com.twitter.android",)),
+        threading.Thread(target=run, args=("com.example.other",)),
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    assert not errors
+    assert results["com.twitter.android"]["status"] == "launched"
+    assert results["com.twitter.android"]["foreground_confirmed"] is True
+    assert results["com.example.other"]["status"] == "unconfirmed"
+    assert results["com.example.other"]["reason"] == "FOREGROUND_NOT_CONFIRMED"
+    assert results["com.example.other"]["foreground_confirmed"] is False
+    assert MockAppHandler.launch_attempts == 2
+    assert MockAppHandler.operation_notifications == 2
+
+
+def test_app_launch_app_disconnect_during_verification(mock_app):
+    """P0-4 fix (CONS-027 P1 #3): the accessibility service
+    goes away mid-verification — the reads start failing, so
+    the answer must be unconfirmed, never a false launched.
+    The Java-side ordering (a stale service reference makes
+    the polls miss, reported as FOREGROUND_NOT_CONFIRMED) is
+    covered by code inspection + live verification; this pins
+    the client-visible contract for that outcome."""
+    MockAppHandler.disconnect_during_launch = True
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.launch_app("com.twitter.android")
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+    assert result["reason"] == "FOREGROUND_NOT_CONFIRMED"
+    assert result["foreground_confirmed"] is False
+    assert result["verification"] == "accessibility"
+
+
+def test_app_launch_app_foreground_left_before_poll(mock_app):
+    """P0-4 fix (CONS-027 P1 #3): the target was already in
+    front before the request but left before the post-request
+    poll — a pre-request observation alone must NOT produce
+    "launched". The server answers unconfirmed and the client
+    accepts it as unconfirmed. The Java-side rule (only
+    post-request observations count) is covered by code
+    inspection + live verification; this pins the wire contract
+    for that outcome."""
+    MockAppHandler.launch_outcomes = {
+        "com.twitter.android": "foreground_left",
+    }
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.launch_app("com.twitter.android")
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+    assert result["reason"] == "FOREGROUND_NOT_CONFIRMED"
+    assert result["foreground_confirmed"] is False
+
+
+def test_app_launch_app_no_active_window(mock_app):
+    """P0-4 fix (CONS-027 P1 #3): getRootInActiveWindow()
+    returns null persistently (no active window) — every poll
+    misses, so the answer is unconfirmed, not an error and not
+    a retry. The client accepts the unconfirmed report as-is."""
+    MockAppHandler.launch_outcomes = {
+        "com.twitter.android": "no_window",
+    }
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.launch_app("com.twitter.android")
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+    assert result["reason"] == "FOREGROUND_NOT_CONFIRMED"
+    assert result["foreground_confirmed"] is False
+    assert adapter.last_call is not None
+    assert adapter.last_call["attempts"] == 1
+
+
+def test_app_launch_app_slow_verification_does_not_hang(mock_app):
+    """P0-4 fix (CONS-027 P1 #1): a slow verification window
+    (the mock waits ~3.5 s, modelling the full ~3 s window
+    elapsing) must still answer — the HTTP response does not
+    hang and the client does not time out. The Java-side
+    deadline (each read bounded by the remaining budget) is
+    covered by code inspection + live verification; this pins
+    the client side: a ~3–4 s verification round trip is
+    accepted, not treated as a timeout or retried."""
+    MockAppHandler.launch_delay_s = 3.5
+    MockAppHandler.launch_outcome = "unconfirmed"
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    start = time.monotonic()
+    result = adapter.launch_app("com.twitter.android")
+    elapsed = time.monotonic() - start
+    assert result["status"] == "unconfirmed"
+    assert result["reason"] == "FOREGROUND_NOT_CONFIRMED"
+    assert elapsed >= 3.5
+    assert elapsed < 10.0  # well under the client's 30 s read timeout
+    assert adapter.last_call is not None
+    assert adapter.last_call["attempts"] == 1
 
 
 @pytest.mark.parametrize("method,path,payload", [

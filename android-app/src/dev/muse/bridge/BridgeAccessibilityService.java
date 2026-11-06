@@ -69,6 +69,20 @@ public class BridgeAccessibilityService extends AccessibilityService {
     }
 
     private <T> T runOnMainThread(Callable<T> task) throws Exception {
+        return runOnMainThread(task, MAIN_THREAD_TIMEOUT_MS);
+    }
+
+    /** Same as runOnMainThread(task) but with a caller-chosen
+     * wait bound. P0-4 fix (CONS-027 P1 #1): the /launch_app
+     * verification must not let one main-thread stall overrun
+     * the ~3 s verification window, so the foreground read waits
+     * at most the remaining verification budget. A timeout here
+     * bounds only how long the CALLER waits: future.cancel(true)
+     * interrupts the waiting get() but cannot stop work already
+     * running on the main thread — that work runs to completion
+     * there, and the caller treats the read as missed (a missed
+     * poll, never a false success). */
+    private <T> T runOnMainThread(Callable<T> task, long timeoutMs) throws Exception {
         if (mainHandler == null
                 || Looper.myLooper() == Looper.getMainLooper()) {
             return task.call();
@@ -76,7 +90,7 @@ public class BridgeAccessibilityService extends AccessibilityService {
         FutureTask<T> future = new FutureTask<>(task);
         mainHandler.post(future);
         try {
-            return future.get(MAIN_THREAD_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {
             future.cancel(true);
             throw new ServiceTimeoutException(
@@ -776,6 +790,17 @@ public class BridgeAccessibilityService extends AccessibilityService {
      * launch failure.
      */
     public String getForegroundPackage() throws Exception {
+        return getForegroundPackage(MAIN_THREAD_TIMEOUT_MS);
+    }
+
+    /** Same as getForegroundPackage() but the caller bounds how
+     * long the read may wait. P0-4 fix (CONS-027 P1 #1): the
+     * /launch_app verification passes the remaining verification
+     * budget here, so a main-thread stall cannot overrun the
+     * ~3 s window. A timeout is a missed observation (the caller
+     * keeps polling and only claims `launched` on a positive
+     * match), never a launch failure and never a false success. */
+    public String getForegroundPackage(long timeoutMs) throws Exception {
         return runOnMainThread(new Callable<String>() {
             @Override
             public String call() {
@@ -790,7 +815,7 @@ public class BridgeAccessibilityService extends AccessibilityService {
                     root.recycle();
                 }
             }
-        });
+        }, timeoutMs);
     }
 
     // ---------------------------------------------------------------

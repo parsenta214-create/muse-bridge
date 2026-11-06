@@ -729,8 +729,11 @@ class AndroidAdapter:
         a11y off). Callers must read status /
         foreground_confirmed, not ok alone. 422 when the package
         is not installed or has no launcher; 503 when Android
-        refuses the start. Gated by --allow-actions, never
-        retried."""
+        refuses the start; 403 when the package is on the launch
+        deny list (banking / heavy-security apps — Saardeim
+        decision 2026-11-06, README decision 91). The 403 is a
+        TransportError and is never retried. Gated by
+        --allow-actions, never retried."""
         if not package:
             raise ValueError("package must not be empty")
         self._require_actions(f"launch_app({package})")
@@ -1179,6 +1182,9 @@ class AndroidAdapter:
             # statuses; the hint must not blame the token for those.
             if exc.code == 401:
                 hint = "wrong token, or the token changed on the phone"
+            elif exc.code == 403:
+                hint = ("forbidden — the bridge refused the request "
+                        "(e.g. a launch deny-listed package)")
             elif exc.code == 503:
                 hint = ("accessibility service not enabled, or the bridge "
                         "is overloaded")

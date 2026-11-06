@@ -633,6 +633,82 @@ class TestParseFunctionsInvalid(unittest.TestCase):
         with self.assertRaises(ProtocolError):
             parse_launch_app(dict(no_reason, reason="BLOCKED_BY_MAGIC"))
 
+    def test_parse_launch_app_combination(self) -> None:
+        """P0-4 fix (CONS-027 P1 #2): only the three
+        status/reason/verification/foreground combinations the
+        server can send are accepted — launched (no reason,
+        verification "accessibility", foreground True),
+        unconfirmed / FOREGROUND_NOT_CONFIRMED (verification
+        "accessibility", foreground False), and unconfirmed /
+        VERIFICATION_UNAVAILABLE (verification "none", foreground
+        null). Anything else is rejected."""
+        launched = {
+            "ok": True, "status": "launched", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": True,
+            "verification": "accessibility",
+        }
+        # Launched verified by "none" cannot confirm a foreground.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(launched, verification="none"))
+        # Launched verified by UsageStats has no P0-4 form yet.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(launched, verification="usage_stats"))
+        # Launched must carry no reason.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                launched, reason="FOREGROUND_NOT_CONFIRMED"))
+        # Unconfirmed / FOREGROUND_NOT_CONFIRMED pairs with
+        # verification "accessibility" and foreground False.
+        not_confirmed = {
+            "ok": False, "status": "unconfirmed", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": False,
+            "verification": "accessibility",
+            "reason": "FOREGROUND_NOT_CONFIRMED",
+        }
+        self.assertEqual(parse_launch_app(not_confirmed), not_confirmed)
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(not_confirmed, verification="none"))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                not_confirmed, verification="usage_stats"))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                not_confirmed, foreground_confirmed=None))
+        # Unconfirmed / VERIFICATION_UNAVAILABLE pairs with
+        # verification "none" and foreground null.
+        unverified = {
+            "ok": False, "status": "unconfirmed", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": None,
+            "verification": "none",
+            "reason": "VERIFICATION_UNAVAILABLE",
+        }
+        self.assertEqual(parse_launch_app(unverified), unverified)
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                unverified, verification="accessibility"))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                unverified, foreground_confirmed=False))
+        # The two reasons cannot swap verification methods.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                not_confirmed, reason="VERIFICATION_UNAVAILABLE"))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                unverified, reason="FOREGROUND_NOT_CONFIRMED"))
+        # "unavailable" / "failed" have no 200-body form in P0-4.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                launched, ok=False, status="unavailable",
+                foreground_confirmed=False))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                launched, ok=False, status="failed",
+                foreground_confirmed=False))
+
     def test_parse_state_missing_field_or_invalid_node(self) -> None:
         base = {
             "ok": True,

@@ -101,6 +101,7 @@ _STATUS_TO_ERROR_CODE: dict[int, str] = {
     200: "OK",
     400: "INVALID_REQUEST",
     401: "UNAUTHORIZED",
+    403: "FORBIDDEN",
     404: "NOT_FOUND",
     408: "TIMEOUT",
     409: "STALE_REVISION",
@@ -621,9 +622,18 @@ def parse_launch_app(data: dict[str, Any]) -> dict[str, Any]:
     """Validate a /launch_app 200 body (P0-4, v2.0) and return a
     copy. The core invariant: ok is True exactly when status is
     "launched", and foreground_confirmed is True exactly then
-    too. An "unconfirmed" body always carries one of the two
-    known reasons. Extra keys (e.g. "transport" added by the
-    adapter) are tolerated, as in parse_health."""
+    too. P0-4 fix (CONS-027 P1 #2): the status + reason +
+    verification + foreground_confirmed combination must be one
+    of the three shapes the server can send — launched (no
+    reason, verification "accessibility", foreground True),
+    unconfirmed / FOREGROUND_NOT_CONFIRMED (verification
+    "accessibility", foreground False), or unconfirmed /
+    VERIFICATION_UNAVAILABLE (verification "none", foreground
+    null). "unavailable"/"failed" are vocabulary only in P0-4
+    (failures stay HTTP 422/503 in the old format), so no 200
+    body may carry those statuses. Extra keys (e.g.
+    "transport" added by the adapter) are tolerated, as in
+    parse_health."""
     d = _require_dict(data, "launch_app")
     for key in ("ok", "status", "accepted", "package",
                 "launch_requested", "foreground_confirmed", "verification"):
@@ -647,17 +657,41 @@ def parse_launch_app(data: dict[str, Any]) -> dict[str, Any]:
             "status is 'launched'")
     _require_enum(d["verification"], "launch_app.verification",
                   LAUNCH_VERIFICATIONS)
-    if status == "unconfirmed":
+    if status == "launched":
+        if "reason" in d:
+            raise ProtocolError(
+                "launch_app.reason must be absent when status is "
+                "'launched'")
+        if d["verification"] != "accessibility":
+            raise ProtocolError(
+                "launch_app.verification must be 'accessibility' when "
+                "status is 'launched' (verification 'none' cannot "
+                "confirm a foreground)")
+    elif status == "unconfirmed":
         if "reason" not in d:
             raise ProtocolError(
                 "launch_app.reason is required when status is 'unconfirmed'")
         reason = _require_str(d["reason"], "launch_app.reason",
                               non_empty=True)
-        if reason not in LAUNCH_UNCONFIRMED_REASONS:
+        if reason == "FOREGROUND_NOT_CONFIRMED":
+            if d["verification"] != "accessibility" or fg is not False:
+                raise ProtocolError(
+                    "launch_app with reason FOREGROUND_NOT_CONFIRMED must "
+                    "have verification 'accessibility' and "
+                    "foreground_confirmed false")
+        elif reason == "VERIFICATION_UNAVAILABLE":
+            if d["verification"] != "none" or fg is not None:
+                raise ProtocolError(
+                    "launch_app with reason VERIFICATION_UNAVAILABLE must "
+                    "have verification 'none' and foreground_confirmed null")
+        else:
             raise ProtocolError(
                 f"launch_app.reason has unknown value: {reason!r}")
-    elif "reason" in d:
-        _require_str(d["reason"], "launch_app.reason", non_empty=True)
+    else:
+        # "unavailable" / "failed": no 200-body form in P0-4.
+        raise ProtocolError(
+            f"launch_app.status {status!r} has no 200-body form in P0-4 "
+            "(failures stay HTTP 422/503 in the old format)")
     return dict(d)
 
 
