@@ -1896,6 +1896,35 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     1.9.19 / code 29, accessibility + notification
     listener true, server RUNNING — no crash, the tunnel
     had recovered too.
+84. PoC merge Step 3 frozen (2026-11-06, v1.1.0).
+    Wiring build_*/parse_* into the click/swipe/batch
+    paths (MERGE_PLAN_A Step 3, separate decision).
+    Build: click, swipe, type_text, press_key,
+    click_node, type_node, batch, notify, the
+    capture_screen/events query strings. Parse:
+    get_current_state, events, batch result,
+    check_app. NOT wired (no builder/parser):
+    scroll_node, node_action, launch_app, open,
+    install_apk, install_status, get/set_clipboard,
+    notification_action, notifications, logs.
+    protocol change: VALID_KEYS now includes the
+    five DPAD keys (server pressKey is the
+    authority); build_press_key normalises input
+    with key.upper() (P1-01, CONS-019 — the server
+    compares case-insensitively). The two mock
+    batch actions now use "wait_ms" (the server's
+    wait field). Tests: 186 passed (183 + 3 new:
+    press_key lowercase, parse_batch_result extra
+    fields, query validation). Live: a wait-only
+    batch (500 ms) completed on 1.9.22 with
+    hash_before == hash_after (the batch changed
+    nothing on screen). GPT review CONS-019:
+    design sound, no P0 code bugs; P0-01 (SHA-256
+    reassembly, all 4 files verified mechanically)
+    and P0-02 (suite re-run, 186 passed) resolved;
+    P1-01/02/03 fixed. BatchRegistry wiring to
+    the A-4 server rules (410/partial/tombstone)
+    is NOT in scope — left to a later decision.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

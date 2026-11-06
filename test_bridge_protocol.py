@@ -115,8 +115,19 @@ class TestBuildFunctionsValid(unittest.TestCase):
         self.assertEqual(build_type_text("こんにちは"), {"text": "こんにちは"})
 
     def test_build_press_key_valid(self) -> None:
-        for key in ("HOME", "BACK", "RECENTS", "POWER"):
+        # Step 3 (v1.1.0): the DPAD keys are in VALID_KEYS too,
+        # matching the server's pressKey (v1.9.9).
+        for key in ("HOME", "BACK", "RECENTS", "POWER",
+                    "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+                    "DPAD_CENTER"):
             self.assertEqual(build_press_key(key), {"key": key})
+
+    def test_build_press_key_lowercase_normalised(self) -> None:
+        # Step 3 (P1-01, CONS-019): the server compares keys
+        # case-insensitively, so lowercase input is normalised to
+        # the canonical uppercase form.
+        self.assertEqual(build_press_key("back"), {"key": "BACK"})
+        self.assertEqual(build_press_key("dpad_down"), {"key": "DPAD_DOWN"})
 
     def test_build_click_node_valid(self) -> None:
         self.assertEqual(
@@ -366,6 +377,39 @@ class TestParseFunctionsValid(unittest.TestCase):
             "stop_reason": "action_failed",
         }
         self.assertEqual(parse_batch_result(raw), raw)
+
+    def test_parse_batch_result_extra_fields_tolerated(self) -> None:
+        # Step 3 (P1-02, CONS-019): the live batch response carries
+        # extra fields (snapshot_id, the batch-level status, the
+        # payload hash, completed/failed action ids, transport).
+        # They pass through unchanged. The batch-level status is
+        # NOT validated (only each result item's status is) — a
+        # "partial" or "failed" batch is still a well-formed
+        # response, not a protocol error.
+        for batch_status in ("completed", "partial", "failed"):
+            raw = {
+                "ok": True,
+                "batch_id": "b-100",
+                "replayed": False,
+                "results": [
+                    {
+                        "action_id": "a1",
+                        "status": "executed",
+                        "error": None,
+                        "hash_before": 111,
+                        "hash_after": 222,
+                    },
+                ],
+                "stopped_at": -1,
+                "stop_reason": None,
+                "snapshot_id": 7,
+                "status": batch_status,
+                "payload_hash": "ab" * 32,
+                "completed_action_ids": ["a1"],
+                "failed_action_id": None,
+                "transport": "app",
+            }
+            self.assertEqual(parse_batch_result(raw), raw)
 
 
 class TestParseFunctionsInvalid(unittest.TestCase):

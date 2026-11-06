@@ -471,6 +471,77 @@ def test_app_batch_response_fields_v19(mock_app):
     assert result["replayed"] is False
 
 
+def test_step3_invalid_inputs_rejected_before_request(mock_app):
+    """Step 3: the protocol builders validate client-side, so a bad
+    input raises ProtocolError and NO request is sent to the phone."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    ProtocolError = ab.bridge_protocol.ProtocolError
+    cases = [
+        lambda: adapter.click(-1, 0),
+        lambda: adapter.click(0, -5),
+        lambda: adapter.swipe(0, 0, -1, 0),
+        lambda: adapter.swipe(0, 0, 10, 10, duration_ms=-1),
+        lambda: adapter.type_text(123),
+        lambda: adapter.press_key("VOLUME_UP"),
+        lambda: adapter.press_key(""),
+        lambda: adapter.click_node("", 123456),
+        lambda: adapter.type_node("n1", 123456, 123),
+        lambda: adapter.batch("b-1", 123456, []),
+        lambda: adapter.batch("b-1", 123456,
+                              [{"action_id": "a1", "type": "double_tap",
+                                "x": 1, "y": 2}]),
+        lambda: adapter.batch("b-1", 123456,
+                              [{"action_id": f"a{i}", "type": "wait",
+                                "wait_ms": 1} for i in range(21)]),
+        lambda: adapter.notify(123, "text"),
+    ]
+    for call in cases:
+        with pytest.raises(ProtocolError):
+            call()
+    assert not [r for r in MockAppHandler.requests if r[0] == "POST"]
+
+
+def test_step3_wired_paths_post_validated_bodies(mock_app):
+    """Step 3: the wired paths send the protocol builders' output —
+    the same payloads as before, now validated client-side."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    adapter.click(100, 200)
+    adapter.swipe(0, 0, 10, 20, duration_ms=150)
+    adapter.type_text("hi")
+    adapter.press_key("DPAD_DOWN")
+    adapter.notify("Title", "Body")
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/click", {"x": 100, "y": 200}) in posts
+    assert ("POST", "/swipe", {"x1": 0, "y1": 0, "x2": 10, "y2": 20,
+                               "duration_ms": 150}) in posts
+    assert ("POST", "/type_text", {"text": "hi"}) in posts
+    assert ("POST", "/press_key", {"key": "DPAD_DOWN"}) in posts
+    assert ("POST", "/notify", {"title": "Title", "text": "Body"}) in posts
+
+
+def test_step3_query_validation_rejects_before_request(mock_app):
+    """Step 3 (P1-03, CONS-019): the GET query builders validate
+    client-side, so a bad query raises ProtocolError and NO request
+    is sent. A good query sends the exact string the server expects."""
+    adapter = ab.AndroidAdapter()
+    ProtocolError = ab.bridge_protocol.ProtocolError
+    with pytest.raises(ProtocolError):
+        adapter.events(since=-1)
+    with pytest.raises(ProtocolError):
+        adapter.events(limit=201)
+    with pytest.raises(ProtocolError):
+        adapter.capture_screen(scale=0.05)
+    with pytest.raises(ProtocolError):
+        adapter.capture_screen(format="gif")
+    assert MockAppHandler.requests == []
+    adapter.events()
+    adapter.capture_screen()
+    gets = [r for r in MockAppHandler.requests if r[0] == "GET"]
+    assert ("GET", "/events?since=0&limit=100", None) in gets
+    assert ("GET", "/capture_screen?scale=0.5&format=jpeg&quality=80",
+            None) in gets
+
+
 def test_app_phase2_actions_refused_without_flag(mock_app):
     """Node actions and batch need --allow-actions, like other actions."""
     adapter = ab.AndroidAdapter()
@@ -638,7 +709,7 @@ def test_app_batch_retries_transient_503(mock_app, monkeypatch):
     MockAppHandler.fail_next[("POST", "/batch")] = 2
     adapter = ab.AndroidAdapter(actions_enabled=True)
     result = adapter.batch("retry-1", 123456,
-                           [{"action_id": "a1", "type": "wait", "ms": 100}])
+                           [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
     assert result["status"] == "completed"
     posts = [r for r in MockAppHandler.requests
              if r[0] == "POST" and r[1] == "/batch"]
@@ -771,7 +842,7 @@ def test_app_batch_uses_60s_timeout(mock_app, monkeypatch):
     monkeypatch.setattr(ab, "_app_opener", lambda: RecOpener())
     adapter = ab.AndroidAdapter(actions_enabled=True)
     adapter.get_current_state()
-    adapter.batch("t-1", 123456, [{"action_id": "a1", "type": "wait", "ms": 10}])
+    adapter.batch("t-1", 123456, [{"action_id": "a1", "type": "wait", "wait_ms": 10}])
     get_timeout = [t for (m, u, t) in seen if m == "GET" and "/state" in u]
     post_timeout = [t for (m, u, t) in seen if m == "POST" and "/batch" in u]
     assert get_timeout == [30.0]

@@ -33,7 +33,14 @@ MAX_CONNECTIONS = 16
 
 EXPECT_CHANGE_MAX_WAIT_MS = 2000
 
-VALID_KEYS = ("HOME", "BACK", "RECENTS", "POWER")
+# Step 3 (v1.1.0): the DPAD keys were missing from the PoC's list.
+# The live server's pressKey (BridgeAccessibilityService.java)
+# accepts HOME, BACK, RECENTS, POWER and the five DPAD keys
+# (decision 66, v1.9.9); the protocol list must match it, or
+# build_press_key would reject keys the server accepts.
+VALID_KEYS = ("HOME", "BACK", "RECENTS", "POWER",
+              "DPAD_UP", "DPAD_DOWN", "DPAD_LEFT", "DPAD_RIGHT",
+              "DPAD_CENTER")
 VALID_CAPTURE_FORMATS = ("jpeg", "jpg", "png")
 VALID_EVENT_TYPES = (
     "TYPE_WINDOW_STATE_CHANGED",
@@ -199,6 +206,11 @@ def build_type_text(text: str) -> dict[str, Any]:
 
 def build_press_key(key: str) -> dict[str, Any]:
     _require_str(key, "key", non_empty=True)
+    # Step 3 (P1-01, CONS-019): the server compares keys
+    # case-insensitively (equalsIgnoreCase), so normalise to the
+    # canonical uppercase form before validating — otherwise the
+    # client would reject "back" while the server accepts it.
+    key = key.upper()
     if key not in VALID_KEYS:
         raise ProtocolError(f"invalid key: {key!r}")
     return validate_body_size({"key": key})

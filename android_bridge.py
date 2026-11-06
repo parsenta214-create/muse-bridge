@@ -391,6 +391,14 @@ def check_app() -> dict:
         return {"ok": False, "detail": f"cannot reach the app at {APP_URL}: {exc}",
                 "seconds": round(time.monotonic() - probe_start, 3)}
     seconds = round(time.monotonic() - probe_start, 3)
+    # Step 3: the /health response is validated by the protocol
+    # module. A malformed health body is a failed check, not a
+    # reachable bridge.
+    try:
+        bridge_protocol.parse_health(data)
+    except bridge_protocol.ProtocolError as exc:
+        return {"ok": False, "detail": f"app health check failed: {exc}",
+                "seconds": seconds}
     if data.get("ok") and data.get("accessibility"):
         return {"ok": True, "detail": "app reachable, accessibility service enabled",
                 "notification_listener": data.get("notification_listener"),
@@ -507,16 +515,20 @@ class AndroidAdapter:
 
     def click(self, x: int, y: int) -> dict:
         self._require_actions(f"click({x}, {y})")
-        return self._app_post("/click", {"x": x, "y": y})
+        # Step 3: the request body is built (and validated) by the
+        # protocol module — coordinates must be >= 0, body size capped.
+        return self._app_post("/click", bridge_protocol.build_click(x, y))
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
         self._require_actions(f"swipe({x1}, {y1} -> {x2}, {y2})")
-        return self._app_post("/swipe", {
-            "x1": x1, "y1": y1, "x2": x2, "y2": y2, "duration_ms": duration_ms})
+        # Step 3: validated by the protocol module.
+        return self._app_post("/swipe", bridge_protocol.build_swipe(
+            x1, y1, x2, y2, duration_ms))
 
     def type_text(self, text: str) -> dict:
         self._require_actions(f"type_text({text!r})")
-        return self._app_post("/type_text", {"text": text})
+        # Step 3: validated by the protocol module.
+        return self._app_post("/type_text", bridge_protocol.build_type_text(text))
 
     def press_key(self, key: str) -> dict:
         """key is a keyevent name or code, e.g. 'BACK', 'HOME', '4', '3',
@@ -526,20 +538,25 @@ class AndroidAdapter:
         effect, which depends on the app."""
         self._require_actions(f"press_key({key})")
         app_key = {"3": "HOME", "4": "BACK"}.get(key, key)
-        return self._app_post("/press_key", {"key": app_key})
+        # Step 3: validated by the protocol module (VALID_KEYS now
+        # includes the DPAD keys, matching the server's pressKey).
+        return self._app_post("/press_key", bridge_protocol.build_press_key(app_key))
 
     def click_node(self, node_id: str, tree_hash: int) -> dict:
         """Click a node by id (Phase 2)."""
         self._require_actions(f"click_node({node_id})")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
-        return self._app_post("/click_node", {"node_id": node_id, "tree_hash": tree_hash})
+        # Step 3: validated by the protocol module.
+        return self._app_post("/click_node",
+                              bridge_protocol.build_click_node(node_id, tree_hash))
 
     def type_node(self, node_id: str, tree_hash: int, text: str) -> dict:
         """Set text on an editable node by id (Phase 2)."""
         self._require_actions(f"type_node({node_id}, {text!r})")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
+        # Step 3: validated by the protocol module.
         return self._app_post("/type_node",
-                              {"node_id": node_id, "tree_hash": tree_hash, "text": text})
+                              bridge_protocol.build_type_node(node_id, tree_hash, text))
 
     def scroll_node(self, node_id: str, tree_hash: int,
                     direction: str = "forward") -> dict:
@@ -714,9 +731,16 @@ class AndroidAdapter:
         """
         self._require_actions(f"batch({batch_id}, {len(actions)} actions)")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
-        return self._app_post("/batch", {
-            "batch_id": batch_id, "protocol_version": 1,
-            "tree_hash": tree_hash, "actions": actions})
+        # Step 3: the request body is built (and validated) by the
+        # protocol module — actions are type-checked, capped at 20,
+        # and protocol_version: 1 is explicit. The response is
+        # validated by parse_batch_result (ok, batch_id, replayed,
+        # results, stopped_at, stop_reason). The "transport" key is
+        # added by _app_post before parsing and survives in the
+        # returned dict (extra keys are tolerated).
+        result = self._app_post("/batch", bridge_protocol.build_batch(
+            batch_id, tree_hash, actions))
+        return bridge_protocol.parse_batch_result(result)
 
     def notify(self, title: str, text: str) -> dict:
         """Ask the bridge app (v1.3+) to post an update notification.
@@ -725,7 +749,8 @@ class AndroidAdapter:
         (tap opens Downloads). Returns ok:false when notifications
         are not permitted on the phone.
         """
-        return self._app_post("/notify", {"title": title, "text": text})
+        # Step 3: validated by the protocol module.
+        return self._app_post("/notify", bridge_protocol.build_notify(title, text))
 
     def logs(self, limit: int = 100) -> dict:
         """Return the bridge's debug log (v1.9.3).
@@ -748,8 +773,12 @@ class AndroidAdapter:
         evicted events the caller never saw — refetch /state.
         """
         import urllib.parse
-        params = urllib.parse.urlencode({"since": since, "limit": limit})
-        result = self._app_request("GET", f"/events?{params}")
+        # Step 3: the query string is built (and validated) by the
+        # protocol module, and the response is validated by
+        # parse_events (each event's shape is checked).
+        params = bridge_protocol.build_events_query(since, limit)
+        result = bridge_protocol.parse_events(
+            self._app_request("GET", f"/events?{params}"))
         result["transport"] = "app"
         return result
 
@@ -1010,14 +1039,19 @@ class AndroidAdapter:
 
     def _capture_screen_app(self, scale: float = 0.5, format: str = "jpeg",
                             quality: int = 80) -> bytes:
-        import urllib.parse
-        params = urllib.parse.urlencode(
-            {"scale": scale, "format": format, "quality": quality})
+        # Step 3: the query string is built (and validated) by the
+        # protocol module — scale 0.1-1.0, format jpeg/jpg/png,
+        # quality 10-100.
+        params = bridge_protocol.build_capture_screen_query(scale, format, quality)
         return self._app_request(
             "GET", f"/capture_screen?{params}", expect_image=True)
 
     def _state_app(self) -> dict:
-        state = self._app_request("GET", "/state")
+        # Step 3: the /state response is validated by the protocol
+        # module (required keys, node shapes). Extra keys the server
+        # added later (device, snapshot_id, snapshot_valid,
+        # snapshot_stable) are tolerated.
+        state = bridge_protocol.parse_state(self._app_request("GET", "/state"))
         state["transport"] = "app"
         # A-3: remember the snapshot so node actions can check its
         # stability before acting.
