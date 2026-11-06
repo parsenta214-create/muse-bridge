@@ -733,7 +733,7 @@ public class HttpBridgeServer {
                 List<String> tailscaleIps = MainActivity.findTailscaleIps();
                 List<String> boundIps = boundTailscaleIps();
                 JSONObject modules = buildModules(a11yOn, listenerGranted,
-                        listenerConnected, tailscaleIps);
+                        listenerConnected, tailscaleIps, boundIps);
                 JSONObject caps = buildCapabilities(a11yOn, listenerGranted,
                         listenerConnected);
                 String overall = overallStatus(modules);
@@ -2049,15 +2049,35 @@ public class HttpBridgeServer {
 
     /** P0-3 (v2.0): per-module status for /health. The
      * tailscaleIps argument is the CURRENT Tailscale IPv4s
-     * (P1-3, CONS-022) — tailscale is HEALTHY when the phone
-     * currently has a Tailscale address, UNAVAILABLE when it
-     * has none. */
+     * (P1-3, CONS-022); boundTailscaleIps is the list the HTTP
+     * server actually bound to at start. Tailscale is HEALTHY
+     * only when a current IP is also a bound IP — the VM
+     * connects on the current IP, so a current IP the server
+     * is not listening on must not be reported HEALTHY.
+     * CONS-029 P1-3 fix: no current IP -> UNAVAILABLE;
+     * current IP(s) exist but NONE is in the bound list ->
+     * DEGRADED (not a new STALE state, to avoid a new enum
+     * value); at least one current IP is bound -> HEALTHY.
+     * overallStatus() treats DEGRADED the same way. */
     private JSONObject buildModules(boolean a11yOn, boolean listenerGranted,
                                     boolean listenerConnected,
-                                    List<String> tailscaleIps)
+                                    List<String> tailscaleIps,
+                                    List<String> boundTailscaleIps)
             throws org.json.JSONException {
         String http = state == ServerState.STARTING ? "RECOVERING" : "HEALTHY";
-        String tailscale = tailscaleIps.isEmpty() ? "UNAVAILABLE" : "HEALTHY";
+        String tailscale;
+        if (tailscaleIps.isEmpty()) {
+            tailscale = "UNAVAILABLE";
+        } else {
+            boolean anyBound = false;
+            for (String ip : tailscaleIps) {
+                if (boundTailscaleIps.contains(ip)) {
+                    anyBound = true;
+                    break;
+                }
+            }
+            tailscale = anyBound ? "HEALTHY" : "DEGRADED";
+        }
         String accessibility = a11yOn ? "ENABLED" : "DISABLED";
         String notificationAccess;
         if (!listenerGranted) {
@@ -2083,13 +2103,17 @@ public class HttpBridgeServer {
      * is true when a11y is ON (the service can verify the
      * foreground package) and false when it is OFF (UsageStats
      * verification is P1).
-     * P1-4 (CONS-022): `install_apk` is true only when the app
-     * can actually request installs — PackageManager.
-     * canRequestPackageInstalls(), i.e. the user's "Install
-     * unknown apps" setting is on for this app. The old code
-     * returned true unconditionally, but the manifest
-     * REQUEST_INSTALL_PACKAGES declaration alone does not make
-     * an install possible. */
+     * P1-4 (CONS-022, split by CONS-029): `install_apk` is
+     * always true — P0 spec A5 defines it as "endpoint
+     * available", and the /install_apk endpoint exists
+     * regardless of the user's install setting. The Android
+     * permission state goes in the NEW `install_apk_permitted`
+     * key (PackageManager.canRequestPackageInstalls(), i.e.
+     * the user's "Install unknown apps" setting is on for this
+     * app). NOTE: canRequestPackageInstalls() == true does NOT
+     * guarantee an install succeeds — the confirmation dialog,
+     * Play Protect, and package checks still apply; it only
+     * means an install request may be started. */
     private JSONObject buildCapabilities(boolean a11yOn, boolean listenerGranted,
                                          boolean listenerConnected)
             throws org.json.JSONException {
@@ -2110,16 +2134,21 @@ public class HttpBridgeServer {
                 .put("launch_app", true)
                 .put("launch_app_guaranteed", false)
                 .put("foreground_verification", a11yOn)
-                .put("install_apk", canInstallApk);
+                .put("install_apk", true)
+                .put("install_apk_permitted", canInstallApk);
     }
 
     /** P0-3 (v2.0): the overall status for /health. CRITICAL is
      * never emitted here — a broken HTTP server returns nothing
      * and broken auth returns 401 before this handler runs, so
-     * CRITICAL is a VM-side verdict (see the P0 spec). */
+     * CRITICAL is a VM-side verdict (see the P0 spec).
+     * CONS-029 P1-3 fix: a tailscale DEGRADED (current IP
+     * exists but the server is not bound to it) degrades the
+     * overall status too. */
     private String overallStatus(JSONObject modules) {
         if (state == ServerState.STARTING) return "RECOVERING";
         if ("UNAVAILABLE".equals(modules.optString("tailscale"))
+                || "DEGRADED".equals(modules.optString("tailscale"))
                 || "NOT_GRANTED".equals(modules.optString("notification_access"))
                 || "GRANTED_NOT_CONNECTED".equals(modules.optString("notification_access"))) {
             return "DEGRADED";

@@ -403,6 +403,13 @@ class TestParseFunctionsValid(unittest.TestCase):
                              "swipe": False, "text_input": False,
                              "notification": True, "notification_post": True,
                              "http_api": True, "launch_app": True,
+                             # CONS-029 P1-5 fix: a complete v2.0
+                             # body must carry launch_app_guaranteed
+                             # (present AND false); the old fixture
+                             # omitted it and the lenient validator
+                             # used to accept it.
+                             "launch_app_guaranteed": False,
+                             "foreground_verification": False,
                              "install_apk": True},
             "tailscale_ips": ["100.111.74.42"],
         }
@@ -1008,6 +1015,122 @@ class TestParseHealthP1(unittest.TestCase):
             parse_health(_v2_health_body(tailscale_ips_bound="100.111.74.42"))
         with self.assertRaises(ProtocolError):
             parse_health(_v2_health_body(tailscale_ips_bound=[123]))
+
+    # -- CONS-029 P1-5 fix: the internal fields are REQUIRED in
+    # a complete v2.0 response; omitting one must reject, not
+    # skip the check. GPT's five listed missing-field tests,
+    # plus consistent-top-level variants that pin the
+    # required-field rule itself. --
+
+    @staticmethod
+    def _without(mapping: dict, key: str) -> dict:
+        return {k: v for k, v in mapping.items() if k != key}
+
+    def test_parse_health_missing_modules_accessibility_rejected(self) -> None:
+        """CONS-029 P1-5 problem 1 (GPT test 1, mandatory):
+        FULL_ACCESS + accessibility=false + modules.accessibility
+        missing -> reject. The same body with a consistent
+        top-level (accessibility=true) must ALSO reject — the
+        modules.accessibility field itself is required."""
+        full = _v2_health_body()
+        modules = self._without(full["modules"], "accessibility")
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(accessibility=False,
+                                         modules=modules))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(modules=modules))
+
+    def test_parse_health_minimal_missing_modules_accessibility_rejected(self) -> None:
+        """CONS-029 P1-5 problem 1 (GPT test 2): MINIMAL +
+        accessibility=true + modules.accessibility missing ->
+        reject; and the consistent-top-level variant
+        (accessibility=false) must also reject."""
+        minimal = _v2_health_body_minimal()
+        modules = self._without(minimal["modules"], "accessibility")
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body_minimal(accessibility=True,
+                                                 modules=modules))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body_minimal(modules=modules))
+
+    def test_parse_health_missing_launch_app_guaranteed_rejected(self) -> None:
+        """CONS-029 P1-5 problem 2 (GPT test 3, mandatory):
+        launch_app_guaranteed missing -> reject (presence AND
+        false are both required in a complete v2.0 response)."""
+        full = _v2_health_body()
+        caps = self._without(full["capabilities"], "launch_app_guaranteed")
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(capabilities=caps))
+
+    def test_parse_health_missing_modules_tailscale_rejected(self) -> None:
+        """CONS-029 P1-5 problem 1 (GPT test 4):
+        modules.tailscale missing -> reject, in both the
+        FULL_ACCESS and the MINIMAL body."""
+        full = _v2_health_body()
+        modules = self._without(full["modules"], "tailscale")
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(modules=modules))
+        minimal = _v2_health_body_minimal()
+        modules = self._without(minimal["modules"], "tailscale")
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body_minimal(modules=modules))
+
+    def test_parse_health_disabled_missing_screen_cap_rejected(self) -> None:
+        """CONS-029 P1-5 problem 3 (GPT test 5): accessibility
+        DISABLED + a screen capability key missing -> reject
+        (each of screenshot/tap/swipe/text_input)."""
+        for key in ("screenshot", "tap", "swipe", "text_input"):
+            caps = self._without(
+                _v2_health_body_minimal()["capabilities"], key)
+            with self.assertRaises(ProtocolError, msg=key):
+                parse_health(_v2_health_body_minimal(capabilities=caps))
+
+    def test_parse_health_enabled_missing_screen_cap_rejected(self) -> None:
+        """CONS-029 P1-5 problem 3, ENABLED side: accessibility
+        ENABLED + a screen capability key missing -> reject, and
+        a present-but-false screen capability -> reject (the
+        server reports all four true when a11y is on)."""
+        for key in ("screenshot", "tap", "swipe", "text_input"):
+            caps = self._without(_v2_health_body()["capabilities"], key)
+            with self.assertRaises(ProtocolError, msg=f"missing {key}"):
+                parse_health(_v2_health_body(capabilities=caps))
+            caps = dict(_v2_health_body()["capabilities"])
+            caps[key] = False
+            with self.assertRaises(ProtocolError, msg=f"false {key}"):
+                parse_health(_v2_health_body(capabilities=caps))
+
+    def test_parse_health_tailscale_degraded_accepted(self) -> None:
+        """CONS-029 P1-3 fix: modules.tailscale DEGRADED is a
+        valid value (current IP exists but the server is not
+        bound to it); overall_status DEGRADED is accepted too."""
+        body = _v2_health_body(
+            overall_status="DEGRADED",
+            modules={"http": "HEALTHY", "tailscale": "DEGRADED",
+                     "accessibility": "ENABLED",
+                     "notification_access": "GRANTED",
+                     "termux_ssh": "UNKNOWN"})
+        self.assertEqual(parse_health(body), body)
+
+    def test_parse_health_install_apk_permitted_optional(self) -> None:
+        """CONS-029 P1-4 fix: install_apk_permitted is an
+        optional boolean capability — accepted when present
+        (true or false), and a body without it (the frozen
+        v2.2.0 server) is still accepted."""
+        caps = dict(_v2_health_body()["capabilities"])
+        caps["install_apk_permitted"] = False
+        body = _v2_health_body(capabilities=caps)
+        self.assertEqual(parse_health(body), body)
+        caps = dict(_v2_health_body()["capabilities"])
+        caps["install_apk_permitted"] = True
+        body = _v2_health_body(capabilities=caps)
+        self.assertEqual(parse_health(body), body)
+        # Frozen v2.2.0 body: no install_apk_permitted key.
+        self.assertEqual(parse_health(_v2_health_body()),
+                         _v2_health_body())
+        with self.assertRaises(ProtocolError):
+            caps = dict(_v2_health_body()["capabilities"])
+            caps["install_apk_permitted"] = "yes"
+            parse_health(_v2_health_body(capabilities=caps))
 
 
 class TestErrorCodesAndErrorBody(unittest.TestCase):

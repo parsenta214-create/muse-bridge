@@ -3,9 +3,11 @@ package dev.muse.bridge;
 import android.Manifest;
 import android.app.Activity;
 import android.app.StatusBarManager;
+import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.drawable.Icon;
@@ -35,6 +37,26 @@ public class MainActivity extends Activity {
     private TextView tokenText;
     private TextView versionText;
     private Button modeButton;
+
+    /** CONS-029 P1-2 fix: refresh the status display when the
+     * AccessibilityService connects or disconnects. refresh()
+     * otherwise runs only on screen updates (onCreate/onResume/
+     * button taps), so right after the user toggles a11y in
+     * Settings the display could stay stale until the next
+     * update. The service broadcasts
+     * BridgeAccessibilityService.ACTION_A11Y_STATE_CHANGED on
+     * connect and on destroy; this receiver is registered only
+     * while the activity is resumed (the UI cannot be stale
+     * while it is not visible — onResume refreshes anyway).
+     * The broadcast is app-internal, so NOT_EXPORTED (same
+     * pattern as the install receiver in HttpBridgeServer). */
+    private final BroadcastReceiver a11yStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            refresh();
+        }
+    };
+    private boolean a11yReceiverRegistered = false;
 
     /** Returns the runtime token, generating and storing one on first use. */
     public static String getOrCreateToken(Context ctx) {
@@ -68,7 +90,26 @@ public class MainActivity extends Activity {
                 .edit().putString(KEY_MODE, m).apply();
     }
 
-    /** Best-effort Tailscale IPv4 addresses (100.x), or an
+    /** Tailscale IPv4 range 100.64.0.0/10 (CGNAT): first octet
+     * 100, second octet 64–127. CONS-029 P1-3 fix: the old
+     * startsWith("100.") matched all of 100.0.0.0/8. This is
+     * the Tailscale IP DETECTION only — the server bind check
+     * (HttpBridgeServer.bindAddresses, CONS-014 P1-02) is a
+     * separate item and is NOT changed here. */
+    public static boolean isTailscaleIp(String ip) {
+        if (ip == null) return false;
+        String[] parts = ip.split("\\.");
+        if (parts.length != 4) return false;
+        try {
+            int first = Integer.parseInt(parts[0]);
+            int second = Integer.parseInt(parts[1]);
+            return first == 100 && second >= 64 && second <= 127;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /** Best-effort Tailscale IPv4 addresses (100.64.0.0/10), or an
      * empty list when absent. P1-3 (CONS-022): the /health
      * tailscale_ips must be the CURRENT addresses, re-fetched
      * on each call — not the bound-at-start list, which goes
@@ -80,7 +121,7 @@ public class MainActivity extends Activity {
                 for (InetAddress addr : Collections.list(ni.getInetAddresses())) {
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
                         String ip = addr.getHostAddress();
-                        if (ip != null && ip.startsWith("100.")) {
+                        if (isTailscaleIp(ip)) {
                             out.add(ip);
                         }
                     }
@@ -213,7 +254,34 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // CONS-029 P1-2: listen for service connect/disconnect
+        // while visible (registered before refresh so no event
+        // between the two is missed).
+        if (!a11yReceiverRegistered) {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(a11yStateReceiver,
+                        new IntentFilter(BridgeAccessibilityService.ACTION_A11Y_STATE_CHANGED),
+                        Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(a11yStateReceiver,
+                        new IntentFilter(BridgeAccessibilityService.ACTION_A11Y_STATE_CHANGED));
+            }
+            a11yReceiverRegistered = true;
+        }
         refresh();
+    }
+
+    @Override
+    protected void onPause() {
+        if (a11yReceiverRegistered) {
+            try {
+                unregisterReceiver(a11yStateReceiver);
+            } catch (IllegalArgumentException ignored) {
+                // Already unregistered; nothing to do.
+            }
+            a11yReceiverRegistered = false;
+        }
+        super.onPause();
     }
 
     /**
@@ -278,9 +346,12 @@ public class MainActivity extends Activity {
         status.append("\nMode: ").append(mode);
         if (a11yOn) {
             status.append(" — screen control available");
-        } else if (MODE_BANKING_SAFE.equals(mode)) {
-            status.append(" — screen control is off, banking apps take priority");
         }
+        // CONS-029 P1-1 fix: the BANKING_SAFE explanation used to
+        // appear here AND on the Accessibility row ("banking apps
+        // take priority" twice). The Mode row no longer repeats
+        // it — the Accessibility row below is the one place that
+        // explains why the service is off.
         status.append("\nAccessibility service: ")
                 .append(a11yOn ? "enabled" : "NOT enabled");
         if (!a11yOn && MODE_BANKING_SAFE.equals(mode)) {

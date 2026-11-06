@@ -53,12 +53,16 @@ def _health_body(accessibility: bool, banking_safe: bool = False,
     a11y off -> mode MINIMAL (or BANKING_SAFE when the user
     picked it), screen caps off, overall HEALTHY (a11y off is
     normal in MINIMAL).
-    P1-3 (CONS-022): tailscale_ips is the CURRENT address list
-    and tailscale_ips_bound the bound-at-start list; when
-    tailscale_stale is True the two differ (bound is the old
-    IP) so the VM can tell the bound list has gone stale.
-    P1-4: install_apk follows can_install_apk (the user's
-    'Install unknown apps' setting)."""
+    P1-3 (CONS-022, DEGRADED by CONS-029): tailscale_ips is the
+    CURRENT address list and tailscale_ips_bound the
+    bound-at-start list; when tailscale_stale is True the two
+    differ (bound is the old IP), so the real server reports
+    modules.tailscale DEGRADED and overall_status DEGRADED —
+    the VM cannot connect on the current IP.
+    P1-4 (CONS-029 split): install_apk is always True
+    (endpoint available, P0 spec A5); install_apk_permitted
+    follows can_install_apk (the user's 'Install unknown apps'
+    setting)."""
     a11y = bool(accessibility)
     if a11y:
         mode = "FULL_ACCESS"
@@ -74,8 +78,9 @@ def _health_body(accessibility: bool, banking_safe: bool = False,
             "app_version": "1.9.5",
             "app_version_code": 15,
             "mode": mode,
-            "overall_status": "HEALTHY",
-            "modules": {"http": "HEALTHY", "tailscale": "HEALTHY",
+            "overall_status": "DEGRADED" if tailscale_stale else "HEALTHY",
+            "modules": {"http": "HEALTHY",
+                        "tailscale": "DEGRADED" if tailscale_stale else "HEALTHY",
                         "accessibility": "ENABLED" if a11y else "DISABLED",
                         "notification_access": "GRANTED",
                         "termux_ssh": "UNKNOWN"},
@@ -85,7 +90,8 @@ def _health_body(accessibility: bool, banking_safe: bool = False,
                              "http_api": True, "launch_app": True,
                              "launch_app_guaranteed": False,
                              "foreground_verification": a11y,
-                             "install_apk": can_install_apk},
+                             "install_apk": True,
+                             "install_apk_permitted": can_install_apk},
             "tailscale_ips": current,
             "tailscale_ips_bound": bound}
 
@@ -123,13 +129,16 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # mock's /health reports mode BANKING_SAFE. Reset by the
     # fixture.
     banking_safe = False
-    # P1-4 (CONS-022): when False, the mock's /health reports
-    # install_apk False (the user's "Install unknown apps"
-    # setting is off). Reset by the fixture.
+    # P1-4 (CONS-022, split by CONS-029): when False, the mock's
+    # /health reports install_apk_permitted False (the user's
+    # "Install unknown apps" setting is off); install_apk stays
+    # True (endpoint available, P0 spec A5). Reset by the fixture.
     can_install_apk = True
-    # P1-3 (CONS-022): when True, the mock's /health reports a
-    # stale bound-at-start IP (100.111.74.42) while the current
-    # tailscale_ips is 100.85.138.44. Reset by the fixture.
+    # P1-3 (CONS-022, DEGRADED by CONS-029): when True, the
+    # mock's /health reports a stale bound-at-start IP
+    # (100.111.74.42) while the current tailscale_ips is
+    # 100.85.138.44, with modules.tailscale DEGRADED and
+    # overall_status DEGRADED. Reset by the fixture.
     tailscale_stale = False
     # P0-4 (v2.0): what /launch_app answers. "launched" is the
     # confirmed-foreground report (a11y on); "unconfirmed" is
@@ -1981,38 +1990,49 @@ def test_app_check_app_banking_safe_mode(mock_app):
 # --------------------------------------------------------------------------
 
 def test_app_health_tailscale_stale_visible(mock_app):
-    """P1-3: when the bound IP has gone stale, /health reports
-    the current tailscale_ips and the old bound list
-    separately, so the VM can tell they differ (bound !=
-    current) instead of mistaking the stale IP for the
-    current one."""
+    """P1-3 (CONS-029 fix): when the bound IP has gone stale,
+    /health reports the current tailscale_ips and the old bound
+    list separately, AND reports modules.tailscale DEGRADED
+    with overall_status DEGRADED — the VM cannot connect on
+    the current IP, so it must not be reported HEALTHY."""
     MockAppHandler.tailscale_stale = True
     detail = ab.get_health_detail()
     assert detail["tailscale_ips"] == ["100.85.138.44"]
     assert detail["tailscale_ips_bound"] == ["100.111.74.42"]
     assert detail["tailscale_ips"] != detail["tailscale_ips_bound"]
+    assert detail["modules"]["tailscale"] == "DEGRADED"
+    assert detail["overall_status"] == "DEGRADED"
     result = ab.check_app()
     assert result["tailscale_ips"] == ["100.85.138.44"]
     assert result["tailscale_ips_bound"] == ["100.111.74.42"]
+    assert result["modules"]["tailscale"] == "DEGRADED"
+    assert result["overall_status"] == "DEGRADED"
 
 
 def test_app_health_install_apk_false_when_not_permitted(mock_app):
-    """P1-4: install_apk is false when the app cannot request
-    installs ('Install unknown apps' off for this app)."""
+    """P1-4 (CONS-029 split): install_apk stays True (endpoint
+    available, P0 spec A5) when installs are not permitted;
+    only install_apk_permitted goes False ('Install unknown
+    apps' off for this app)."""
     MockAppHandler.can_install_apk = False
     detail = ab.get_health_detail()
-    assert detail["capabilities"]["install_apk"] is False
+    assert detail["capabilities"]["install_apk"] is True
+    assert detail["capabilities"]["install_apk_permitted"] is False
     result = ab.check_app()
-    assert result["capabilities"]["install_apk"] is False
+    assert result["capabilities"]["install_apk"] is True
+    assert result["capabilities"]["install_apk_permitted"] is False
 
 
 def test_app_health_install_apk_true_by_default(mock_app):
-    """P1-4: install_apk stays true when installs are permitted
-    (the default)."""
+    """P1-4 (CONS-029 split): install_apk and
+    install_apk_permitted are both true when installs are
+    permitted (the default)."""
     detail = ab.get_health_detail()
     assert detail["capabilities"]["install_apk"] is True
+    assert detail["capabilities"]["install_apk_permitted"] is True
     result = ab.check_app()
     assert result["capabilities"]["install_apk"] is True
+    assert result["capabilities"]["install_apk_permitted"] is True
 
 
 # --------------------------------------------------------------------------

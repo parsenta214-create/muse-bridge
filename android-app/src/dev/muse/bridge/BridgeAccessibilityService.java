@@ -186,6 +186,23 @@ public class BridgeAccessibilityService extends AccessibilityService {
         return instance;
     }
 
+    /** CONS-029 P1-2 fix: broadcast when the service connects or
+     * disconnects, so MainActivity can refresh its status display
+     * promptly instead of waiting for the next screen update.
+     * App-internal only (MainActivity registers with
+     * RECEIVER_NOT_EXPORTED). Best effort — a missed broadcast
+     * is harmless, onResume refreshes anyway. */
+    public static final String ACTION_A11Y_STATE_CHANGED =
+            "dev.muse.bridge.ACTION_A11Y_STATE_CHANGED";
+
+    private void broadcastA11yStateChanged() {
+        try {
+            sendBroadcast(new Intent(ACTION_A11Y_STATE_CHANGED));
+        } catch (Exception ignored) {
+            // Best effort only; the UI refreshes on resume anyway.
+        }
+    }
+
     @Override
     public void onServiceConnected() {
         super.onServiceConnected();
@@ -193,12 +210,14 @@ public class BridgeAccessibilityService extends AccessibilityService {
         // A-3: the main-thread handler is the single execution
         // context for accessibility work.
         mainHandler = new Handler(Looper.getMainLooper());
+        broadcastA11yStateChanged();
     }
 
     @Override
     public void onDestroy() {
         instance = null;
         executor.shutdownNow();
+        broadcastA11yStateChanged();
         super.onDestroy();
     }
 

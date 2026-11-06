@@ -200,7 +200,12 @@ HEALTH_MODES = ("MINIMAL", "FULL_ACCESS", "BANKING_SAFE")
 HEALTH_OVERALL_STATUSES = ("HEALTHY", "DEGRADED", "CRITICAL", "RECOVERING")
 HEALTH_MODULE_VALUES = {
     "http": ("HEALTHY", "RECOVERING"),
-    "tailscale": ("HEALTHY", "UNAVAILABLE"),
+    # CONS-029 P1-3 fix: tailscale is DEGRADED when the phone
+    # currently has a Tailscale IP but the HTTP server is bound
+    # to a different (old) one — the VM cannot connect on the
+    # current IP. Old servers never send DEGRADED here, so this
+    # stays backward compatible.
+    "tailscale": ("HEALTHY", "UNAVAILABLE", "DEGRADED"),
     "accessibility": ("ENABLED", "DISABLED"),
     "notification_access": ("GRANTED", "GRANTED_NOT_CONNECTED", "NOT_GRANTED"),
     "termux_ssh": ("UNKNOWN",),
@@ -210,6 +215,11 @@ HEALTH_CAPABILITY_KEYS = (
     "notification", "notification_post", "http_api",
     "launch_app", "launch_app_guaranteed", "foreground_verification",
     "install_apk",
+    # CONS-029 P1-4 fix: install_apk_permitted is an OPTIONAL
+    # boolean capability (the frozen v2.2.0 server does not send
+    # it) — "Android permits starting an install request"
+    # (canRequestPackageInstalls), independent of install_apk.
+    "install_apk_permitted",
 )
 
 # P1-5 (CONS-022): the /health extension fields. All-or-none:
@@ -576,48 +586,66 @@ def _validate_node(node: Any, index: int) -> dict[str, Any]:
 
 
 def _validate_health_cross_fields(d: dict, modules: dict, caps: dict) -> None:
-    """P1-5 (CONS-022): cross-field consistency for a complete
-    v2.0 /health body. Called only when all 5 extension fields
-    are present. A key absent from modules/capabilities is
-    skipped (the per-key validation is lenient about missing
-    keys); a present-but-inconsistent value is a protocol
-    error."""
-    a11y_mod = modules.get("accessibility")
-    # Mode and the accessibility module must agree: FULL_ACCESS
-    # means the service is connected (ENABLED); MINIMAL /
-    # BANKING_SAFE mean it is off (DISABLED). The top-level
-    # accessibility boolean is the same state.
-    if a11y_mod is not None:
-        if d["mode"] == "FULL_ACCESS" and a11y_mod != "ENABLED":
+    """P1-5 (CONS-022, tightened by CONS-029): cross-field
+    consistency for a complete v2.0 /health body. Called only
+    when all 5 extension fields are present. The internal fields
+    are REQUIRED — a complete v2.0 response must carry them, and
+    omitting one is a protocol error, not a skip: the earlier
+    version let a server bypass validation by leaving a field
+    out (e.g. mode FULL_ACCESS + accessibility False + empty
+    modules/capabilities passed)."""
+    # modules.accessibility and modules.tailscale are required
+    # internal fields (CONS-029 P1-5 problem 1).
+    if "accessibility" not in modules:
+        raise ProtocolError(
+            "health.modules.accessibility is required in a complete "
+            "v2.0 Health response")
+    if "tailscale" not in modules:
+        raise ProtocolError(
+            "health.modules.tailscale is required in a complete "
+            "v2.0 Health response")
+    a11y_mod = modules["accessibility"]
+    # Mode and the top-level accessibility boolean must agree
+    # DIRECTLY (CONS-029 P1-5 problem 1): FULL_ACCESS means the
+    # service is connected; MINIMAL / BANKING_SAFE mean it is
+    # off. The top-level boolean is the same state.
+    expected_a11y = d["mode"] == "FULL_ACCESS"
+    if d["accessibility"] is not expected_a11y:
+        raise ProtocolError(
+            "health.mode and health.accessibility disagree")
+    # modules.accessibility must agree with the same expectation.
+    if a11y_mod != ("ENABLED" if expected_a11y else "DISABLED"):
+        raise ProtocolError(
+            f"health.mode is {d['mode']!r} but health.modules.accessibility "
+            f"is {a11y_mod!r}")
+    # The screen capabilities are required internal fields, and
+    # the server always reports them as the a11y state
+    # (HttpBridgeServer.buildCapabilities puts a11yOn in all
+    # four): all true when the service is connected, all false
+    # when it is off (CONS-029 P1-5 problem 3).
+    for key in ("screenshot", "tap", "swipe", "text_input"):
+        if key not in caps:
             raise ProtocolError(
-                "health.mode is FULL_ACCESS but health.modules.accessibility "
-                f"is {a11y_mod!r}")
-        if d["mode"] != "FULL_ACCESS" and a11y_mod != "DISABLED":
+                f"health.capabilities.{key} is required in a complete "
+                "v2.0 Health response")
+        if caps[key] is not expected_a11y:
             raise ProtocolError(
-                f"health.mode is {d['mode']!r} but health.modules.accessibility "
-                f"is {a11y_mod!r}")
-        if a11y_mod == "ENABLED" and d["accessibility"] is not True:
-            raise ProtocolError(
-                "health.modules.accessibility is ENABLED but "
-                "health.accessibility is not True")
-        if a11y_mod == "DISABLED" and d["accessibility"] is True:
-            raise ProtocolError(
-                "health.modules.accessibility is DISABLED but "
-                "health.accessibility is True")
-    # A disabled accessibility service cannot do screen work.
-    if a11y_mod == "DISABLED":
-        for key in ("screenshot", "tap", "swipe", "text_input"):
-            if key in caps and caps[key] is not False:
-                raise ProtocolError(
-                    "health.modules.accessibility is DISABLED but "
-                    f"health.capabilities.{key} is {caps[key]!r}")
+                "health.modules.accessibility is "
+                f"{a11y_mod!r} but health.capabilities.{key} is "
+                f"{caps[key]!r}")
     # No Tailscale address means no Tailscale IPs to report.
-    if modules.get("tailscale") == "UNAVAILABLE" and d.get("tailscale_ips"):
+    if modules["tailscale"] == "UNAVAILABLE" and d.get("tailscale_ips"):
         raise ProtocolError(
             "health.modules.tailscale is UNAVAILABLE but "
             "health.tailscale_ips is not empty")
-    # P0-4: a launch is never guaranteed.
-    if "launch_app_guaranteed" in caps and caps["launch_app_guaranteed"] is not False:
+    # P0-4: a launch is never guaranteed — in a complete v2.0
+    # response the key must be present AND false (CONS-029 P1-5
+    # problem 2: a missing key used to pass).
+    if "launch_app_guaranteed" not in caps:
+        raise ProtocolError(
+            "health.capabilities.launch_app_guaranteed is required in "
+            "a complete v2.0 Health response")
+    if caps["launch_app_guaranteed"] is not False:
         raise ProtocolError(
             "health.capabilities.launch_app_guaranteed must be False")
     # Foreground verification needs the service to be connected.
