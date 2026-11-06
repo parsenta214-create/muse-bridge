@@ -75,6 +75,61 @@ def _sample_event(event_type: str = "TYPE_VIEW_CLICKED") -> dict:
     }
 
 
+def _v2_health_body(**overrides) -> dict:
+    """A complete, cross-field-consistent v2.0 /health body
+    (FULL_ACCESS, a11y on). P1-5 (CONS-022): the all-or-none
+    rule accepts it (all 5 extension fields present). Pass
+    overrides to mutate one field per test case."""
+    body = {
+        "ok": True,
+        "service": "muse-bridge",
+        "version": 1,
+        "app_version": "2.2.0",
+        "app_version_code": 35,
+        "accessibility": True,
+        "notification_listener": True,
+        "mode": "FULL_ACCESS",
+        "overall_status": "HEALTHY",
+        "modules": {"http": "HEALTHY", "tailscale": "HEALTHY",
+                    "accessibility": "ENABLED",
+                    "notification_access": "GRANTED",
+                    "termux_ssh": "UNKNOWN"},
+        "capabilities": {"screenshot": True, "tap": True,
+                         "swipe": True, "text_input": True,
+                         "notification": True, "notification_post": True,
+                         "http_api": True, "launch_app": True,
+                         "launch_app_guaranteed": False,
+                         "foreground_verification": True,
+                         "install_apk": True},
+        "tailscale_ips": ["100.111.74.42"],
+    }
+    body.update(overrides)
+    return body
+
+
+def _v2_health_body_minimal(**overrides) -> dict:
+    """A complete, cross-field-consistent v2.0 /health body
+    (MINIMAL, a11y off). Same all-or-none acceptance as
+    _v2_health_body, with the screen capabilities off."""
+    body = _v2_health_body(
+        accessibility=False,
+        mode="MINIMAL",
+        modules={"http": "HEALTHY", "tailscale": "HEALTHY",
+                 "accessibility": "DISABLED",
+                 "notification_access": "GRANTED",
+                 "termux_ssh": "UNKNOWN"},
+        capabilities={"screenshot": False, "tap": False,
+                      "swipe": False, "text_input": False,
+                      "notification": True, "notification_post": True,
+                      "http_api": True, "launch_app": True,
+                      "launch_app_guaranteed": False,
+                      "foreground_verification": False,
+                      "install_apk": True},
+    )
+    body.update(overrides)
+    return body
+
+
 class TestProtocolConstantsAndLimits(unittest.TestCase):
     def test_constants_values(self) -> None:
         self.assertEqual(MAX_BODY_BYTES, 262144)
@@ -370,7 +425,10 @@ class TestParseFunctionsValid(unittest.TestCase):
         """P0-4 (v2.0): /health carries launch_app_guaranteed
         (always false) and foreground_verification (true when
         a11y is on). Both are optional — an old server omits
-        them — but when present they must be booleans."""
+        them — but when present they must be booleans.
+        P1-5 (CONS-022): the body is a complete v2.0 body (all
+        5 extension fields), so the all-or-none rule accepts
+        it."""
         raw = {
             "ok": True,
             "service": "muse-bridge",
@@ -380,6 +438,10 @@ class TestParseFunctionsValid(unittest.TestCase):
             "accessibility": True,
             "mode": "FULL_ACCESS",
             "overall_status": "HEALTHY",
+            "modules": {"http": "HEALTHY", "tailscale": "HEALTHY",
+                        "accessibility": "ENABLED",
+                        "notification_access": "GRANTED",
+                        "termux_ssh": "UNKNOWN"},
             "capabilities": {"screenshot": True, "tap": True,
                              "swipe": True, "text_input": True,
                              "notification": True,
@@ -388,6 +450,7 @@ class TestParseFunctionsValid(unittest.TestCase):
                              "launch_app_guaranteed": False,
                              "foreground_verification": True,
                              "install_apk": True},
+            "tailscale_ips": ["100.111.74.42"],
         }
         self.assertEqual(parse_health(raw), raw)
 
@@ -545,42 +608,47 @@ class TestParseFunctionsInvalid(unittest.TestCase):
 
     def test_parse_health_extension_invalid(self) -> None:
         """P0-3 (v2.0): a present-but-invalid extension field is
-        a protocol error."""
-        base = {
-            "ok": True,
-            "service": "muse-bridge",
-            "version": 1,
-            "app_version": "1.9.0",
-            "app_version_code": 19,
-            "accessibility": True,
-        }
+        a protocol error. P1-5 (CONS-022): each case uses a
+        complete v2.0 body (all 5 extension fields) so the
+        all-or-none rule passes and the invalid VALUE is what
+        is rejected."""
         # Bad mode
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, mode="SUPERUSER"))
+            parse_health(_v2_health_body(mode="SUPERUSER"))
         # Bad overall_status
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, overall_status="FINE"))
+            parse_health(_v2_health_body(overall_status="FINE"))
         # Bad module value
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, modules={"http": "OK"}))
+            parse_health(_v2_health_body(modules={"http": "OK"}))
         # Bad capability type
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, capabilities={"screenshot": "yes"}))
+            parse_health(_v2_health_body(capabilities={"screenshot": "yes"}))
         # Bad tailscale_ips type
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, tailscale_ips="100.111.74.42"))
+            parse_health(_v2_health_body(tailscale_ips="100.111.74.42"))
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, tailscale_ips=[123]))
+            parse_health(_v2_health_body(tailscale_ips=[123]))
         # Unknown keys inside modules/capabilities are ignored.
-        ok = dict(base, modules={"http": "HEALTHY", "future_module": "X"},
-                  capabilities={"screenshot": True, "future_cap": 1})
+        ok = _v2_health_body(
+            modules={"http": "HEALTHY", "tailscale": "HEALTHY",
+                     "accessibility": "ENABLED",
+                     "notification_access": "GRANTED",
+                     "termux_ssh": "UNKNOWN", "future_module": "X"},
+            capabilities={"screenshot": True, "tap": True,
+                          "swipe": True, "text_input": True,
+                          "notification": True, "notification_post": True,
+                          "http_api": True, "launch_app": True,
+                          "launch_app_guaranteed": False,
+                          "foreground_verification": True,
+                          "install_apk": True, "future_cap": 1})
         self.assertEqual(parse_health(ok), ok)
         # P0-4: a present-but-non-boolean new capability is an error.
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, capabilities={
+            parse_health(_v2_health_body(capabilities={
                 "launch_app_guaranteed": "no"}))
         with self.assertRaises(ProtocolError):
-            parse_health(dict(base, capabilities={
+            parse_health(_v2_health_body(capabilities={
                 "foreground_verification": "yes"}))
 
     def test_parse_launch_app_invalid(self) -> None:
@@ -815,6 +883,131 @@ class TestParseFunctionsInvalid(unittest.TestCase):
         bad_hash_format["payload_hash"] = "not-a-hash"
         with self.assertRaises(ValueError):
             parse_batch_result(bad_hash_format)
+
+
+class TestParseHealthP1(unittest.TestCase):
+    """P1-5 (CONS-022): parse_health all-or-none for the 5
+    extension fields, plus cross-field consistency checks."""
+
+    def test_parse_health_all_present_valid(self) -> None:
+        """All 5 extension fields present, cross-field
+        consistent: accepted (FULL_ACCESS and MINIMAL)."""
+        self.assertEqual(parse_health(_v2_health_body()),
+                         _v2_health_body())
+        self.assertEqual(parse_health(_v2_health_body_minimal()),
+                         _v2_health_body_minimal())
+
+    def test_parse_health_partial_extension_rejected(self) -> None:
+        """Only SOME of the 5 extension fields present: an
+        incomplete Health response (ProtocolError)."""
+        full = _v2_health_body()
+        ext = ("mode", "overall_status", "modules",
+               "capabilities", "tailscale_ips")
+        base = {k: v for k, v in full.items() if k not in ext}
+        # Every non-empty proper subset is rejected.
+        for n in range(1, len(ext)):
+            partial = dict(base)
+            partial.update({f: full[f] for f in ext[:n]})
+            with self.assertRaises(ProtocolError, msg=f"n={n}"):
+                parse_health(partial)
+        # A single field alone is also rejected.
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, capabilities=full["capabilities"]))
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, tailscale_ips=full["tailscale_ips"]))
+
+    def test_parse_health_full_access_requires_enabled(self) -> None:
+        """mode FULL_ACCESS with modules.accessibility
+        DISABLED: inconsistent."""
+        bad = _v2_health_body(
+            modules={"http": "HEALTHY", "tailscale": "HEALTHY",
+                     "accessibility": "DISABLED",
+                     "notification_access": "GRANTED",
+                     "termux_ssh": "UNKNOWN"})
+        with self.assertRaises(ProtocolError):
+            parse_health(bad)
+
+    def test_parse_health_minimal_requires_disabled(self) -> None:
+        """mode MINIMAL with modules.accessibility ENABLED:
+        inconsistent."""
+        bad = _v2_health_body_minimal(
+            modules={"http": "HEALTHY", "tailscale": "HEALTHY",
+                     "accessibility": "ENABLED",
+                     "notification_access": "GRANTED",
+                     "termux_ssh": "UNKNOWN"})
+        with self.assertRaises(ProtocolError):
+            parse_health(bad)
+
+    def test_parse_health_top_level_accessibility_must_agree(self) -> None:
+        """The top-level accessibility boolean must agree with
+        modules.accessibility."""
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body_minimal(accessibility=True))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(accessibility=False))
+
+    def test_parse_health_disabled_requires_no_screen_caps(self) -> None:
+        """accessibility DISABLED with a screen capability true:
+        inconsistent (each of screenshot/tap/swipe/text_input)."""
+        for key in ("screenshot", "tap", "swipe", "text_input"):
+            caps = dict(_v2_health_body_minimal()["capabilities"])
+            caps[key] = True
+            with self.assertRaises(ProtocolError, msg=key):
+                parse_health(_v2_health_body_minimal(capabilities=caps))
+
+    def test_parse_health_tailscale_unavailable_requires_empty_ips(self) -> None:
+        """modules.tailscale UNAVAILABLE with a non-empty
+        tailscale_ips: inconsistent."""
+        bad = _v2_health_body_minimal(
+            modules={"http": "HEALTHY", "tailscale": "UNAVAILABLE",
+                     "accessibility": "DISABLED",
+                     "notification_access": "GRANTED",
+                     "termux_ssh": "UNKNOWN"})
+        with self.assertRaises(ProtocolError):
+            parse_health(bad)
+        # UNAVAILABLE with an empty list is consistent.
+        ok = _v2_health_body_minimal(
+            modules={"http": "HEALTHY", "tailscale": "UNAVAILABLE",
+                     "accessibility": "DISABLED",
+                     "notification_access": "GRANTED",
+                     "termux_ssh": "UNKNOWN"},
+            tailscale_ips=[])
+        self.assertEqual(parse_health(ok), ok)
+
+    def test_parse_health_launch_app_guaranteed_must_be_false(self) -> None:
+        """P0-4: launch_app_guaranteed is always false; a true
+        value is inconsistent."""
+        caps = dict(_v2_health_body()["capabilities"])
+        caps["launch_app_guaranteed"] = True
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(capabilities=caps))
+
+    def test_parse_health_foreground_verification_requires_a11y(self) -> None:
+        """foreground_verification true with accessibility
+        DISABLED: inconsistent."""
+        caps = dict(_v2_health_body_minimal()["capabilities"])
+        caps["foreground_verification"] = True
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body_minimal(capabilities=caps))
+
+    def test_parse_health_tailscale_ips_bound_optional(self) -> None:
+        """P1-3 (CONS-022): tailscale_ips_bound is an optional
+        list of strings, NOT part of the all-or-none set — a
+        full v2.0 body and an old-server body both accept it,
+        and it may be absent."""
+        full = _v2_health_body(tailscale_ips_bound=["100.111.74.42"])
+        self.assertEqual(parse_health(full), full)
+        old = {
+            "ok": True, "service": "muse-bridge", "version": 1,
+            "app_version": "1.9.0", "app_version_code": 19,
+            "accessibility": False,
+            "tailscale_ips_bound": ["100.85.138.44"],
+        }
+        self.assertEqual(parse_health(old), old)
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips_bound="100.111.74.42"))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips_bound=[123]))
 
 
 class TestErrorCodesAndErrorBody(unittest.TestCase):

@@ -68,15 +68,20 @@ public class MainActivity extends Activity {
                 .edit().putString(KEY_MODE, m).apply();
     }
 
-    /** Best-effort Tailscale IPv4 address (100.x), or null when absent. */
-    public static String findTailscaleIp() {
+    /** Best-effort Tailscale IPv4 addresses (100.x), or an
+     * empty list when absent. P1-3 (CONS-022): the /health
+     * tailscale_ips must be the CURRENT addresses, re-fetched
+     * on each call — not the bound-at-start list, which goes
+     * stale if Tailscale reassigns the IP. */
+    public static java.util.List<String> findTailscaleIps() {
+        java.util.List<String> out = new java.util.ArrayList<>();
         try {
             for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 for (InetAddress addr : Collections.list(ni.getInetAddresses())) {
                     if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
                         String ip = addr.getHostAddress();
                         if (ip != null && ip.startsWith("100.")) {
-                            return ip;
+                            out.add(ip);
                         }
                     }
                 }
@@ -84,7 +89,13 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {
             // Best effort only; the address line just stays empty.
         }
-        return null;
+        return out;
+    }
+
+    /** Best-effort Tailscale IPv4 address (100.x), or null when absent. */
+    public static String findTailscaleIp() {
+        java.util.List<String> ips = findTailscaleIps();
+        return ips.isEmpty() ? null : ips.get(0);
     }
 
     public static boolean isAccessibilityEnabled(Context ctx) {
@@ -253,15 +264,34 @@ public class MainActivity extends Activity {
         // P0-2 (v2.0): the effective mode. a11y on means FULL
         // ACCESS; a11y off means the persisted MINIMAL /
         // BANKING SAFE.
-        boolean a11yOn = isAccessibilityEnabled(this);
+        // P1-2 (CONS-022): the a11y state comes from the
+        // connected service (BridgeAccessibilityService.
+        // getInstance()), the SAME source /health uses — not
+        // from the Settings string isAccessibilityEnabled().
+        // The two could disagree transiently right after the
+        // user toggles a11y (Settings says ON, service not yet
+        // connected); using the service-connection state here
+        // makes the UI and /health agree. (isAccessibilityEnabled
+        // is kept as the Settings-state check for diagnostics.)
+        boolean a11yOn = BridgeAccessibilityService.getInstance() != null;
         String mode = a11yOn ? "FULL ACCESS" : getPersistedMode(this);
         status.append("\nMode: ").append(mode);
-        if (!a11yOn && MODE_BANKING_SAFE.equals(mode)) {
+        if (a11yOn) {
+            status.append(" — screen control available");
+        } else if (MODE_BANKING_SAFE.equals(mode)) {
             status.append(" — screen control is off, banking apps take priority");
         }
         status.append("\nAccessibility service: ")
                 .append(a11yOn ? "enabled" : "NOT enabled");
-        if (!a11yOn) {
+        if (!a11yOn && MODE_BANKING_SAFE.equals(mode)) {
+            // P1-1 (CONS-022): in BANKING_SAFE the service stays
+            // off BY DESIGN — never prompt the user to enable
+            // it. The old code appended the enable prompt
+            // whenever a11y was off, including BANKING_SAFE,
+            // contradicting the spec.
+            status.append(" — left off on purpose, banking apps take priority");
+        } else if (!a11yOn) {
+            // MINIMAL only: prompt to enable a11y.
             status.append(" — open accessibility settings and turn on Muse Bridge");
         }
         status.append("\nNotification access: ")

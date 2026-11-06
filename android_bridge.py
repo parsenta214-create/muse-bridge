@@ -417,7 +417,8 @@ def get_health_detail() -> dict:
 
     Returns the full parsed health dict (all fields the server
     sent, incl. mode/overall_status/modules/capabilities/
-    tailscale_ips on v2.0.0+ servers) plus "seconds". Raises
+    tailscale_ips on v2.0.0+ servers, and tailscale_ips_bound
+    on servers new enough to report it, P1-3) plus "seconds". Raises
     TransportError on transport/auth failure and ProtocolError
     on a malformed body. Old servers simply omit the new keys
     (parse_health treats them as optional); callers must use
@@ -463,7 +464,10 @@ def check_app() -> dict:
     The probe is a GET /health, so it retries transient failures
     (same policy as the adapter's reads). P0-3 (v2.0): the return
     now also carries mode/overall_status/modules/capabilities/
-    tailscale_ips (None on old servers); the ok/detail contract
+    tailscale_ips (None on old servers); P1-3: it also carries
+    tailscale_ips_bound (None when the server does not report
+    it) so the VM can tell whether the bound IPs have gone
+    stale (bound != current). The ok/detail contract
     is unchanged.
     """
     if not APP_TOKEN:
@@ -489,6 +493,7 @@ def check_app() -> dict:
         "modules": data.get("modules"),
         "capabilities": data.get("capabilities"),
         "tailscale_ips": data.get("tailscale_ips"),
+        "tailscale_ips_bound": data.get("tailscale_ips_bound"),
     }
     if data.get("ok") and data.get("accessibility"):
         return {"ok": True, "detail": "app reachable, accessibility service enabled",

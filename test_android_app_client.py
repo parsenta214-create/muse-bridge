@@ -45,12 +45,20 @@ def _a11y_off_body(path: str) -> dict:
             "error": "accessibility service not enabled"}
 
 
-def _health_body(accessibility: bool, banking_safe: bool = False) -> dict:
+def _health_body(accessibility: bool, banking_safe: bool = False,
+                 can_install_apk: bool = True,
+                 tailscale_stale: bool = False) -> dict:
     """P0-3 (v2.0): the extended /health body the real v2.0.0
     server sends. a11y on -> mode FULL_ACCESS, screen caps on;
     a11y off -> mode MINIMAL (or BANKING_SAFE when the user
     picked it), screen caps off, overall HEALTHY (a11y off is
-    normal in MINIMAL)."""
+    normal in MINIMAL).
+    P1-3 (CONS-022): tailscale_ips is the CURRENT address list
+    and tailscale_ips_bound the bound-at-start list; when
+    tailscale_stale is True the two differ (bound is the old
+    IP) so the VM can tell the bound list has gone stale.
+    P1-4: install_apk follows can_install_apk (the user's
+    'Install unknown apps' setting)."""
     a11y = bool(accessibility)
     if a11y:
         mode = "FULL_ACCESS"
@@ -58,6 +66,8 @@ def _health_body(accessibility: bool, banking_safe: bool = False) -> dict:
         mode = "BANKING_SAFE"
     else:
         mode = "MINIMAL"
+    current = ["100.85.138.44"]
+    bound = ["100.111.74.42"] if tailscale_stale else list(current)
     return {"ok": True, "service": "muse-bridge",
             "version": 1, "accessibility": a11y,
             "notification_listener": True,
@@ -75,8 +85,9 @@ def _health_body(accessibility: bool, banking_safe: bool = False) -> dict:
                              "http_api": True, "launch_app": True,
                              "launch_app_guaranteed": False,
                              "foreground_verification": a11y,
-                             "install_apk": True},
-            "tailscale_ips": ["100.111.74.42"]}
+                             "install_apk": can_install_apk},
+            "tailscale_ips": current,
+            "tailscale_ips_bound": bound}
 
 
 class MockAppHandler(BaseHTTPRequestHandler):
@@ -112,6 +123,14 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # mock's /health reports mode BANKING_SAFE. Reset by the
     # fixture.
     banking_safe = False
+    # P1-4 (CONS-022): when False, the mock's /health reports
+    # install_apk False (the user's "Install unknown apps"
+    # setting is off). Reset by the fixture.
+    can_install_apk = True
+    # P1-3 (CONS-022): when True, the mock's /health reports a
+    # stale bound-at-start IP (100.111.74.42) while the current
+    # tailscale_ips is 100.85.138.44. Reset by the fixture.
+    tailscale_stale = False
     # P0-4 (v2.0): what /launch_app answers. "launched" is the
     # confirmed-foreground report (a11y on); "unconfirmed" is
     # the verified-but-not-confirmed report
@@ -197,11 +216,16 @@ class MockAppHandler(BaseHTTPRequestHandler):
             base = self.path.split("?")[0]
             if base == "/health":
                 return self._send_json(200, _health_body(
-                    False, MockAppHandler.banking_safe))
+                    False, MockAppHandler.banking_safe,
+                    can_install_apk=MockAppHandler.can_install_apk,
+                    tailscale_stale=MockAppHandler.tailscale_stale))
             if base in ("/state", "/capture_screen", "/events"):
                 return self._send_json(503, _a11y_off_body(base))
         if self.path == "/health":
-            return self._send_json(200, _health_body(True))
+            return self._send_json(200, _health_body(
+                True,
+                can_install_apk=MockAppHandler.can_install_apk,
+                tailscale_stale=MockAppHandler.tailscale_stale))
         if self.path.startswith("/logs"):
             # v1.9.3: debug log (current run + previous run's tail).
             return self._send_json(200, {"ok": True,
@@ -518,6 +542,8 @@ def mock_app(monkeypatch):
     MockAppHandler.text_after = 0
     MockAppHandler.accessibility = True
     MockAppHandler.banking_safe = False
+    MockAppHandler.can_install_apk = True
+    MockAppHandler.tailscale_stale = False
     MockAppHandler.launch_outcome = "launched"
     MockAppHandler.launch_outcomes = {}
     MockAppHandler.launch_attempts = 0
@@ -1856,7 +1882,9 @@ def test_app_launch_blocked_not_misclassified(mock_app):
 def test_app_check_app_carries_health_detail(mock_app):
     """P0-3: check_app() returns the same ok/detail as before
     AND carries the new /health fields (mode, overall_status,
-    modules, capabilities, tailscale_ips)."""
+    modules, capabilities, tailscale_ips). P1-3: it also
+    carries tailscale_ips_bound (equal to tailscale_ips when
+    the bound list is fresh)."""
     result = ab.check_app()
     assert result["ok"] is True
     assert result["detail"] == "app reachable, accessibility service enabled"
@@ -1868,7 +1896,8 @@ def test_app_check_app_carries_health_detail(mock_app):
     assert result["capabilities"]["launch_app"] is True
     assert result["capabilities"]["launch_app_guaranteed"] is False
     assert result["capabilities"]["foreground_verification"] is True
-    assert result["tailscale_ips"] == ["100.111.74.42"]
+    assert result["tailscale_ips"] == ["100.85.138.44"]
+    assert result["tailscale_ips_bound"] == ["100.85.138.44"]
 
 
 def test_app_check_app_a11y_off_carries_minimal(mock_app):
@@ -1891,14 +1920,17 @@ def test_app_check_app_a11y_off_carries_minimal(mock_app):
 
 def test_app_get_health_detail(mock_app):
     """P0-3: get_health_detail() returns the full parsed /health
-    dict (plus seconds)."""
+    dict (plus seconds). P1-3: it also carries
+    tailscale_ips_bound, equal to tailscale_ips when the bound
+    list is fresh."""
     detail = ab.get_health_detail()
     assert detail["ok"] is True
     assert detail["mode"] == "FULL_ACCESS"
     assert detail["overall_status"] == "HEALTHY"
     assert detail["modules"]["tailscale"] == "HEALTHY"
     assert detail["capabilities"]["install_apk"] is True
-    assert detail["tailscale_ips"] == ["100.111.74.42"]
+    assert detail["tailscale_ips"] == ["100.85.138.44"]
+    assert detail["tailscale_ips_bound"] == ["100.85.138.44"]
     assert isinstance(detail["seconds"], float)
 
 
@@ -1907,7 +1939,8 @@ def test_app_old_server_health_still_works(mock_app, monkeypatch):
     check_app() returns the same ok/detail, and the new keys
     are None."""
     import test_android_app_client as tac
-    monkeypatch.setattr(tac, "_health_body", lambda a11y, banking_safe=False: {
+    monkeypatch.setattr(tac, "_health_body",
+                        lambda a11y, banking_safe=False, **kw: {
         "ok": True, "service": "muse-bridge", "version": 1,
         "accessibility": True, "notification_listener": True,
         "app_version": "1.9.5", "app_version_code": 15})
@@ -1918,6 +1951,7 @@ def test_app_old_server_health_still_works(mock_app, monkeypatch):
     assert result["modules"] is None
     assert result["capabilities"] is None
     assert result["tailscale_ips"] is None
+    assert result["tailscale_ips_bound"] is None
 
 
 # --------------------------------------------------------------------------
@@ -1939,6 +1973,46 @@ def test_app_check_app_banking_safe_mode(mock_app):
     assert result["capabilities"]["launch_app"] is True
     assert result["capabilities"]["launch_app_guaranteed"] is False
     assert result["capabilities"]["foreground_verification"] is False
+
+
+# --------------------------------------------------------------------------
+# P1-3 / P1-4 (CONS-022): tailscale IP staleness signalling and
+# install_apk reflecting the "Install unknown apps" setting.
+# --------------------------------------------------------------------------
+
+def test_app_health_tailscale_stale_visible(mock_app):
+    """P1-3: when the bound IP has gone stale, /health reports
+    the current tailscale_ips and the old bound list
+    separately, so the VM can tell they differ (bound !=
+    current) instead of mistaking the stale IP for the
+    current one."""
+    MockAppHandler.tailscale_stale = True
+    detail = ab.get_health_detail()
+    assert detail["tailscale_ips"] == ["100.85.138.44"]
+    assert detail["tailscale_ips_bound"] == ["100.111.74.42"]
+    assert detail["tailscale_ips"] != detail["tailscale_ips_bound"]
+    result = ab.check_app()
+    assert result["tailscale_ips"] == ["100.85.138.44"]
+    assert result["tailscale_ips_bound"] == ["100.111.74.42"]
+
+
+def test_app_health_install_apk_false_when_not_permitted(mock_app):
+    """P1-4: install_apk is false when the app cannot request
+    installs ('Install unknown apps' off for this app)."""
+    MockAppHandler.can_install_apk = False
+    detail = ab.get_health_detail()
+    assert detail["capabilities"]["install_apk"] is False
+    result = ab.check_app()
+    assert result["capabilities"]["install_apk"] is False
+
+
+def test_app_health_install_apk_true_by_default(mock_app):
+    """P1-4: install_apk stays true when installs are permitted
+    (the default)."""
+    detail = ab.get_health_detail()
+    assert detail["capabilities"]["install_apk"] is True
+    result = ab.check_app()
+    assert result["capabilities"]["install_apk"] is True
 
 
 # --------------------------------------------------------------------------

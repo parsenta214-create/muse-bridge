@@ -212,6 +212,17 @@ HEALTH_CAPABILITY_KEYS = (
     "install_apk",
 )
 
+# P1-5 (CONS-022): the /health extension fields. All-or-none:
+# NONE present -> an old server; ALL present -> a v2.0 server;
+# SOME present -> an incomplete Health response (ProtocolError).
+# tailscale_ips_bound (P1-3) is NOT in this set — it is an
+# additional optional field, sent only by servers new enough
+# to report it (the frozen v2.2.0 server does not send it).
+HEALTH_EXTENSION_FIELDS = (
+    "mode", "overall_status", "modules",
+    "capabilities", "tailscale_ips",
+)
+
 # P0-4 (v2.0): /launch_app result vocabulary. ok is true ONLY
 # when status is "launched" — startActivity() not throwing is
 # never the success condition. "unavailable" is reserved (no
@@ -564,6 +575,58 @@ def _validate_node(node: Any, index: int) -> dict[str, Any]:
     return dict(node)
 
 
+def _validate_health_cross_fields(d: dict, modules: dict, caps: dict) -> None:
+    """P1-5 (CONS-022): cross-field consistency for a complete
+    v2.0 /health body. Called only when all 5 extension fields
+    are present. A key absent from modules/capabilities is
+    skipped (the per-key validation is lenient about missing
+    keys); a present-but-inconsistent value is a protocol
+    error."""
+    a11y_mod = modules.get("accessibility")
+    # Mode and the accessibility module must agree: FULL_ACCESS
+    # means the service is connected (ENABLED); MINIMAL /
+    # BANKING_SAFE mean it is off (DISABLED). The top-level
+    # accessibility boolean is the same state.
+    if a11y_mod is not None:
+        if d["mode"] == "FULL_ACCESS" and a11y_mod != "ENABLED":
+            raise ProtocolError(
+                "health.mode is FULL_ACCESS but health.modules.accessibility "
+                f"is {a11y_mod!r}")
+        if d["mode"] != "FULL_ACCESS" and a11y_mod != "DISABLED":
+            raise ProtocolError(
+                f"health.mode is {d['mode']!r} but health.modules.accessibility "
+                f"is {a11y_mod!r}")
+        if a11y_mod == "ENABLED" and d["accessibility"] is not True:
+            raise ProtocolError(
+                "health.modules.accessibility is ENABLED but "
+                "health.accessibility is not True")
+        if a11y_mod == "DISABLED" and d["accessibility"] is True:
+            raise ProtocolError(
+                "health.modules.accessibility is DISABLED but "
+                "health.accessibility is True")
+    # A disabled accessibility service cannot do screen work.
+    if a11y_mod == "DISABLED":
+        for key in ("screenshot", "tap", "swipe", "text_input"):
+            if key in caps and caps[key] is not False:
+                raise ProtocolError(
+                    "health.modules.accessibility is DISABLED but "
+                    f"health.capabilities.{key} is {caps[key]!r}")
+    # No Tailscale address means no Tailscale IPs to report.
+    if modules.get("tailscale") == "UNAVAILABLE" and d.get("tailscale_ips"):
+        raise ProtocolError(
+            "health.modules.tailscale is UNAVAILABLE but "
+            "health.tailscale_ips is not empty")
+    # P0-4: a launch is never guaranteed.
+    if "launch_app_guaranteed" in caps and caps["launch_app_guaranteed"] is not False:
+        raise ProtocolError(
+            "health.capabilities.launch_app_guaranteed must be False")
+    # Foreground verification needs the service to be connected.
+    if caps.get("foreground_verification") is True and a11y_mod != "ENABLED":
+        raise ProtocolError(
+            "health.capabilities.foreground_verification is True but "
+            f"health.modules.accessibility is {a11y_mod!r}")
+
+
 def parse_health(data: dict[str, Any]) -> dict[str, Any]:
     d = _require_dict(data, "health")
     required_keys = (
@@ -594,27 +657,44 @@ def parse_health(data: dict[str, Any]) -> dict[str, Any]:
     # ignored (a newer server may add one).
     if "notification_listener" in d:
         _require_bool(d["notification_listener"], "health.notification_listener")
-    if "mode" in d:
+    # P1-5 (CONS-022): the extension is all-or-none. NONE of
+    # the 5 fields -> an old server, accept. ALL 5 -> a v2.0
+    # server, validate (below). SOME -> an incomplete Health
+    # response, reject: a v2.0 server that omits part of the
+    # extension is a protocol error, not a half-old server.
+    present = [f for f in HEALTH_EXTENSION_FIELDS if f in d]
+    if present and len(present) != len(HEALTH_EXTENSION_FIELDS):
+        raise ProtocolError(
+            f"health has an incomplete extension: present={sorted(present)}; "
+            f"expected all of {list(HEALTH_EXTENSION_FIELDS)} or none")
+    # P1-3 (CONS-022): tailscale_ips_bound (the bound-at-start
+    # list) is an additional optional field, NOT part of the
+    # all-or-none set — the frozen v2.2.0 server does not send
+    # it, and an old server omits it too.
+    if "tailscale_ips_bound" in d:
+        bound = d["tailscale_ips_bound"]
+        if not isinstance(bound, list):
+            raise ProtocolError("health.tailscale_ips_bound must be a list")
+        for ip in bound:
+            _require_str(ip, "health.tailscale_ips_bound[]")
+    if len(present) == len(HEALTH_EXTENSION_FIELDS):
         _require_enum(d["mode"], "health.mode", HEALTH_MODES)
-    if "overall_status" in d:
         _require_enum(d["overall_status"], "health.overall_status",
                       HEALTH_OVERALL_STATUSES)
-    if "modules" in d:
         modules = _require_dict(d["modules"], "health.modules")
         for key, allowed in HEALTH_MODULE_VALUES.items():
             if key in modules:
                 _require_enum(modules[key], f"health.modules.{key}", allowed)
-    if "capabilities" in d:
         caps = _require_dict(d["capabilities"], "health.capabilities")
         for key in HEALTH_CAPABILITY_KEYS:
             if key in caps:
                 _require_bool(caps[key], f"health.capabilities.{key}")
-    if "tailscale_ips" in d:
         ips = d["tailscale_ips"]
         if not isinstance(ips, list):
             raise ProtocolError("health.tailscale_ips must be a list")
         for ip in ips:
             _require_str(ip, "health.tailscale_ips[]")
+        _validate_health_cross_fields(d, modules, caps)
     return dict(d)
 
 

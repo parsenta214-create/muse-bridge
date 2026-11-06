@@ -718,7 +718,20 @@ public class HttpBridgeServer {
                 boolean listenerConnected =
                         BridgeNotificationListener.getInstance() != null;
                 String mode = currentMode(a11yOn);
-                List<String> tailscaleIps = boundTailscaleIps();
+                // P1-3 (CONS-022): tailscale_ips is the CURRENT
+                // Tailscale IPv4s, re-fetched on each /health
+                // call (MainActivity.findTailscaleIps). The
+                // bound-at-start list (boundTailscaleIps) goes
+                // stale if Tailscale reassigns the IP after
+                // start; it is reported separately as
+                // tailscale_ips_bound so the VM can see a
+                // mismatch (bound != current) and know the
+                // server needs a re-bind. Re-bind itself stays
+                // P1/future — this fix only makes the staleness
+                // visible instead of reporting a stale IP as
+                // current.
+                List<String> tailscaleIps = MainActivity.findTailscaleIps();
+                List<String> boundIps = boundTailscaleIps();
                 JSONObject modules = buildModules(a11yOn, listenerGranted,
                         listenerConnected, tailscaleIps);
                 JSONObject caps = buildCapabilities(a11yOn, listenerGranted,
@@ -737,7 +750,8 @@ public class HttpBridgeServer {
                         .put("overall_status", overall)
                         .put("modules", modules)
                         .put("capabilities", caps)
-                        .put("tailscale_ips", new JSONArray(tailscaleIps)));
+                        .put("tailscale_ips", new JSONArray(tailscaleIps))
+                        .put("tailscale_ips_bound", new JSONArray(boundIps)));
             } else if ("/capture_screen".equals(path)) {
                 if (svc == null) {
                     status = 503;
@@ -2033,7 +2047,11 @@ public class HttpBridgeServer {
         return MainActivity.getPersistedMode(context);
     }
 
-    /** P0-3 (v2.0): per-module status for /health. */
+    /** P0-3 (v2.0): per-module status for /health. The
+     * tailscaleIps argument is the CURRENT Tailscale IPv4s
+     * (P1-3, CONS-022) — tailscale is HEALTHY when the phone
+     * currently has a Tailscale address, UNAVAILABLE when it
+     * has none. */
     private JSONObject buildModules(boolean a11yOn, boolean listenerGranted,
                                     boolean listenerConnected,
                                     List<String> tailscaleIps)
@@ -2064,7 +2082,14 @@ public class HttpBridgeServer {
      * is best-effort, never guaranteed. `foreground_verification`
      * is true when a11y is ON (the service can verify the
      * foreground package) and false when it is OFF (UsageStats
-     * verification is P1). */
+     * verification is P1).
+     * P1-4 (CONS-022): `install_apk` is true only when the app
+     * can actually request installs — PackageManager.
+     * canRequestPackageInstalls(), i.e. the user's "Install
+     * unknown apps" setting is on for this app. The old code
+     * returned true unconditionally, but the manifest
+     * REQUEST_INSTALL_PACKAGES declaration alone does not make
+     * an install possible. */
     private JSONObject buildCapabilities(boolean a11yOn, boolean listenerGranted,
                                          boolean listenerConnected)
             throws org.json.JSONException {
@@ -2072,6 +2097,8 @@ public class HttpBridgeServer {
         NotificationManager nm = (NotificationManager)
                 context.getSystemService(Context.NOTIFICATION_SERVICE);
         boolean notificationPost = nm != null && nm.areNotificationsEnabled();
+        boolean canInstallApk =
+                context.getPackageManager().canRequestPackageInstalls();
         return new JSONObject()
                 .put("screenshot", a11yOn)
                 .put("tap", a11yOn)
@@ -2083,7 +2110,7 @@ public class HttpBridgeServer {
                 .put("launch_app", true)
                 .put("launch_app_guaranteed", false)
                 .put("foreground_verification", a11yOn)
-                .put("install_apk", true);
+                .put("install_apk", canInstallApk);
     }
 
     /** P0-3 (v2.0): the overall status for /health. CRITICAL is
@@ -2103,7 +2130,12 @@ public class HttpBridgeServer {
     /** P0-3 (v2.0): the bound non-loopback addresses (the 100.*
      * Tailscale addresses from bindAddresses()). 127.0.0.1 is
      * excluded. Bound-at-start: the list goes stale if Tailscale
-     * assigns a new IP afterwards (re-bind is P1). */
+     * assigns a new IP afterwards (re-bind is P1). P1-3
+     * (CONS-022): /health reports this list separately as
+     * tailscale_ips_bound, while tailscale_ips carries the
+     * CURRENT addresses — so the VM can see a mismatch
+     * (bound != current) instead of mistaking a stale IP for
+     * the current one. */
     public synchronized List<String> boundTailscaleIps() {
         List<String> out = new ArrayList<>();
         for (ServerSocket ss : listeners) {
