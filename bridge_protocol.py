@@ -638,6 +638,21 @@ def _validate_health_cross_fields(d: dict, modules: dict, caps: dict) -> None:
         raise ProtocolError(
             "health.modules.tailscale is UNAVAILABLE but "
             "health.tailscale_ips is not empty")
+    # A DEGRADED Tailscale module means the server is bound to a
+    # different IP than the current one (P1-3): the overall
+    # status must be DEGRADED too, and there must be a current
+    # IP to be stale against (CONS-030). The Java server always
+    # sets overall DEGRADED in this case; the validator enforces
+    # the same contract.
+    if modules["tailscale"] == "DEGRADED":
+        if d.get("overall_status") != "DEGRADED":
+            raise ProtocolError(
+                "health.modules.tailscale is DEGRADED but "
+                "health.overall_status is not DEGRADED")
+        if not d.get("tailscale_ips"):
+            raise ProtocolError(
+                "health.modules.tailscale is DEGRADED but "
+                "health.tailscale_ips is empty")
     # P0-4: a launch is never guaranteed — in a complete v2.0
     # response the key must be present AND false (CONS-029 P1-5
     # problem 2: a missing key used to pass).
@@ -648,11 +663,20 @@ def _validate_health_cross_fields(d: dict, modules: dict, caps: dict) -> None:
     if caps["launch_app_guaranteed"] is not False:
         raise ProtocolError(
             "health.capabilities.launch_app_guaranteed must be False")
-    # Foreground verification needs the service to be connected.
-    if caps.get("foreground_verification") is True and a11y_mod != "ENABLED":
+    # Foreground verification is true exactly when the service
+    # is connected (P0 spec §4; CONS-030): the key is required
+    # and must equal expected_a11y in BOTH directions — the
+    # earlier check only rejected True-when-disabled, so a
+    # FULL_ACCESS body with foreground_verification=false (or a
+    # missing key) passed.
+    if "foreground_verification" not in caps:
         raise ProtocolError(
-            "health.capabilities.foreground_verification is True but "
-            f"health.modules.accessibility is {a11y_mod!r}")
+            "health.capabilities.foreground_verification is required "
+            "in a complete v2.0 Health response")
+    if caps["foreground_verification"] is not expected_a11y:
+        raise ProtocolError(
+            "health.capabilities.foreground_verification does not "
+            "match accessibility state")
 
 
 def parse_health(data: dict[str, Any]) -> dict[str, Any]:

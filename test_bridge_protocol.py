@@ -1111,6 +1111,53 @@ class TestParseHealthP1(unittest.TestCase):
                      "termux_ssh": "UNKNOWN"})
         self.assertEqual(parse_health(body), body)
 
+    def test_parse_health_foreground_verification_bidirectional(self) -> None:
+        """CONS-030: foreground_verification is required and
+        must equal the a11y state in BOTH directions (P0 spec
+        §4: true iff a11y is ON)."""
+        # FULL_ACCESS + foreground_verification=false → reject.
+        caps = dict(_v2_health_body()["capabilities"])
+        caps["foreground_verification"] = False
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(capabilities=caps))
+        # FULL_ACCESS + foreground_verification missing → reject.
+        caps = self._without(_v2_health_body()["capabilities"],
+                              "foreground_verification")
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(capabilities=caps))
+        # MINIMAL + foreground_verification=true → reject.
+        body = _v2_health_body_minimal()
+        caps = dict(body["capabilities"])
+        caps["foreground_verification"] = True
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body_minimal(capabilities=caps))
+        # MINIMAL + foreground_verification=false → accept.
+        self.assertEqual(parse_health(_v2_health_body_minimal()),
+                         _v2_health_body_minimal())
+
+    def test_parse_health_tailscale_degraded_requires_degraded_overall(self) -> None:
+        """CONS-030: modules.tailscale DEGRADED requires
+        overall_status DEGRADED and a non-empty tailscale_ips."""
+        degraded_modules = {"http": "HEALTHY", "tailscale": "DEGRADED",
+                            "accessibility": "ENABLED",
+                            "notification_access": "GRANTED",
+                            "termux_ssh": "UNKNOWN"}
+        # DEGRADED + overall HEALTHY → reject.
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(
+                overall_status="HEALTHY", modules=degraded_modules))
+        # DEGRADED + overall DEGRADED + no IPs → reject.
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(
+                overall_status="DEGRADED", modules=degraded_modules,
+                tailscale_ips=[]))
+        # DEGRADED + overall DEGRADED + IP present → accept.
+        self.assertEqual(
+            parse_health(_v2_health_body(
+                overall_status="DEGRADED", modules=degraded_modules)),
+            _v2_health_body(
+                overall_status="DEGRADED", modules=degraded_modules))
+
     def test_parse_health_install_apk_permitted_optional(self) -> None:
         """CONS-029 P1-4 fix: install_apk_permitted is an
         optional boolean capability — accepted when present
