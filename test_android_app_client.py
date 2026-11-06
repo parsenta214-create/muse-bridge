@@ -1953,6 +1953,110 @@ def test_p1_03_request_log_never_carries_arbitrary_path():
     assert 'KNOWN_PATHS.contains(path) ? path : "UNKNOWN"' in helper
 
 
+def test_p2_01_launch_baseline_after_pre_read():
+    """P2-01 (CONS-028, step 3): the /launch_app verification
+    baseline (requestTimeMs) must be captured just before
+    startActivity() — AFTER the pre-foreground read and BEFORE
+    launchApp() — so the up-to-500 ms pre-read no longer eats
+    into the ~3 s post-launch verification window. Source-level
+    guard: ordering of the three statements inside the
+    /launch_app handler region."""
+    src = _java_source("HttpBridgeServer.java")
+    start = src.index('"/launch_app".equals(path)')
+    end = src.index('} else if ("/open".equals(path)', start)
+    region = src[start:end]
+    pre = region.index("foregroundPackageSafe(svc,")
+    base = region.index(
+        "long requestTimeMs = android.os.SystemClock.elapsedRealtime();")
+    launch = region.index("boolean issued = launchApp(pkg);")
+    assert pre < base < launch, (pre, base, launch)
+
+
+def test_p2_03_launch_state_is_request_local():
+    """P2-03 (CONS-028, step 3): the launch flow's per-request
+    state must be request-local, never shared instance state —
+    that is the property that makes concurrent launches and a
+    mid-verification disconnect safe (each request's
+    verification is tied to its own timestamp + package).
+    Source-level guard: (1) requestTimeMs, wasForeground and
+    issued are declared as locals inside the /launch_app
+    handler; (2) none of them is an instance field; (3)
+    verifyLaunchForeground receives all per-request state as
+    parameters; (4) foregroundPackageSafe tolerates a dead
+    service (any exception -> null, a missed poll, never a
+    crash or false success).
+
+    HONEST LIMIT: there is no Java test harness in this
+    project (manual aapt2/javac/d8 build, no Gradle, Android
+    APIs are unavailable on the JVM), so no Java unit or
+    Instrumentation test can run here. This guard proves the
+    structural property in the source; actual concurrent
+    behaviour is covered by the Python mock tests
+    (test_app_launch_app_concurrent,
+    test_app_launch_app_disconnect_during_verification) and
+    still needs live-phone disconnect testing.
+    """
+    import re
+    src = _java_source("HttpBridgeServer.java")
+    # (1) locals inside the handler.
+    start = src.index('"/launch_app".equals(path)')
+    end = src.index('} else if ("/open".equals(path)', start)
+    region = src[start:end]
+    assert ("long requestTimeMs = android.os.SystemClock.elapsedRealtime();"
+            in region)
+    assert "boolean wasForeground = svc != null" in region
+    assert "boolean issued = launchApp(pkg);" in region
+    # (2) none of them is an instance field (a field
+    # declaration ends with ';' and has no initializer).
+    for name, typ in (("requestTimeMs", "long"),
+                      ("wasForeground", "boolean"),
+                      ("issued", "boolean")):
+        assert not re.search(
+            rf"^\s*(private\s+)?(static\s+)?(final\s+)?{typ}\s+{name}\s*;",
+            src, re.MULTILINE), name
+    # (3) verifyLaunchForeground takes the state as parameters.
+    sig = src[src.index("private JSONObject verifyLaunchForeground("):]
+    sig = sig[:sig.index("{")]
+    assert "String pkg" in sig
+    assert "BridgeAccessibilityService svc" in sig
+    assert "long requestTimeMs" in sig
+    assert "boolean wasForeground" in sig
+    # (4) a dead service degrades to a missed poll, not a throw.
+    fg = src[src.index("private String foregroundPackageSafe("):]
+    fg = fg[:fg.index("private static JSONObject launchResultJson(")]
+    assert "if (svc == null) {\n            return null;\n        }" in fg
+    assert "} catch (Exception e) {" in fg
+    assert "return null;" in fg
+
+
+def test_p2_service_unavailable_detail_names_endpoint():
+    """CONS-022 P2 (step 3): the shared ServiceUnavailable catch
+    must name the endpoint in its detail — a caller can then
+    tell WHICH endpoint was unavailable, like the three inline
+    checks (/capture_screen, /state, /events) already do. The
+    real server used to send the bare generic detail
+    ("accessibility service is not enabled") from the catch
+    while the mock already modelled the per-endpoint detail.
+    Source-level guard: the catch's unavailableJson call
+    interpolates loggablePath(path) and the bare generic detail
+    is gone from the catch. The client side is covered by the
+    mock test test_app_a11y_off_structured_503, which asserts
+    the endpoint path appears in the raised
+    AccessibilityUnavailableError."""
+    src = _java_source("HttpBridgeServer.java")
+    start = src.index("} catch (ServiceUnavailable e) {")
+    end = src.index(
+        "} catch (BridgeAccessibilityService.ServiceTimeoutException e) {",
+        start)
+    region = src[start:end]
+    assert "loggablePath(path)" in region
+    assert ('unavailableJson("accessibility service is not enabled; "'
+            in region)
+    assert '" needs FULL_ACCESS"))' in region
+    assert ('unavailableJson("accessibility service is not enabled")'
+            not in region)
+
+
 # --------------------------------------------------------------------------
 # Decision 69: launch_app (v1.9.12).
 # --------------------------------------------------------------------------

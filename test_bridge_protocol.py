@@ -637,6 +637,25 @@ class TestParseFunctionsInvalid(unittest.TestCase):
             parse_health(_v2_health_body(tailscale_ips="100.111.74.42"))
         with self.assertRaises(ProtocolError):
             parse_health(_v2_health_body(tailscale_ips=[123]))
+        # CONS-031 follow-up (step 3): each IP must be a
+        # non-empty IPv4 dotted quad — [""] used to pass the
+        # non-empty check, and junk strings passed the type
+        # check. The same applies to tailscale_ips_bound.
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips=[""]))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips=["not-an-ip"]))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips=["999.1.1.1"]))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips=["100.111.74.42", ""]))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips_bound=[""]))
+        with self.assertRaises(ProtocolError):
+            parse_health(_v2_health_body(tailscale_ips_bound=["1.2.3"]))
+        # Two real IPv4 addresses are still accepted.
+        parse_health(_v2_health_body(
+            tailscale_ips=["100.111.74.42", "100.85.138.44"]))
         # Unknown keys inside modules/capabilities are ignored.
         ok = _v2_health_body(
             modules={"http": "HEALTHY", "tailscale": "HEALTHY",
@@ -708,6 +727,16 @@ class TestParseFunctionsInvalid(unittest.TestCase):
             parse_launch_app(no_reason)
         with self.assertRaises(ProtocolError):
             parse_launch_app(dict(no_reason, reason="BLOCKED_BY_MAGIC"))
+        # P2-02 (CONS-028, step 3): accepted / launch_requested
+        # must be True, not merely bools — the server hardcodes
+        # both to True, so a False is a malformed body.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(base, accepted=False))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(base, launch_requested=False))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(no_reason, accepted=False,
+                                  reason="FOREGROUND_NOT_CONFIRMED"))
 
     def test_parse_launch_app_combination(self) -> None:
         """P0-4 fix (CONS-027 P1 #2): only the three

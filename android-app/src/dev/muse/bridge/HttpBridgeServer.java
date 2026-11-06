@@ -1288,17 +1288,20 @@ public class HttpBridgeServer {
                 // name when no label exists).
                 opGeneration = noteOperation(lifecycleGeneration, "アプリを起動中：" + operationAppLabel(pkg));
                 try {
-                    // P0-4: record the request time BEFORE issuing
-                    // the start, and note whether the target is
-                    // already in front — the verification below only
-                    // counts observations after this request.
-                    // P0-4 fix (CONS-027 P2 #5): elapsedRealtime
-                    // (monotonic) — the window is a duration, so a
-                    // wall-clock correction must not move it. The
+                    // P0-4: note whether the target is already in
+                    // front — the verification below only counts
+                    // observations after this request. The
                     // pre-request read is bounded (500 ms): it is
                     // informational only and must not delay the
                     // launch on a main-thread stall.
-                    long requestTimeMs = android.os.SystemClock.elapsedRealtime();
+                    // P0-4 fix (CONS-027 P2 #5): elapsedRealtime
+                    // (monotonic) — the window is a duration, so a
+                    // wall-clock correction must not move it.
+                    // P2-01 (CONS-028): the verification baseline
+                    // is captured just before startActivity(),
+                    // not before the pre-foreground read — the
+                    // read can take up to 500 ms, which used to
+                    // eat into the ~3 s post-launch window.
                     boolean wasForeground = svc != null
                             && pkg.equals(foregroundPackageSafe(svc,
                                     LAUNCH_PRE_READ_TIMEOUT_MS));
@@ -1307,6 +1310,7 @@ public class HttpBridgeServer {
                         // log — the launch answer to the VM names it.
                         BridgeLog.log("launch_already_foreground", "");
                     }
+                    long requestTimeMs = android.os.SystemClock.elapsedRealtime();
                     boolean issued = launchApp(pkg);
                     if (!issued) {
                         status = 503;
@@ -1709,10 +1713,18 @@ public class HttpBridgeServer {
         } catch (ServiceUnavailable e) {
             // P0-1 (v2.0): the structured "a11y off" body — one
             // edit covers all requireService endpoints.
+            // CONS-022 P2: the detail names the endpoint, like
+            // the three inline checks do — a caller can tell
+            // WHICH endpoint was unavailable. loggablePath()
+            // keeps the P1-03 invariant (a raw request target
+            // never leaves the server); the catch can only fire
+            // for known requireService endpoints, so the name
+            // is always real here.
             status = 503;
             try {
                 sendJson(conn.getOutputStream(), status,
-                        unavailableJson("accessibility service is not enabled"));
+                        unavailableJson("accessibility service is not enabled; "
+                                + loggablePath(path) + " needs FULL_ACCESS"));
             } catch (Exception ignored) {
             }
         } catch (BridgeAccessibilityService.ServiceTimeoutException e) {

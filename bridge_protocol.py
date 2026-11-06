@@ -6,6 +6,7 @@ Pure standard-library implementation with no network or socket operations.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import math
 import time
@@ -153,6 +154,24 @@ def _require_str(value: Any, name: str, *, non_empty: bool = False) -> str:
     if non_empty and not value.strip():
         raise ProtocolError(f"{name} must not be empty")
     return value
+
+
+def _require_ipv4(value: Any, name: str) -> str:
+    """Require a non-empty IPv4 dotted-quad string (CONS-031
+    follow-up, step 3): tailscale_ips used to accept [""] because
+    _require_str was called without non_empty=True, and a bare
+    string check cannot tell an address from junk. The server
+    builds these lists from real network interfaces, the frozen
+    v2.2.0 server sends real IPv4 addresses, and v1.9.x sends
+    no extension fields at all — so strict IPv4 validation
+    cannot reject a real server response."""
+    text = _require_str(value, name, non_empty=True)
+    try:
+        ipaddress.IPv4Address(text)
+    except ValueError:
+        raise ProtocolError(
+            f"{name} must be an IPv4 address (got {text!r})") from None
+    return text
 
 
 def _require_optional_str(value: Any, name: str) -> str | None:
@@ -734,7 +753,7 @@ def parse_health(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(bound, list):
             raise ProtocolError("health.tailscale_ips_bound must be a list")
         for ip in bound:
-            _require_str(ip, "health.tailscale_ips_bound[]")
+            _require_ipv4(ip, "health.tailscale_ips_bound[]")
     # TARMUX_KICKASS step 1 (v2.4.0): local sshd diagnosis is an
     # additional optional field like tailscale_ips_bound — old
     # servers omit it. When present it must be a complete
@@ -765,7 +784,7 @@ def parse_health(data: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(ips, list):
             raise ProtocolError("health.tailscale_ips must be a list")
         for ip in ips:
-            _require_str(ip, "health.tailscale_ips[]")
+            _require_ipv4(ip, "health.tailscale_ips[]")
         _validate_health_cross_fields(d, modules, caps)
     return dict(d)
 
@@ -785,7 +804,10 @@ def parse_launch_app(data: dict[str, Any]) -> dict[str, Any]:
     (failures stay HTTP 422/503 in the old format), so no 200
     body may carry those statuses. Extra keys (e.g.
     "transport" added by the adapter) are tolerated, as in
-    parse_health."""
+    parse_health. P2-02 (CONS-028, step 3): accepted and
+    launch_requested must be True, not merely bools - the
+    server hardcodes both to True in launchResultJson, so a
+    False here is a malformed body, never a real outcome."""
     d = _require_dict(data, "launch_app")
     for key in ("ok", "status", "accepted", "package",
                 "launch_requested", "foreground_confirmed", "verification"):
@@ -797,9 +819,12 @@ def parse_launch_app(data: dict[str, Any]) -> dict[str, Any]:
     if ok != (status == "launched"):
         raise ProtocolError(
             "launch_app.ok must be True exactly when status is 'launched'")
-    _require_bool(d["accepted"], "launch_app.accepted")
+    if _require_bool(d["accepted"], "launch_app.accepted") is not True:
+        raise ProtocolError("launch_app.accepted must be True")
     _require_str(d["package"], "launch_app.package", non_empty=True)
-    _require_bool(d["launch_requested"], "launch_app.launch_requested")
+    if _require_bool(d["launch_requested"],
+                     "launch_app.launch_requested") is not True:
+        raise ProtocolError("launch_app.launch_requested must be True")
     fg = d["foreground_confirmed"]
     if fg is not None:
         _require_bool(fg, "launch_app.foreground_confirmed")
