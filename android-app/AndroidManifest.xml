@@ -15,6 +15,16 @@
          The user must also allow "Install unknown apps" for
          Muse Bridge in Settings (a Settings-side approval). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Decision 95 (v2.5.0, TARMUX_KICKASS step 2): Termux's
+         RUN_COMMAND permission — a dangerous permission defined
+         by Termux itself. The Bridge needs it to send the fixed
+         repair commands (termux-wake-lock, sshd) to Termux via
+         RunCommandService. Declaring it is not enough: the user
+         must grant it in person (MainActivity asks on launch,
+         or Settings > Apps > Muse Bridge > Permissions), and
+         Termux must allow external apps (allow-external-apps).
+         Without it POST /repair_termux answers 403. -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
 
     <!-- Decision 70 (v1.9.13): Android 11+ package visibility —
          without this, getLaunchIntentForPackage() returns null for

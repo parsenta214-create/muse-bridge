@@ -538,6 +538,17 @@ class MockAppHandler(BaseHTTPRequestHandler):
                 "package": pkg, "launch_requested": True,
                 "foreground_confirmed": True,
                 "verification": "accessibility"})
+        if self.path == "/repair_termux":
+            # Decision 95 (v2.5.0): the mock always answers a
+            # repaired report — the client test pins the
+            # request shape and the parsing, not the phone.
+            return self._send_json(200, {
+                "ok": True, "repaired": True, "reason": "REPAIRED",
+                "termux_sshd_local": {
+                    "reachable": True,
+                    "banner": "SSH-2.0-OpenSSH_10.2",
+                    "latency_ms": 12, "error": ""},
+                "steps": ["termux-wake-lock", "sshd"]})
         return self._send_json(200, {"ok": True, "echo": payload})
 
 
@@ -1622,6 +1633,34 @@ def test_app_launch_app_needs_gate(mock_app):
     adapter = ab.AndroidAdapter(actions_enabled=False)
     with pytest.raises(PermissionError):
         adapter.launch_app("com.twitter.android")
+
+
+# --------------------------------------------------------------------------
+# Decision 95: repair_termux (v2.5.0, TARMUX_KICKASS step 2).
+# --------------------------------------------------------------------------
+
+def test_app_repair_termux(mock_app):
+    """Decision 95: repair_termux posts the fixed action only —
+    no command, path or argument is ever sent — and the
+    repaired report parses."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.repair_termux()
+    assert result["ok"] is True
+    assert result["repaired"] is True
+    assert result["reason"] == "REPAIRED"
+    assert result["termux_sshd_local"]["reachable"] is True
+    assert result["steps"] == ["termux-wake-lock", "sshd"]
+    assert result["transport"] == "app"
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/repair_termux", {"action": "sshd"}) in posts
+
+
+def test_app_repair_termux_needs_gate(mock_app):
+    """Decision 95: repair_termux restarts sshd on the phone,
+    so it needs --allow-actions like any other action."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(PermissionError):
+        adapter.repair_termux()
 
 
 # --------------------------------------------------------------------------

@@ -745,6 +745,22 @@ class AndroidAdapter:
         return bridge_protocol.parse_launch_app(
             self._app_post("/launch_app", {"package": package}))
 
+    def repair_termux(self) -> dict:
+        """Repair Termux's sshd (Decision 95, v2.5.0, TARMUX_KICKASS
+        step 2): POST /repair_termux. The bridge sends only its two
+        fixed commands (termux-wake-lock, then sshd) to Termux via
+        RUN_COMMAND and re-checks sshd locally; the answer is
+        validated by bridge_protocol.parse_repair_termux — {"ok":
+        true, "repaired": true, "reason": "REPAIRED"} only when
+        sshd answers locally after the attempt. No command, path
+        or argument is ever sent from here. 403 when the
+        RUN_COMMAND permission is not granted on the phone;
+        409 inside the 60 s repair cooldown. Gated by
+        --allow-actions, never retried."""
+        self._require_actions("repair_termux()")
+        return bridge_protocol.parse_repair_termux(
+            self._app_post("/repair_termux", {"action": "sshd"}))
+
     def open(self, uri: str) -> dict:
         """Open a URI with ACTION_VIEW (decision 74, v1.9.15):
         POST /open. A web URL, or an app's deep link when the

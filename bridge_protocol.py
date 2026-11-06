@@ -220,6 +220,12 @@ HEALTH_CAPABILITY_KEYS = (
     # it) — "Android permits starting an install request"
     # (canRequestPackageInstalls), independent of install_apk.
     "install_apk_permitted",
+    # Decision 95 (v2.5.0): repair_termux is an OPTIONAL
+    # boolean capability — "the endpoint exists"; and
+    # repair_termux_permitted — "the RUN_COMMAND permission
+    # is granted", independent of the endpoint existing.
+    "repair_termux",
+    "repair_termux_permitted",
 )
 
 # P1-5 (CONS-022): the /health extension fields. All-or-none:
@@ -729,6 +735,20 @@ def parse_health(data: dict[str, Any]) -> dict[str, Any]:
             raise ProtocolError("health.tailscale_ips_bound must be a list")
         for ip in bound:
             _require_str(ip, "health.tailscale_ips_bound[]")
+    # TARMUX_KICKASS step 1 (v2.4.0): local sshd diagnosis is an
+    # additional optional field like tailscale_ips_bound — old
+    # servers omit it. When present it must be a complete
+    # object: reachable (bool), banner (str), latency_ms
+    # (int >= 0) and error (str).
+    if "termux_sshd_local" in d:
+        local = _require_dict(d["termux_sshd_local"],
+                              "health.termux_sshd_local")
+        _require_bool(local.get("reachable"),
+                      "health.termux_sshd_local.reachable")
+        _require_str(local.get("banner"), "health.termux_sshd_local.banner")
+        _require_int(local.get("latency_ms"),
+                     "health.termux_sshd_local.latency_ms", min_value=0)
+        _require_str(local.get("error"), "health.termux_sshd_local.error")
     if len(present) == len(HEALTH_EXTENSION_FIELDS):
         _require_enum(d["mode"], "health.mode", HEALTH_MODES)
         _require_enum(d["overall_status"], "health.overall_status",
@@ -824,6 +844,59 @@ def parse_launch_app(data: dict[str, Any]) -> dict[str, Any]:
         raise ProtocolError(
             f"launch_app.status {status!r} has no 200-body form in P0-4 "
             "(failures stay HTTP 422/503 in the old format)")
+    return dict(d)
+
+
+def parse_repair_termux(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate a POST /repair_termux 200 body (Decision 95,
+    v2.5.0, TARMUX_KICKASS step 2) and return a copy. The
+    core invariant: "ok" is True exactly when sshd answers
+    locally after the attempt ("repaired" is True exactly
+    then too, except ALREADY_RUNNING where ok is True and
+    repaired is False). "reason" is one of ALREADY_RUNNING,
+    REPAIRED or STILL_DOWN. "termux_sshd_local" is the same
+    object parse_health validates, and "steps" lists the
+    fixed commands that were sent (empty when nothing was
+    sent). 400/403/409 stay HTTP errors, not 200 bodies."""
+    d = _require_dict(data, "repair_termux")
+    for key in ("ok", "repaired", "reason", "termux_sshd_local", "steps"):
+        if key not in d:
+            raise ProtocolError(
+                f"repair_termux missing required field {key!r}")
+    ok = _require_bool(d["ok"], "repair_termux.ok")
+    repaired = _require_bool(d["repaired"], "repair_termux.repaired")
+    reason = _require_str(d["reason"], "repair_termux.reason",
+                          non_empty=True)
+    if reason not in ("ALREADY_RUNNING", "REPAIRED", "STILL_DOWN"):
+        raise ProtocolError(
+            f"repair_termux.reason has unknown value: {reason!r}")
+    if ok != (reason in ("ALREADY_RUNNING", "REPAIRED")):
+        raise ProtocolError(
+            "repair_termux.ok must be True exactly when reason is "
+            "ALREADY_RUNNING or REPAIRED")
+    if repaired != (reason == "REPAIRED"):
+        raise ProtocolError(
+            "repair_termux.repaired must be True exactly when "
+            "reason is REPAIRED")
+    local = _require_dict(d["termux_sshd_local"],
+                          "repair_termux.termux_sshd_local")
+    _require_bool(local.get("reachable"),
+                  "repair_termux.termux_sshd_local.reachable")
+    _require_str(local.get("banner"),
+                 "repair_termux.termux_sshd_local.banner")
+    _require_int(local.get("latency_ms"),
+                 "repair_termux.termux_sshd_local.latency_ms",
+                 min_value=0)
+    _require_str(local.get("error"),
+                 "repair_termux.termux_sshd_local.error")
+    if local.get("reachable") != ok:
+        raise ProtocolError(
+            "repair_termux.termux_sshd_local.reachable must match ok")
+    steps = d["steps"]
+    if not isinstance(steps, list):
+        raise ProtocolError("repair_termux.steps must be a list")
+    for step in steps:
+        _require_str(step, "repair_termux.steps[]")
     return dict(d)
 
 

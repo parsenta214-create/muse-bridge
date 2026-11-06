@@ -25,8 +25,10 @@ import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
+import java.io.InputStreamReader;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -96,6 +98,9 @@ import java.util.concurrent.TimeUnit;
  *   POST /open            {"uri":"https://example.com"} (v1.9.15)
  *   POST /install_apk     {"url":"https://...apk"} or {"path":"/...apk"} (v1.9.16)
  *   GET  /install_status  (v1.9.16)
+ *   POST /repair_termux   {"action":"sshd"} (v2.5.0, TARMUX_KICKASS step 2:
+ *                         fixed repair only — termux-wake-lock then sshd
+ *                         via Termux RUN_COMMAND, then a local re-check)
  *   GET  /clipboard       (v1.9.17)
  *   POST /clipboard       {"text":"..."} (v1.9.17)
  *   POST /notification_action {"key":"...","action":"open"|"reply","text":"..."} (v1.9.18)
@@ -191,6 +196,13 @@ public class HttpBridgeServer {
     private volatile String installStatus = "idle";
     private volatile String installDetail = "";
     private volatile boolean installRunning = false;
+
+    // Decision 95 (v2.5.0, TARMUX_KICKASS step 2): cooldown for
+    // POST /repair_termux. A repair that restarts sshd must not
+    // be spammed — one attempt per 60 s at most, so a 5-minute
+    // health loop (or a retrying client) cannot kill sshd over
+    // and over while the real fault is elsewhere.
+    private volatile long lastRepairAttemptMs = 0;
     private final BroadcastReceiver installReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context ctx, Intent intent) {
@@ -751,7 +763,8 @@ public class HttpBridgeServer {
                         .put("modules", modules)
                         .put("capabilities", caps)
                         .put("tailscale_ips", new JSONArray(tailscaleIps))
-                        .put("tailscale_ips_bound", new JSONArray(boundIps)));
+                        .put("tailscale_ips_bound", new JSONArray(boundIps))
+                        .put("termux_sshd_local", checkTermuxSshdLocal()));
             } else if ("/capture_screen".equals(path)) {
                 if (svc == null) {
                     status = 503;
@@ -1346,6 +1359,39 @@ public class HttpBridgeServer {
                     status = 200;
                     sendJson(out, status, new JSONObject().put("ok", true)
                             .put("status", "started"));
+                }
+            } else if ("/repair_termux".equals(path) && "POST".equals(method)) {
+                // Decision 95 (v2.5.0, TARMUX_KICKASS step 2):
+                // repair Termux's sshd. {"action":"sshd"} is the
+                // only accepted action (absent means "sshd");
+                // anything else is 400. No path, command or
+                // arguments are taken from the request — the two
+                // commands are hardcoded in repairTermuxSshd().
+                // 403 when the RUN_COMMAND permission is not
+                // granted yet; 409 inside the 60 s cooldown.
+                // Always 200 for a completed attempt: "ok" is
+                // true exactly when sshd answers locally after
+                // the attempt (see repairTermuxSshd()).
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                String action = j.optString("action", "sshd");
+                if (!"sshd".equals(action)) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "unknown action: " + action));
+                } else if (!canRunTermuxCommands()) {
+                    status = 403;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "RUN_COMMAND permission not granted — "
+                                    + "open Muse Bridge and allow it, or grant it "
+                                    + "in Settings > Apps > Muse Bridge > Permissions"));
+                } else if (System.currentTimeMillis() - lastRepairAttemptMs < 60000) {
+                    status = 409;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "repair attempted recently, wait 60s"));
+                } else {
+                    lastRepairAttemptMs = System.currentTimeMillis();
+                    status = 200;
+                    sendJson(out, status, repairTermuxSshd());
                 }
             } else if ("/batch".equals(path) && "POST".equals(method)) {
                 // Phase 2 (A-4): several actions in one request
@@ -2135,7 +2181,9 @@ public class HttpBridgeServer {
                 .put("launch_app_guaranteed", false)
                 .put("foreground_verification", a11yOn)
                 .put("install_apk", true)
-                .put("install_apk_permitted", canInstallApk);
+                .put("install_apk_permitted", canInstallApk)
+                .put("repair_termux", true)
+                .put("repair_termux_permitted", canRunTermuxCommands());
     }
 
     /** P0-3 (v2.0): the overall status for /health. CRITICAL is
@@ -2154,6 +2202,134 @@ public class HttpBridgeServer {
             return "DEGRADED";
         }
         return "HEALTHY";
+    }
+
+    /**
+     * TARMUX_KICKASS step 1 — local Termux sshd diagnosis.
+     * "TARMUX_KICKASS" is the working name Saardeim gave this
+     * work: TERMUX, kicked back to life. Step 1 does NOT kick
+     * anything — it only checks, from inside the phone, whether
+     * Termux's sshd is listening on 127.0.0.1:8022, by opening
+     * a local socket and reading its SSH banner. That separates
+     * the two causes of a VM-side termux_ssh failure: if this
+     * is reachable, sshd is alive and the tunnel proxy / port
+     * 8022 path is the culprit; if it is not, sshd itself is
+     * down and a later RUN_COMMAND repair would have something
+     * to fix. Never fails /health: any error is reported in
+     * the returned object. Worst case ~2 s (1 s connect +
+     * 1 s banner read); a refused connection or a live sshd
+     * answers in milliseconds.
+     */
+    private JSONObject checkTermuxSshdLocal() throws org.json.JSONException {
+        long t0 = android.os.SystemClock.elapsedRealtime();
+        boolean reachable = false;
+        String banner = "";
+        String error = "";
+        try (Socket sock = new Socket()) {
+            sock.connect(new InetSocketAddress("127.0.0.1", 8022), 1000);
+            sock.setSoTimeout(1000);
+            BufferedReader in = new BufferedReader(
+                    new InputStreamReader(sock.getInputStream(),
+                            StandardCharsets.UTF_8));
+            String line = in.readLine();
+            if (line != null && line.startsWith("SSH-")) {
+                reachable = true;
+                banner = line.length() > 80 ? line.substring(0, 80) : line;
+            } else {
+                error = "no SSH banner" + (line == null ? " (EOF)" : "");
+                if (line != null && !line.isEmpty()) {
+                    banner = line.length() > 80 ? line.substring(0, 80) : line;
+                }
+            }
+        } catch (Exception e) {
+            String msg = e.getMessage();
+            error = e.getClass().getSimpleName()
+                    + (msg == null ? "" : ": " + msg);
+        }
+        long ms = android.os.SystemClock.elapsedRealtime() - t0;
+        return new JSONObject()
+                .put("reachable", reachable)
+                .put("banner", banner)
+                .put("latency_ms", ms)
+                .put("error", error);
+    }
+
+    /** Decision 95 (v2.5.0, TARMUX_KICKASS step 2): whether
+     * this app may send RUN_COMMAND intents to Termux. The
+     * permission is declared in the manifest and must be
+     * granted by the user in person; MainActivity asks for it
+     * on launch. */
+    private boolean canRunTermuxCommands() {
+        return context.checkSelfPermission("com.termux.permission.RUN_COMMAND")
+                == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Decision 95: send ONE fixed command to Termux via
+     * RunCommandService, in the background (no Termux tab
+     * opens, no screen change). Only the two call sites in
+     * repairTermuxSshd() use this — the path and arguments
+     * are hardcoded there, never taken from a request, so
+     * the endpoint cannot be turned into arbitrary shell
+     * execution. startForegroundService is used because the
+     * caller is a foreground service; startService is the
+     * fallback if that throws. */
+    private void sendTermuxRunCommand(String path, String[] args) {
+        Intent intent = new Intent("com.termux.RUN_COMMAND");
+        intent.setClassName("com.termux", "com.termux.app.RunCommandService");
+        intent.putExtra("com.termux.RUN_COMMAND_PATH", path);
+        intent.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", args);
+        intent.putExtra("com.termux.RUN_COMMAND_WORKDIR",
+                "/data/data/com.termux/files/home");
+        intent.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
+        intent.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0");
+        try {
+            context.startForegroundService(intent);
+        } catch (Exception e) {
+            context.startService(intent);
+        }
+    }
+
+    /** Decision 95: repair Termux's sshd, fixed steps only.
+     * 1. If sshd is already reachable locally, do nothing
+     *    and report ALREADY_RUNNING.
+     * 2. Otherwise send termux-wake-lock, then sshd, each as
+     *    a background RUN_COMMAND intent.
+     * 3. Wait 2 s, re-check locally, and report the result.
+     * The result is honest by construction: "ok" is true
+     * exactly when sshd answers locally after the attempt.
+     * Returns a repair report object. */
+    private JSONObject repairTermuxSshd() throws org.json.JSONException {
+        JSONObject before = checkTermuxSshdLocal();
+        if (before.optBoolean("reachable", false)) {
+            return new JSONObject()
+                    .put("ok", true)
+                    .put("repaired", false)
+                    .put("reason", "ALREADY_RUNNING")
+                    .put("termux_sshd_local", before)
+                    .put("steps", new JSONArray());
+        }
+        sendTermuxRunCommand(
+                "/data/data/com.termux/files/usr/bin/termux-wake-lock",
+                new String[0]);
+        sendTermuxRunCommand(
+                "/data/data/com.termux/files/usr/bin/sshd",
+                new String[0]);
+        try {
+            Thread.sleep(2000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        JSONObject after = checkTermuxSshdLocal();
+        boolean repaired = after.optBoolean("reachable", false);
+        JSONArray steps = new JSONArray();
+        steps.put("termux-wake-lock");
+        steps.put("sshd");
+        return new JSONObject()
+                .put("ok", repaired)
+                .put("repaired", repaired)
+                .put("reason", repaired ? "REPAIRED" : "STILL_DOWN")
+                .put("termux_sshd_local", after)
+                .put("steps", steps);
     }
 
     /** P0-3 (v2.0): the bound non-loopback addresses (the 100.*

@@ -2124,6 +2124,64 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     disconnect direct test). After freezing,
     never edit a frozen file directly — make
     a new version.
+94. TARMUX_KICKASS step 1, trial build v2.4.0 /
+    code 37 (2026-11-06 23:18 +07, Saardeim
+    decision "ローカル診断を作ろう"): local
+    Termux sshd diagnosis only — NO repair,
+    no RUN_COMMAND, no screen operation.
+    /health gains "termux_sshd_local"
+    {reachable, banner, latency_ms, error}:
+    the Bridge app opens a local socket to
+    127.0.0.1:8022 and reads the SSH banner
+    (1 s connect + 1 s read timeout, never
+    fails /health). VM side: bridge_protocol
+    validates the field as optional (old
+    servers omit it), and bridge_health_check
+    stores it plus a "termux_diagnosis"
+    string (sshd alive locally = proxy/port
+    8022 fault; sshd down locally = repair
+    would help; old app = not available).
+    "TARMUX_KICKASS" is Saardeim's working
+    name for the Termux kick-back-to-life
+    work; step 1 only diagnoses. Full Python
+    suite 269 passed (18 subtests). APK
+    v2.4.0 / code 37, SHA-256 a6171b32….
+    NOT frozen, NOT live-verified: Saardeim
+    installs by hand (SSH push is down with
+    termux_ssh), then live check is /health
+    termux_sshd_local vs VM termux_ssh.
+95. TARMUX_KICKASS step 2, trial build v2.5.0 /
+    code 38 (2026-11-06 23:26 +07, Saardeim
+    decision "RUN_COMMAND修復を作って"):
+    POST /repair_termux {"action":"sshd"}.
+    Fixed commands only — termux-wake-lock
+    then sshd, sent as background
+    RUN_COMMAND intents to Termux, then a
+    local re-check; "ok" is true exactly
+    when sshd answers locally afterwards
+    (REPAIRED / ALREADY_RUNNING / STILL_DOWN).
+    No path, command or argument is ever
+    taken from a request. 403 without the
+    RUN_COMMAND permission (manifest-declared,
+    MainActivity asks on launch, user grants
+    in person; Termux must also allow external
+    apps), 409 inside a 60 s cooldown.
+    Capabilities gain repair_termux /
+    repair_termux_permitted; Python gains
+    adapter.repair_termux() (gated by
+    --allow-actions) and parse_repair_termux.
+    The 5-minute health check does NOT call
+    repair automatically — manual only, for
+    now. Full Python suite 272 passed (18
+    subtests). APK v2.5.0 / code 38, SHA-256
+    a915f85c…. NOT frozen, NOT live-verified:
+    Saardeim installs by hand, grants
+    RUN_COMMAND, then the live test is one
+    POST /repair_termux and a VM termux_ssh
+    re-check. Live result of step 1 that
+    motivated this: v2.4.0 local diagnosis
+    reachable=false, ECONNREFUSED — sshd
+    down locally (2026-11-06 23:22 +07).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

@@ -31,6 +31,12 @@ public class MainActivity extends Activity {
     public static final String PREFS = "bridge";
     public static final String KEY_TOKEN = "token";
     private static final int REQUEST_NOTIFICATIONS = 1;
+    private static final int REQUEST_RUN_COMMAND = 2;
+    // Decision 95 (v2.5.0, TARMUX_KICKASS step 2): Termux's
+    // RUN_COMMAND permission, a dangerous permission defined
+    // by Termux itself (not in android.Manifest).
+    private static final String PERMISSION_RUN_COMMAND =
+            "com.termux.permission.RUN_COMMAND";
 
     private TextView statusText;
     private TextView addressText;
@@ -170,6 +176,16 @@ public class MainActivity extends Activity {
             requestPermissions(
                     new String[]{Manifest.permission.POST_NOTIFICATIONS},
                     REQUEST_NOTIFICATIONS);
+        }
+
+        // Decision 95 (v2.5.0): ask for Termux RUN_COMMAND once,
+        // so POST /repair_termux can work. If the user denies
+        // it, the endpoint answers 403 with the Settings path.
+        if (checkSelfPermission(PERMISSION_RUN_COMMAND)
+                != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{PERMISSION_RUN_COMMAND},
+                    REQUEST_RUN_COMMAND);
         }
 
         statusText = findViewById(R.id.status_text);

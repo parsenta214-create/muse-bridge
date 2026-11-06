@@ -31,6 +31,7 @@ from bridge_protocol import (
     parse_events,
     parse_health,
     parse_launch_app,
+    parse_repair_termux,
     parse_state,
     validate_body_size,
     validate_headers_size,
@@ -1015,6 +1016,67 @@ class TestParseHealthP1(unittest.TestCase):
             parse_health(_v2_health_body(tailscale_ips_bound="100.111.74.42"))
         with self.assertRaises(ProtocolError):
             parse_health(_v2_health_body(tailscale_ips_bound=[123]))
+
+    def test_parse_health_termux_sshd_local_optional(self) -> None:
+        """TARMUX_KICKASS step 1 (v2.4.0): termux_sshd_local is
+        an optional object — a full v2.0 body and an old-server
+        body both accept it, and it may be absent. When present
+        it must be complete: reachable (bool), banner (str),
+        latency_ms (int >= 0) and error (str)."""
+        local = {"reachable": True, "banner": "SSH-2.0-OpenSSH_10.2",
+                 "latency_ms": 12, "error": ""}
+        full = _v2_health_body(termux_sshd_local=local)
+        self.assertEqual(parse_health(full), full)
+        down = {"reachable": False, "banner": "", "latency_ms": 3,
+                "error": "ConnectException: Connection refused"}
+        self.assertEqual(parse_health(_v2_health_body(
+            termux_sshd_local=down))["termux_sshd_local"], down)
+        for bad in (
+                {"reachable": True, "banner": "SSH-2.0-OpenSSH_10.2",
+                 "latency_ms": 12},
+                {"reachable": "yes", "banner": "", "latency_ms": 1,
+                 "error": ""},
+                {"reachable": False, "banner": "", "latency_ms": -1,
+                 "error": ""},
+                "not-a-dict",
+        ):
+            with self.assertRaises(ProtocolError):
+                parse_health(_v2_health_body(termux_sshd_local=bad))
+
+    def test_parse_repair_termux(self) -> None:
+        """Decision 95 (v2.5.0): parse_repair_termux accepts a
+        complete repair report and rejects incomplete or
+        inconsistent ones. ok is True exactly for
+        ALREADY_RUNNING / REPAIRED, repaired is True exactly
+        for REPAIRED, and termux_sshd_local.reachable must
+        match ok."""
+        local_up = {"reachable": True, "banner": "SSH-2.0-OpenSSH_10.2",
+                    "latency_ms": 12, "error": ""}
+        repaired = {"ok": True, "repaired": True, "reason": "REPAIRED",
+                    "termux_sshd_local": local_up,
+                    "steps": ["termux-wake-lock", "sshd"]}
+        self.assertEqual(parse_repair_termux(repaired), repaired)
+        already = {"ok": True, "repaired": False,
+                   "reason": "ALREADY_RUNNING",
+                   "termux_sshd_local": local_up, "steps": []}
+        self.assertEqual(parse_repair_termux(already), already)
+        local_down = {"reachable": False, "banner": "", "latency_ms": 3,
+                      "error": "ConnectException: Connection refused"}
+        still = {"ok": False, "repaired": False, "reason": "STILL_DOWN",
+                 "termux_sshd_local": local_down,
+                 "steps": ["termux-wake-lock", "sshd"]}
+        self.assertEqual(parse_repair_termux(still), still)
+        bad = [
+            dict(repaired, reason="FIXED"),
+            dict(repaired, ok=False),
+            dict(repaired, repaired=False),
+            dict(repaired, termux_sshd_local=local_down),
+            dict(repaired, steps="sshd"),
+            {k: v for k, v in repaired.items() if k != "reason"},
+        ]
+        for body in bad:
+            with self.assertRaises(ProtocolError):
+                parse_repair_termux(body)
 
     # -- CONS-029 P1-5 fix: the internal fields are REQUIRED in
     # a complete v2.0 response; omitting one must reject, not
