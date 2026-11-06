@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Home-screen widget layout (v2.6.0, SPEC-WIDGET.md, W7):
+     status / mode / a11y / last-updated lines + Start-Stop and
+     Open buttons. Compact, no scrolling. RemoteViews only:
+     LinearLayout / TextView / Button. No IP, no token (W1). -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="8dp"
+    android:background="@android:color/white">
+
+    <TextView
+        android:id="@+id/widget_status_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Bridge: stopped"
+        android:textColor="@android:color/black"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widget_mode_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Mode: MINIMAL"
+        android:textColor="@android:color/black" />
+
+    <TextView
+        android:id="@+id/widget_a11y_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Accessibility: NOT enabled"
+        android:textColor="@android:color/black" />
+
+    <TextView
+        android:id="@+id/widget_updated_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="更新: --:--"
+        android:textColor="@android:color/darker_gray" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/widget_toggle_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="開始" />
+
+        <Button
+            android:id="@+id/widget_open_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="開く" />
+    </LinearLayout>
+</LinearLayout>
