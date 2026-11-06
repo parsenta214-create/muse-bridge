@@ -1888,6 +1888,19 @@ def _java_source(name):
             / name).read_text(encoding="utf-8")
 
 
+def _manifest_source():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "AndroidManifest.xml").read_text(
+        encoding="utf-8")
+
+
+def _res_text(rel):
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "res" / rel).read_text(encoding="utf-8")
+
+
 def test_p1_01_collect_nodes_early_returns_recycle():
     """P1-01 (CONS-014): both collectNodes early returns (depth
     over MAX_DEPTH, out at MAX_NODES) must recycle the node —
@@ -2085,6 +2098,117 @@ def test_p2_service_unavailable_detail_names_endpoint():
     assert '" needs FULL_ACCESS"))' in region
     assert ('unavailableJson("accessibility service is not enabled")'
             not in region)
+
+
+# --------------------------------------------------------------------------
+# Home-screen widget (v2.6.0, SPEC-WIDGET.md, W1–W7).
+# --------------------------------------------------------------------------
+#
+# HONEST LIMIT: the Python suite cannot run Java widget code —
+# there is no Java test harness in this project (manual
+# aapt2/javac/d8 build, no Gradle, Android APIs unavailable on
+# the JVM), same as P1-01/P1-06 and P2-03. These guards prove
+# structure in the source only: if someone removes the receiver
+# declaration, an update hook, or the token-free provider, the
+# suite fails. Actual widget behaviour (placing it, tapping
+# Start/Stop, a11y/mode refresh) needs the §6 live verification
+# on the phone; the aapt2 link step validates the widget XML
+# resources at build time.
+
+def test_widget_manifest_declares_receiver():
+    """W3: the manifest must declare the widget receiver with
+    APPWIDGET_UPDATE + the a11y-state action and the
+    appwidget-provider metadata, so the system can deliver
+    widget updates. The receiver must be exported (the system
+    sends APPWIDGET_UPDATE). Source-level guard (see the
+    section header for the honest limit)."""
+    src = _manifest_source()
+    assert 'android:name=".BridgeWidgetProvider"' in src
+    start = src.index('android:name=".BridgeWidgetProvider"')
+    region = src[start:start + 800]
+    assert 'android:exported="true"' in region
+    assert 'android.appwidget.action.APPWIDGET_UPDATE' in region
+    assert 'dev.muse.bridge.ACTION_A11Y_STATE_CHANGED' in region
+    assert 'android:name="android.appwidget.provider"' in region
+    assert 'android:resource="@xml/bridge_widget_info"' in region
+
+
+def test_widget_info_update_period_zero():
+    """W3/W7: bridge_widget_info.xml must exist with
+    updatePeriodMillis="0" (event-driven updates only, no
+    periodic polling), the widget layout, home-screen
+    category, and the 2x1 minimum size."""
+    src = _res_text("xml/bridge_widget_info.xml")
+    assert 'android:updatePeriodMillis="0"' in src
+    assert 'android:initialLayout="@layout/widget_bridge"' in src
+    assert 'android:widgetCategory="home_screen"' in src
+    assert 'android:minWidth="180dp"' in src
+    assert 'android:minHeight="110dp"' in src
+
+
+def test_widget_layout_has_required_ids():
+    """W1/W2/W7: widget_bridge.xml must carry the status, mode,
+    a11y and last-updated lines plus the Start/Stop and Open
+    buttons."""
+    src = _res_text("layout/widget_bridge.xml")
+    for view_id in ("widget_root", "widget_status_text",
+                    "widget_mode_text", "widget_a11y_text",
+                    "widget_updated_text", "widget_toggle_button",
+                    "widget_open_button"):
+        assert f'android:id="@+id/{view_id}"' in src
+
+
+def test_widget_provider_never_touches_token():
+    """W5: the widget never touches the HTTP API or the token —
+    it talks to the service via Intents only. The provider
+    source must not reference the token at all."""
+    src = _java_source("BridgeWidgetProvider.java")
+    assert "getOrCreateToken" not in src
+    assert "currentToken" not in src
+    assert "KEY_TOKEN" not in src
+
+
+def test_widget_provider_handles_toggle_and_a11y():
+    """W2/W3: onReceive must handle the toggle action (start/stop
+    the service via startForegroundService) and
+    ACTION_A11Y_STATE_CHANGED (refresh), and build its views
+    from the widget layout."""
+    src = _java_source("BridgeWidgetProvider.java")
+    assert "ACTION_WIDGET_TOGGLE.equals(action)" in src
+    assert "ACTION_A11Y_STATE_CHANGED.equals(action)" in src
+    assert "startForegroundService(" in src
+    assert "R.layout.widget_bridge" in src
+    assert "updateAllWidgets(context)" in src
+
+
+def test_widget_updates_pushed_from_service_and_mode_toggle():
+    """W3: updateAllWidgets must be pushed from
+    BridgeService.onCreate/onDestroy (service start/stop) and
+    from the MainActivity mode-toggle path."""
+    svc = _java_source("BridgeService.java")
+    start = svc.index("public void onCreate()")
+    end = svc.index("public int onStartCommand", start)
+    assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
+    start = svc.index("public void onDestroy()")
+    end = svc.index("public IBinder onBind", start)
+    assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
+    main = _java_source("MainActivity.java")
+    start = main.index("modeButton.setOnClickListener")
+    end = main.index("Button notif = findViewById", start)
+    assert ("BridgeWidgetProvider.updateAllWidgets(MainActivity.this)"
+            in main[start:end])
+
+
+def test_widget_a11y_broadcast_is_explicit():
+    """W3: the a11y-state broadcast must reach the manifest
+    widget receiver — since API 26 a manifest receiver cannot
+    receive an implicit broadcast, so the send must be explicit
+    (setPackage). Runtime receivers in this app are unaffected."""
+    src = _java_source("BridgeAccessibilityService.java")
+    start = src.index("private void broadcastA11yStateChanged()")
+    end = src.index("@Override", start)
+    region = src[start:end]
+    assert ".setPackage(getPackageName())" in region
 
 
 # --------------------------------------------------------------------------

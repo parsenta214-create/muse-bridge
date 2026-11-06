@@ -73,6 +73,10 @@ public class BridgeService extends Service {
             android.util.Log.e("MuseBridge",
                     "bridge server failed to bind any address");
         }
+        // v2.6.0 (SPEC-WIDGET.md, W3): push a widget refresh now
+        // that running is set (also when the bind failed — the
+        // widget must show stopped, not stale).
+        BridgeWidgetProvider.updateAllWidgets(this);
     }
 
     @Override
@@ -93,6 +97,9 @@ public class BridgeService extends Service {
             server.stop();
             server = null;
         }
+        // v2.6.0 (SPEC-WIDGET.md, W3): push a widget refresh so
+        // the widget shows stopped.
+        BridgeWidgetProvider.updateAllWidgets(this);
         stopForeground(true);
         super.onDestroy();
     }

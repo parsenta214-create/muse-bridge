@@ -101,5 +101,24 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- v2.6.0 (SPEC-WIDGET.md): home-screen widget. Exported
+             true — the system must be able to send APPWIDGET_UPDATE.
+             The ACTION_A11Y_STATE_CHANGED entry works only because
+             BridgeAccessibilityService sends that broadcast
+             explicitly (setPackage); since API 26 a manifest
+             receiver cannot receive an implicit broadcast. -->
+        <receiver
+            android:name=".BridgeWidgetProvider"
+            android:exported="true"
+            android:label="Muse Bridge">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="dev.muse.bridge.ACTION_A11Y_STATE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/bridge_widget_info" />
+        </receiver>
     </application>
 </manifest>

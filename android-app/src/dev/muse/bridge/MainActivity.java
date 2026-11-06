@@ -239,6 +239,9 @@ public class MainActivity extends Activity {
                         MODE_BANKING_SAFE.equals(current)
                                 ? MODE_MINIMAL : MODE_BANKING_SAFE);
                 refresh();
+                // v2.6.0 (SPEC-WIDGET.md, W3): push a widget
+                // refresh so the mode line updates.
+                BridgeWidgetProvider.updateAllWidgets(MainActivity.this);
             }
         });
         Button notif = findViewById(R.id.notification_button);

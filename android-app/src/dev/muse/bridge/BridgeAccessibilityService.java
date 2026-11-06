@@ -191,13 +191,20 @@ public class BridgeAccessibilityService extends AccessibilityService {
      * promptly instead of waiting for the next screen update.
      * App-internal only (MainActivity registers with
      * RECEIVER_NOT_EXPORTED). Best effort — a missed broadcast
-     * is harmless, onResume refreshes anyway. */
+     * is harmless, onResume refreshes anyway.
+     * v2.6.0 (SPEC-WIDGET.md, W3): the broadcast is sent
+     * EXPLICITLY (setPackage) — since API 26 a manifest
+     * receiver cannot receive an implicit broadcast, so the
+     * widget provider's manifest entry for this action would
+     * never fire without it. Runtime receivers in this app
+     * (MainActivity, RECEIVER_NOT_EXPORTED) still receive it. */
     public static final String ACTION_A11Y_STATE_CHANGED =
             "dev.muse.bridge.ACTION_A11Y_STATE_CHANGED";
 
     private void broadcastA11yStateChanged() {
         try {
-            sendBroadcast(new Intent(ACTION_A11Y_STATE_CHANGED));
+            sendBroadcast(new Intent(ACTION_A11Y_STATE_CHANGED)
+                    .setPackage(getPackageName()));
         } catch (Exception ignored) {
             // Best effort only; the UI refreshes on resume anyway.
         }
