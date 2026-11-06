@@ -1737,7 +1737,11 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     fast (empty close, with and without proxy auth) while
     this was diagnosed, so the update goes by the chat
     attachment and /health cannot be verified from the VM
-    until the tunnel recovers.
+    until the tunnel recovers. Verified 2026-11-06 07:03:
+    after the user installed 1.9.19, /health answers
+    1.9.19 / code 29, accessibility + notification
+    listener true, server RUNNING — no crash, the tunnel
+    had recovered too.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
