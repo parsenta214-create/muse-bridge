@@ -418,10 +418,18 @@ public class HttpBridgeServer {
                 }, "muse-bridge-accept-" + addr.getHostAddress());
                 acceptThreads.add(t);
                 t.start();
-                Log.i(TAG, "listening on " + addr.getHostAddress() + ":" + port);
+                // P1-03 fix round (CONS-032): never log the full IP
+                // to Logcat — the port alone identifies the
+                // listener here; the masked address is already in
+                // BridgeLog ("listen").
+                Log.i(TAG, "listening on port " + port);
                 BridgeLog.log("listen", addr.getHostAddress() + ":" + port);
             } catch (Exception e) {
-                Log.w(TAG, "cannot bind " + addr.getHostAddress() + ": " + e.getMessage());
+                // P1-03 fix round (CONS-032): exception class only —
+                // the message may carry user data, and the full IP
+                // must not reach Logcat. (The adjacent BridgeLog
+                // call was already sanitized; the raw Log.w was not.)
+                Log.w(TAG, "cannot bind: " + e.getClass().getSimpleName());
                 // P1-03 (CONS-014): log the exception class only —
                 // the message may carry user data. The IP is
                 // masked to two octets by BridgeLog.sanitize().
@@ -604,7 +612,11 @@ public class HttpBridgeServer {
                 if (acceptGeneration == serverLifecycleGeneration
                         && (state == ServerState.RUNNING
                             || state == ServerState.STARTING)) {
-                    Log.w(TAG, "accept failed: " + e.getMessage());
+                    // P1-03 fix round (CONS-032): exception class
+                    // only — the message may carry user data. (The
+                    // adjacent BridgeLog call was already sanitized;
+                    // the raw Log.w was not.)
+                    Log.w(TAG, "accept failed: " + e.getClass().getSimpleName());
                     BridgeLog.logThrottled("accept-failed", "accept-failed",
                             e.getClass().getSimpleName());
                 }

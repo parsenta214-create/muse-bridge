@@ -298,13 +298,18 @@ class MockAppHandler(BaseHTTPRequestHandler):
             # P1-03 (CONS-014): the listen line carries a MASKED
             # IP (100.111.*.*), mirroring the real server's
             # BridgeLog.sanitize — a full IP must never appear
-            # in a log line.
+            # in a log line. The bind-failed / accept-failed lines
+            # below mirror the sanitized call sites too: masked IP
+            # + exception class name only, no message, no package,
+            # no URL, no file name.
             return self._send_json(200, {"ok": True,
                                          "app_version": "1.9.5",
                                          "app_version_code": 15,
                                          "lines": ["[11-06 03:55:00] listen 100.111.*.*:8080",
                                                    "[11-06 03:55:00] server RUNNING",
-                                                   "[11-06 03:55:01] batch completed 1/1"],
+                                                   "[11-06 03:55:01] batch completed 1/1",
+                                                   "[11-06 03:55:02] bind-failed 100.111.*.*: BindException",
+                                                   "[11-06 03:55:03] accept-failed SocketException"],
                                          "previous_lines": ["[11-06 03:50:00] server STOPPED"]})
         if self.path.startswith("/state?"):
             # A-1 (v1.9): simulated bridge input-validation rejections.
@@ -1289,18 +1294,38 @@ def test_app_logs_returns_lines_v193(mock_app):
 
 def test_app_logs_never_carry_full_ips_or_packages(mock_app):
     """P1-03 (CONS-014): no log line may carry a full IPv4
-    address or a package name — IPs are masked to two octets
-    by BridgeLog.sanitize, and package names are dropped at
-    the call sites. The listen line is masked, not full."""
+    address, a package name, a URL, or a file name — IPs are
+    masked to two octets by BridgeLog.sanitize, and package
+    names / URLs / file names / exception messages are dropped
+    at the call sites. The listen and bind-failed lines carry
+    the masked form; accept-failed carries an exception class
+    name only.
+
+    HONEST LIMIT (CONS-032): this test verifies the CLIENT-
+    VISIBLE contract against the mock server's fixed lines —
+    it proves the client accepts the sanitized shape and that
+    the shape itself contains no PII. It does NOT verify the
+    Java sanitize behaviour (BridgeLog.sanitize, the call-site
+    drops, or the raw android.util.Log calls in
+    HttpBridgeServer.java) and it does NOT read actual Logcat
+    output. Those are verified by direct code inspection (the
+    CONS-032 fix round audited every raw Log call) and by the
+    Java build; a live-phone Logcat capture is still the only
+    way to observe the real Logcat output.
+    """
     import re
     adapter = ab.AndroidAdapter()
     result = adapter.logs()
     lines = result["lines"] + result["previous_lines"]
     assert lines[0] == "[11-06 03:55:00] listen 100.111.*.*:8080"
+    assert lines[3] == "[11-06 03:55:02] bind-failed 100.111.*.*: BindException"
+    assert lines[4] == "[11-06 03:55:03] accept-failed SocketException"
     ipv4 = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b")
     for line in lines:
         assert not ipv4.search(line), line
         assert "com." not in line, line
+        assert "http://" not in line and "https://" not in line, line
+        assert ".apk" not in line, line
 
 
 def test_app_events_returns_history(mock_app):
@@ -1812,6 +1837,71 @@ def test_app_node_action_raw_bad_args_are_400(mock_app):
         adapter._app_post("/node_action",
                           {**base, "action": "set_progress",
                            "args": {"value": 2.0}})
+
+
+def test_app_node_action_large_int_arg_rejected():
+    """P1-07 fix round (CONS-032): the 32-bit range check must
+    apply to Python int values too — a Python int is arbitrary
+    precision, so 2**40 used to pass the client while the Java
+    server's requireIntArg rejects it. 2**31 - 1 is the largest
+    accepted int; 2**31 is rejected. (No mock_app needed: the
+    client raises before any request.)"""
+    require = ab.AndroidAdapter._require_int_arg
+    with pytest.raises(ValueError, match="needs integer"):
+        require("scroll_to_position", "row", 2**40)
+    with pytest.raises(ValueError, match="needs integer"):
+        require("scroll_to_position", "row", 2**31)
+    assert require("scroll_to_position", "row", 2**31 - 1) == 2**31 - 1
+    assert require("scroll_to_position", "row", 0) == 0
+
+
+# --------------------------------------------------------------------------
+# P1-01 / P1-06 source-level regression guards (CONS-032).
+#
+# HONEST LIMIT: these two fixes have NO Python-observable surface —
+# node lifecycle (P1-01) and accept-loop threading (P1-06) are
+# Java-internal, and the mock server has no equivalent. There is no
+# behavioural Python test for them, and inventing one would fake a
+# verification that does not exist. What these tests DO verify is
+# that the fix mechanism is still present in the Java source: if
+# someone removes the recycle() call or the generation check, the
+# suite fails. Behavioural verification is by compilation, dex
+# inspection (collectNodes contains recycle() invokes;
+# acceptGeneration strings present), and code inspection; a
+# live-phone test is still needed to observe them behaviourally
+# (e.g. a stop -> restart cycle for P1-06).
+# --------------------------------------------------------------------------
+
+def _java_source(name):
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "src" / "dev" / "muse" / "bridge"
+            / name).read_text(encoding="utf-8")
+
+
+def test_p1_01_collect_nodes_early_returns_recycle():
+    """P1-01 (CONS-014): both collectNodes early returns (depth
+    over MAX_DEPTH, out at MAX_NODES) must recycle the node —
+    it was obtained via getChild() and never reached the live
+    map, so nobody else will recycle it. Source-level guard:
+    the region from the method start to the first Node
+    allocation (i.e. both early-return branches) must contain
+    exactly two node.recycle() calls."""
+    src = _java_source("BridgeAccessibilityService.java")
+    start = src.index("private boolean collectNodes(")
+    end = src.index("Node n = new Node();", start)
+    region = src[start:end]
+    assert region.count("node.recycle();") == 2, region
+
+
+def test_p1_06_accept_loop_checks_generation():
+    """P1-06 (CONS-014): the accept loop must stop when its
+    generation no longer matches the server lifecycle, so a
+    stale thread that wakes after stop/restart exits instead
+    of spinning on its closed socket. Source-level guard: the
+    loop condition must contain the generation equality check."""
+    src = _java_source("HttpBridgeServer.java")
+    assert "&& acceptGeneration == serverLifecycleGeneration" in src
 
 
 # --------------------------------------------------------------------------
