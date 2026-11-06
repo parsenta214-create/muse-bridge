@@ -30,6 +30,7 @@ from bridge_protocol import (
     parse_error_body,
     parse_events,
     parse_health,
+    parse_launch_app,
     parse_state,
     validate_body_size,
     validate_headers_size,
@@ -365,6 +366,64 @@ class TestParseFunctionsValid(unittest.TestCase):
         }
         self.assertEqual(parse_health(raw), raw)
 
+    def test_parse_health_p0_4_capabilities(self) -> None:
+        """P0-4 (v2.0): /health carries launch_app_guaranteed
+        (always false) and foreground_verification (true when
+        a11y is on). Both are optional — an old server omits
+        them — but when present they must be booleans."""
+        raw = {
+            "ok": True,
+            "service": "muse-bridge",
+            "version": 1,
+            "app_version": "2.1.0",
+            "app_version_code": 34,
+            "accessibility": True,
+            "mode": "FULL_ACCESS",
+            "overall_status": "HEALTHY",
+            "capabilities": {"screenshot": True, "tap": True,
+                             "swipe": True, "text_input": True,
+                             "notification": True,
+                             "notification_post": True,
+                             "http_api": True, "launch_app": True,
+                             "launch_app_guaranteed": False,
+                             "foreground_verification": True,
+                             "install_apk": True},
+        }
+        self.assertEqual(parse_health(raw), raw)
+
+    def test_parse_launch_app_launched(self) -> None:
+        """P0-4 (v2.0): a confirmed launch parses and
+        round-trips — ok is True exactly when the status is
+        'launched'."""
+        raw = {
+            "ok": True, "status": "launched", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": True,
+            "verification": "accessibility",
+        }
+        self.assertEqual(parse_launch_app(raw), raw)
+
+    def test_parse_launch_app_unconfirmed(self) -> None:
+        """P0-4 (v2.0): both unconfirmed reasons parse — the
+        verified-but-not-confirmed case (foreground False) and
+        the no-verification case (foreground None, a11y off)."""
+        verified = {
+            "ok": False, "status": "unconfirmed",
+            "reason": "FOREGROUND_NOT_CONFIRMED", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": False,
+            "verification": "accessibility",
+        }
+        self.assertEqual(parse_launch_app(verified), verified)
+        unverified = {
+            "ok": False, "status": "unconfirmed",
+            "reason": "VERIFICATION_UNAVAILABLE", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": None,
+            "verification": "none",
+        }
+        self.assertEqual(parse_launch_app(unverified), unverified)
+
     def test_parse_state_valid(self) -> None:
         raw = {
             "ok": True,
@@ -516,6 +575,63 @@ class TestParseFunctionsInvalid(unittest.TestCase):
         ok = dict(base, modules={"http": "HEALTHY", "future_module": "X"},
                   capabilities={"screenshot": True, "future_cap": 1})
         self.assertEqual(parse_health(ok), ok)
+        # P0-4: a present-but-non-boolean new capability is an error.
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, capabilities={
+                "launch_app_guaranteed": "no"}))
+        with self.assertRaises(ProtocolError):
+            parse_health(dict(base, capabilities={
+                "foreground_verification": "yes"}))
+
+    def test_parse_launch_app_invalid(self) -> None:
+        """P0-4 (v2.0): the launch-report invariants are enforced
+        — ok is True exactly when the status is 'launched', and
+        foreground_confirmed is True exactly then too."""
+        base = {
+            "ok": True, "status": "launched", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": True,
+            "verification": "accessibility",
+        }
+        # Missing field
+        missing = dict(base)
+        del missing["verification"]
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(missing)
+        # ok True with an unconfirmed status is the old false
+        # positive — it must never parse.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                base, status="unconfirmed",
+                reason="FOREGROUND_NOT_CONFIRMED",
+                foreground_confirmed=False))
+        # ok False with a launched status is equally wrong.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(base, ok=False))
+        # Launched without a confirmed foreground.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(base, foreground_confirmed=False))
+        # Unconfirmed claiming a confirmed foreground.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(
+                base, ok=False, status="unconfirmed",
+                reason="FOREGROUND_NOT_CONFIRMED"))
+        # Unknown status / verification values.
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(base, status="maybe"))
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(base, verification="guesswork"))
+        # Unconfirmed without a reason, or with an unknown one.
+        no_reason = {
+            "ok": False, "status": "unconfirmed", "accepted": True,
+            "package": "com.twitter.android",
+            "launch_requested": True, "foreground_confirmed": False,
+            "verification": "accessibility",
+        }
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(no_reason)
+        with self.assertRaises(ProtocolError):
+            parse_launch_app(dict(no_reason, reason="BLOCKED_BY_MAGIC"))
 
     def test_parse_state_missing_field_or_invalid_node(self) -> None:
         base = {

@@ -765,6 +765,34 @@ public class BridgeAccessibilityService extends AccessibilityService {
         }
     }
 
+    /**
+     * P0-4 (v2.0): the package in the foreground right now, or
+     * null when there is no active window. Runs on the main
+     * thread (A-3) like every other accessibility read;
+     * side-effect free — it only reads the root's package name
+     * and recycles it. The HTTP server calls this after issuing
+     * a launch to verify the target actually came forward;
+     * callers must treat null as "not observed", never as a
+     * launch failure.
+     */
+    public String getForegroundPackage() throws Exception {
+        return runOnMainThread(new Callable<String>() {
+            @Override
+            public String call() {
+                AccessibilityNodeInfo root = getRootInActiveWindow();
+                if (root == null) {
+                    return null;
+                }
+                try {
+                    CharSequence pkg = root.getPackageName();
+                    return pkg == null ? null : pkg.toString();
+                } finally {
+                    root.recycle();
+                }
+            }
+        });
+    }
+
     // ---------------------------------------------------------------
     // Phase 2: node-targeted actions and batches.
     // ---------------------------------------------------------------

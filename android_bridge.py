@@ -719,15 +719,23 @@ class AndroidAdapter:
         """Launch an app by package name (decision 69, v1.9.12):
         POST /launch_app. The bridge asks the PackageManager for
         the package's launcher intent and starts it — no home
-        screen hunt, no icon tap. 422 when the package is not
-        installed or has no launcher; 503 when Android refuses
-        the start (background-activity-start restriction — fall
-        back to tapping the icon). Gated by --allow-actions,
-        never retried."""
+        screen hunt, no icon tap. P0-4 (v2.0): the answer is a
+        structured launch report, validated by
+        bridge_protocol.parse_launch_app — {"ok": true, "status":
+        "launched", "foreground_confirmed": true, ...} only when
+        the target was actually observed in the foreground;
+        {"ok": false, "status": "unconfirmed", "reason": ...}
+        when it was not confirmed (or could not be verified with
+        a11y off). Callers must read status /
+        foreground_confirmed, not ok alone. 422 when the package
+        is not installed or has no launcher; 503 when Android
+        refuses the start. Gated by --allow-actions, never
+        retried."""
         if not package:
             raise ValueError("package must not be empty")
         self._require_actions(f"launch_app({package})")
-        return self._app_post("/launch_app", {"package": package})
+        return bridge_protocol.parse_launch_app(
+            self._app_post("/launch_app", {"package": package}))
 
     def open(self, uri: str) -> dict:
         """Open a URI with ACTION_VIEW (decision 74, v1.9.15):

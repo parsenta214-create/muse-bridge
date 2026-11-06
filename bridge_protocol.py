@@ -207,8 +207,19 @@ HEALTH_MODULE_VALUES = {
 HEALTH_CAPABILITY_KEYS = (
     "screenshot", "tap", "swipe", "text_input",
     "notification", "notification_post", "http_api",
-    "launch_app", "install_apk",
+    "launch_app", "launch_app_guaranteed", "foreground_verification",
+    "install_apk",
 )
+
+# P0-4 (v2.0): /launch_app result vocabulary. ok is true ONLY
+# when status is "launched" — startActivity() not throwing is
+# never the success condition. "unavailable" is reserved (no
+# P0-4 mode forbids launching); "failed" is a definite failure
+# (422/503 error bodies, not a 200 body).
+LAUNCH_STATUSES = ("launched", "unconfirmed", "unavailable", "failed")
+LAUNCH_VERIFICATIONS = ("accessibility", "usage_stats", "none")
+LAUNCH_UNCONFIRMED_REASONS = ("FOREGROUND_NOT_CONFIRMED",
+                              "VERIFICATION_UNAVAILABLE")
 
 
 def _require_dict(value: Any, name: str) -> dict[str, Any]:
@@ -603,6 +614,50 @@ def parse_health(data: dict[str, Any]) -> dict[str, Any]:
             raise ProtocolError("health.tailscale_ips must be a list")
         for ip in ips:
             _require_str(ip, "health.tailscale_ips[]")
+    return dict(d)
+
+
+def parse_launch_app(data: dict[str, Any]) -> dict[str, Any]:
+    """Validate a /launch_app 200 body (P0-4, v2.0) and return a
+    copy. The core invariant: ok is True exactly when status is
+    "launched", and foreground_confirmed is True exactly then
+    too. An "unconfirmed" body always carries one of the two
+    known reasons. Extra keys (e.g. "transport" added by the
+    adapter) are tolerated, as in parse_health."""
+    d = _require_dict(data, "launch_app")
+    for key in ("ok", "status", "accepted", "package",
+                "launch_requested", "foreground_confirmed", "verification"):
+        if key not in d:
+            raise ProtocolError(f"launch_app missing required field {key!r}")
+
+    ok = _require_bool(d["ok"], "launch_app.ok")
+    status = _require_enum(d["status"], "launch_app.status", LAUNCH_STATUSES)
+    if ok != (status == "launched"):
+        raise ProtocolError(
+            "launch_app.ok must be True exactly when status is 'launched'")
+    _require_bool(d["accepted"], "launch_app.accepted")
+    _require_str(d["package"], "launch_app.package", non_empty=True)
+    _require_bool(d["launch_requested"], "launch_app.launch_requested")
+    fg = d["foreground_confirmed"]
+    if fg is not None:
+        _require_bool(fg, "launch_app.foreground_confirmed")
+    if (status == "launched") != (fg is True):
+        raise ProtocolError(
+            "launch_app.foreground_confirmed must be True exactly when "
+            "status is 'launched'")
+    _require_enum(d["verification"], "launch_app.verification",
+                  LAUNCH_VERIFICATIONS)
+    if status == "unconfirmed":
+        if "reason" not in d:
+            raise ProtocolError(
+                "launch_app.reason is required when status is 'unconfirmed'")
+        reason = _require_str(d["reason"], "launch_app.reason",
+                              non_empty=True)
+        if reason not in LAUNCH_UNCONFIRMED_REASONS:
+            raise ProtocolError(
+                f"launch_app.reason has unknown value: {reason!r}")
+    elif "reason" in d:
+        _require_str(d["reason"], "launch_app.reason", non_empty=True)
     return dict(d)
 
 

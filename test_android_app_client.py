@@ -72,6 +72,8 @@ def _health_body(accessibility: bool, banking_safe: bool = False) -> dict:
                              "swipe": a11y, "text_input": a11y,
                              "notification": True, "notification_post": True,
                              "http_api": True, "launch_app": True,
+                             "launch_app_guaranteed": False,
+                             "foreground_verification": a11y,
                              "install_apk": True},
             "tailscale_ips": ["100.111.74.42"]}
 
@@ -109,6 +111,13 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # mock's /health reports mode BANKING_SAFE. Reset by the
     # fixture.
     banking_safe = False
+    # P0-4 (v2.0): what /launch_app answers. "launched" is the
+    # confirmed-foreground report (a11y on); "unconfirmed" is
+    # the verified-but-not-confirmed report
+    # (FOREGROUND_NOT_CONFIRMED). With accessibility False the
+    # mock always answers VERIFICATION_UNAVAILABLE, like the
+    # real server. Reset by the fixture.
+    launch_outcome = "launched"
 
     def log_message(self, *args):  # keep test output quiet
         pass
@@ -393,6 +402,33 @@ class MockAppHandler(BaseHTTPRequestHandler):
             # stateless mock always answers was_active false — the
             # test pins the field's presence, not server state.
             return self._send_json(200, {"ok": True, "was_active": False})
+        if self.path == "/launch_app":
+            # P0-4 (v2.0): the structured launch report. a11y on
+            # + outcome "launched" -> the target was observed in
+            # the foreground; outcome "unconfirmed" -> verified
+            # but not confirmed; a11y off -> verification is
+            # unavailable (UsageStats is P1).
+            pkg = payload.get("package", "")
+            if not MockAppHandler.accessibility:
+                return self._send_json(200, {
+                    "ok": False, "status": "unconfirmed",
+                    "reason": "VERIFICATION_UNAVAILABLE",
+                    "accepted": True, "package": pkg,
+                    "launch_requested": True,
+                    "foreground_confirmed": None, "verification": "none"})
+            if MockAppHandler.launch_outcome == "unconfirmed":
+                return self._send_json(200, {
+                    "ok": False, "status": "unconfirmed",
+                    "reason": "FOREGROUND_NOT_CONFIRMED",
+                    "accepted": True, "package": pkg,
+                    "launch_requested": True,
+                    "foreground_confirmed": False,
+                    "verification": "accessibility"})
+            return self._send_json(200, {
+                "ok": True, "status": "launched", "accepted": True,
+                "package": pkg, "launch_requested": True,
+                "foreground_confirmed": True,
+                "verification": "accessibility"})
         return self._send_json(200, {"ok": True, "echo": payload})
 
 
@@ -406,6 +442,7 @@ def mock_app(monkeypatch):
     MockAppHandler.text_after = 0
     MockAppHandler.accessibility = True
     MockAppHandler.banking_safe = False
+    MockAppHandler.launch_outcome = "launched"
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockAppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1410,12 +1447,40 @@ def test_app_node_action_all_names_known(mock_app):
 # --------------------------------------------------------------------------
 
 def test_app_launch_app(mock_app):
-    """Decision 69: launch_app posts the package name."""
+    """Decision 69: launch_app posts the package name. P0-4: the
+    answer is the structured launch report — a confirmed launch
+    (a11y on, foreground observed) carries status "launched",
+    foreground_confirmed True, verification "accessibility"."""
     adapter = ab.AndroidAdapter(actions_enabled=True)
-    assert adapter.launch_app("com.twitter.android")["ok"] is True
+    result = adapter.launch_app("com.twitter.android")
+    assert result["ok"] is True
+    assert result["status"] == "launched"
+    assert result["accepted"] is True
+    assert result["package"] == "com.twitter.android"
+    assert result["launch_requested"] is True
+    assert result["foreground_confirmed"] is True
+    assert result["verification"] == "accessibility"
+    assert result["transport"] == "app"
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert ("POST", "/launch_app",
             {"package": "com.twitter.android"}) in posts
+
+
+def test_app_launch_app_unconfirmed_foreground(mock_app):
+    """P0-4: with a11y on, a launch that was issued but never
+    observed in the foreground answers "unconfirmed" /
+    FOREGROUND_NOT_CONFIRMED with ok False — never the old
+    bare ok=true false positive."""
+    MockAppHandler.launch_outcome = "unconfirmed"
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.launch_app("com.twitter.android")
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+    assert result["reason"] == "FOREGROUND_NOT_CONFIRMED"
+    assert result["accepted"] is True
+    assert result["launch_requested"] is True
+    assert result["foreground_confirmed"] is False
+    assert result["verification"] == "accessibility"
 
 
 def test_app_launch_app_empty_package(mock_app):
@@ -1441,10 +1506,22 @@ def test_app_launch_app_needs_gate(mock_app):
 
 def test_app_launch_app_without_a11y(mock_app):
     """P0-1: /launch_app works with the AccessibilityService off
-    (it needs only startActivity from the server's context)."""
+    (it needs only startActivity from the server's context).
+    P0-4: with a11y off the launch is still processed (HTTP
+    200), but the answer is "unconfirmed" /
+    VERIFICATION_UNAVAILABLE with foreground_confirmed null —
+    the server cannot verify the foreground (UsageStats is P1),
+    so it must not claim success."""
     MockAppHandler.accessibility = False
     adapter = ab.AndroidAdapter(actions_enabled=True)
-    assert adapter.launch_app("com.twitter.android")["ok"] is True
+    result = adapter.launch_app("com.twitter.android")
+    assert result["ok"] is False
+    assert result["status"] == "unconfirmed"
+    assert result["reason"] == "VERIFICATION_UNAVAILABLE"
+    assert result["accepted"] is True
+    assert result["launch_requested"] is True
+    assert result["foreground_confirmed"] is None
+    assert result["verification"] == "none"
 
 
 @pytest.mark.parametrize("method,path,payload", [
@@ -1511,7 +1588,12 @@ def test_app_a11y_off_available_endpoints(mock_app):
     assert adapter.install_apk(url="https://example.com/app.apk")["ok"] is True
     assert adapter.get_clipboard()["ok"] is True
     assert adapter.set_clipboard("MUSEテスト")["ok"] is True
-    assert adapter.launch_app("com.twitter.android")["ok"] is True
+    # P0-4: /launch_app is processed with a11y off (HTTP 200),
+    # but the report is unconfirmed, never a success claim.
+    launch = adapter.launch_app("com.twitter.android")
+    assert launch["ok"] is False
+    assert launch["status"] == "unconfirmed"
+    assert launch["reason"] == "VERIFICATION_UNAVAILABLE"
     assert adapter.notify("Title", "Body")["ok"] is True
     assert adapter.notification_action("key-1", "open")["ok"] is True
 
@@ -1545,6 +1627,8 @@ def test_app_check_app_carries_health_detail(mock_app):
     assert result["modules"]["termux_ssh"] == "UNKNOWN"
     assert result["capabilities"]["screenshot"] is True
     assert result["capabilities"]["launch_app"] is True
+    assert result["capabilities"]["launch_app_guaranteed"] is False
+    assert result["capabilities"]["foreground_verification"] is True
     assert result["tailscale_ips"] == ["100.111.74.42"]
 
 
@@ -1561,6 +1645,8 @@ def test_app_check_app_a11y_off_carries_minimal(mock_app):
     assert result["capabilities"]["screenshot"] is False
     assert result["capabilities"]["tap"] is False
     assert result["capabilities"]["launch_app"] is True
+    assert result["capabilities"]["launch_app_guaranteed"] is False
+    assert result["capabilities"]["foreground_verification"] is False
     assert result["capabilities"]["http_api"] is True
 
 
@@ -1612,6 +1698,8 @@ def test_app_check_app_banking_safe_mode(mock_app):
     assert result["overall_status"] == "HEALTHY"
     assert result["capabilities"]["screenshot"] is False
     assert result["capabilities"]["launch_app"] is True
+    assert result["capabilities"]["launch_app_guaranteed"] is False
+    assert result["capabilities"]["foreground_verification"] is False
 
 
 # --------------------------------------------------------------------------

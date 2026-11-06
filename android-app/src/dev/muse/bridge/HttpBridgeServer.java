@@ -1129,8 +1129,13 @@ public class HttpBridgeServer {
                 // Decision 69 (v1.9.12): launch an app by package
                 // name. 422 when the package is not installed or has
                 // no launcher; 503 when Android refuses the start
-                // (background-activity-start restriction) — fall back
-                // to tapping the home-screen icon.
+                // (startActivity throws). P0-4 (v2.0): the 200
+                // answer is a structured launch report — `launched`
+                // only when the target was actually observed in the
+                // foreground, `unconfirmed` otherwise. startActivity()
+                // not throwing is NEVER the success condition (the
+                // background-activity-start restriction can swallow
+                // the start silently).
                 // P0-1 (v2.0): deliberately no requireService() —
                 // launching needs only startActivity from this
                 // server's own context, so it works even when the
@@ -1142,11 +1147,26 @@ public class HttpBridgeServer {
                 // name when no label exists).
                 opGeneration = noteOperation(lifecycleGeneration, "アプリを起動中：" + operationAppLabel(pkg));
                 try {
-                    boolean ok = launchApp(pkg);
-                    status = ok ? 200 : 503;
-                    sendJson(out, status, new JSONObject().put("ok", ok)
-                            .put("error", ok ? JSONObject.NULL
-                                    : "launch blocked by the system"));
+                    // P0-4: record the request time BEFORE issuing
+                    // the start, and note whether the target is
+                    // already in front — the verification below only
+                    // counts observations after this request.
+                    long requestTimeMs = System.currentTimeMillis();
+                    boolean wasForeground = svc != null
+                            && pkg.equals(foregroundPackageSafe(svc));
+                    if (wasForeground) {
+                        BridgeLog.log("launch_already_foreground", pkg);
+                    }
+                    boolean issued = launchApp(pkg);
+                    if (!issued) {
+                        status = 503;
+                        sendJson(out, status, new JSONObject().put("ok", false)
+                                .put("error", "launch blocked by the system"));
+                    } else {
+                        status = 200;
+                        sendJson(out, status, verifyLaunchForeground(
+                                pkg, svc, requestTimeMs, wasForeground));
+                    }
                 } catch (IllegalArgumentException e) {
                     status = 422;
                     sendJson(out, status, new JSONObject().put("ok", false)
@@ -2017,7 +2037,12 @@ public class HttpBridgeServer {
 
     /** P0-3 (v2.0): what the VM can do right now. `notification`
      * is the listener READ path (/notifications); `notification_post`
-     * is the /notify path (POST_NOTIFICATIONS permission). */
+     * is the /notify path (POST_NOTIFICATIONS permission).
+     * P0-4: `launch_app_guaranteed` is always false — a launch
+     * is best-effort, never guaranteed. `foreground_verification`
+     * is true when a11y is ON (the service can verify the
+     * foreground package) and false when it is OFF (UsageStats
+     * verification is P1). */
     private JSONObject buildCapabilities(boolean a11yOn, boolean listenerGranted,
                                          boolean listenerConnected)
             throws org.json.JSONException {
@@ -2034,6 +2059,8 @@ public class HttpBridgeServer {
                 .put("notification_post", notificationPost)
                 .put("http_api", true)
                 .put("launch_app", true)
+                .put("launch_app_guaranteed", false)
+                .put("foreground_verification", a11yOn)
                 .put("install_apk", true);
     }
 
@@ -2085,6 +2112,102 @@ public class HttpBridgeServer {
         return true;
     }
 
+    /** P0-4 (v2.0): poll offsets (ms after the launch request)
+     * for the foreground check. ~500 ms first (a fast launch),
+     * then ~1 s, ~2 s, and a final ~3 s check; the whole
+     * verification is bounded to ~3 s so the HTTP round trip
+     * stays within ~3–4 s. A slow app must not be failed on a
+     * short timeout alone — the full window is used before
+     * reporting `unconfirmed`. */
+    private static final long[] LAUNCH_VERIFY_OFFSETS_MS = {500, 1000, 2000, 3000};
+    private static final long LAUNCH_VERIFY_MAX_MS = 3000;
+
+    /** P0-4: read the foreground package, never throwing. A
+     * failure to read (service timeout, no active window) is a
+     * missed observation, not a launch failure — the caller keeps
+     * polling and only claims `launched` on a positive match. */
+    private String foregroundPackageSafe(BridgeAccessibilityService svc) {
+        if (svc == null) {
+            return null;
+        }
+        try {
+            return svc.getForegroundPackage();
+        } catch (Exception e) {
+            BridgeLog.log("launch_fg_read_failed",
+                    e.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /** P0-4: build the launch result body. `foregroundConfirmed`
+     * is null when verification was unavailable (a11y off). */
+    private static JSONObject launchResultJson(String pkg, boolean ok,
+            String status, String reason, Boolean foregroundConfirmed,
+            String verification) throws org.json.JSONException {
+        JSONObject j = new JSONObject()
+                .put("ok", ok)
+                .put("status", status)
+                .put("accepted", true)
+                .put("package", pkg)
+                .put("launch_requested", true)
+                .put("foreground_confirmed", foregroundConfirmed == null
+                        ? JSONObject.NULL : foregroundConfirmed)
+                .put("verification", verification);
+        if (reason != null) {
+            j.put("reason", reason);
+        }
+        return j;
+    }
+
+    /**
+     * P0-4 (v2.0): after startActivity() was issued without
+     * throwing, check whether the target package actually came
+     * to the foreground. a11y ON: poll the service's foreground
+     * package (getRootInActiveWindow) up to ~3 s; a11y OFF:
+     * verification is unavailable (UsageStats is P1), so the
+     * answer is `unconfirmed` / VERIFICATION_UNAVAILABLE. Runs
+     * on the HTTP worker thread — never the service main thread
+     * — and only counts observations after requestTimeMs. A match
+     * when the app was already in front (wasForeground) still
+     * counts as launched: the requested end state is achieved.
+     * startActivity() not throwing is NEVER the success condition.
+     * A single slow poll (main-thread stall) can overrun the
+     * window; the deadline check after each poll then stops
+     * further polling, so the answer stays truthful, only later.
+     */
+    private JSONObject verifyLaunchForeground(String pkg,
+            BridgeAccessibilityService svc, long requestTimeMs,
+            boolean wasForeground) throws org.json.JSONException {
+        if (svc == null) {
+            BridgeLog.log("launch_unverified", pkg);
+            return launchResultJson(pkg, false, "unconfirmed",
+                    "VERIFICATION_UNAVAILABLE", null, "none");
+        }
+        for (long offset : LAUNCH_VERIFY_OFFSETS_MS) {
+            long wait = requestTimeMs + offset - System.currentTimeMillis();
+            if (wait > 0) {
+                try {
+                    Thread.sleep(wait);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            if (pkg.equals(foregroundPackageSafe(svc))) {
+                BridgeLog.log("launch_confirmed", wasForeground
+                        ? pkg + " (already foreground)" : pkg);
+                return launchResultJson(pkg, true, "launched",
+                        null, Boolean.TRUE, "accessibility");
+            }
+            if (System.currentTimeMillis() - requestTimeMs >= LAUNCH_VERIFY_MAX_MS) {
+                break;
+            }
+        }
+        BridgeLog.log("launch_unconfirmed", pkg);
+        return launchResultJson(pkg, false, "unconfirmed",
+                "FOREGROUND_NOT_CONFIRMED", Boolean.FALSE, "accessibility");
+    }
+
     /**
      * Launches an app by package name (decision 69, v1.9.12;
      * moved from BridgeAccessibilityService in P0-1, v2.0).
@@ -2093,7 +2216,12 @@ public class HttpBridgeServer {
      * works with a11y off. Returns false when Android refuses
      * the start (background-activity-start restriction); throws
      * IllegalArgumentException when the package is not installed
-     * or has no launcher activity.
+     * or has no launcher activity. P0-4: true means only that
+     * startActivity() was ISSUED without throwing — it does NOT
+     * mean the app opened (the BAL restriction can swallow the
+     * start silently). The caller verifies the foreground
+     * separately (verifyLaunchForeground) and reports the
+     * truthful result.
      */
     private boolean launchApp(String pkg) {
         if (pkg == null || pkg.isEmpty()) {
