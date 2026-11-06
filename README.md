@@ -2182,6 +2182,35 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     motivated this: v2.4.0 local diagnosis
     reachable=false, ECONNREFUSED — sshd
     down locally (2026-11-06 23:22 +07).
+96. P1 FROZEN (2026-11-06 23:42 +07, Saardeim
+    decision): the 5 CONS-022 P1 items +
+    CONS-029/030 fixes, at v2.3.0 / code 36
+    (GitHub 65ec0b26; APK SHA e42ac55d…;
+    full Python suite 268 passed). Spec:
+    SPEC-P1.md (new document; the frozen
+    P0 spec was NOT edited). Live verification
+    COMPLETE 2026-11-06 23:39–23:42 +07
+    (LIVE-VERIFY-P1.md, done against v2.5.0/
+    code 38 which contains the same P1 code
+    plus TARMUX steps 1+2): BANKING_SAFE UI
+    shows "left off on purpose, banking apps
+    take priority" (no a11y-enable prompt);
+    MINIMAL shows the enable prompt;
+    FULL_ACCESS shows "screen control
+    available"; UI and /health agree in all
+    three modes; install_apk=true +
+    install_apk_permitted=true in /health.
+    GPT reviews CONS-029 (conditional fail),
+    CONS-030 (conditional pass), CONS-031
+    (PASS — code freeze approved). Known
+    limitations carried forward (NOT fixed):
+    tailscale_ips empty-string [""] validation
+    gap (CONS-031 minor note); 100.64.0.0/10
+    is RFC 6598 shared space, not
+    Tailscale-exclusive; old-client-vs-new-
+    server compat not guaranteed; CONS-014
+    P1-01/02/03/04/06/07 and CONS-028
+    P2-01/02/03 still open.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
