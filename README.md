@@ -1788,6 +1788,21 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     21932849…; 131 tests pass. After 1.9.21 is installed,
     the Termux install is retried with the 1022 URL —
     this time a dialog should actually appear.
+    (Correction in decision 81: it did not — see below.)
+81. EXTRA_INTENT key fix (2026-11-06, v1.9.22 / code
+    32). The 1.9.21 live test reached
+    STATUS_PENDING_USER_ACTION but reported "(no
+    confirmation intent)": the receiver looked up
+    "android.content.pm.extra.INTENT", which does not
+    exist — PackageInstaller has no EXTRA_INTENT
+    constant at all (verified by javap on android-34).
+    The confirmation activity rides on Intent.
+    EXTRA_INTENT ("android.intent.extra.INTENT"), a
+    public constant. Fix: read that key. APK 70,343
+    bytes, sha256 aba229c4…; 131 tests pass. After
+    1.9.22 is installed, the Termux install is retried
+    with the 1022 URL; the confirmation dialog should
+    now actually appear.
 78. Startup crash fix — registerReceiver exported flag
     (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
     crashed the instant START BRIDGE was tapped, with no

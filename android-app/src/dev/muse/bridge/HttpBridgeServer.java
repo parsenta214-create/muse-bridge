@@ -189,10 +189,14 @@ public class HttpBridgeServer {
                 // "failed status=-1".) Launch the confirmation
                 // and keep the job running: the final result
                 // broadcast arrives after the user acts.
-                // EXTRA_INTENT is a hidden API, so use its
-                // literal key ("android.content.pm.extra.INTENT").
+                // Decision 81 (v1.9.22): the key is
+                // Intent.EXTRA_INTENT ("android.intent.extra.
+                // INTENT") — a public constant. 1.9.21 guessed
+                // the literal "android.content.pm.extra.INTENT",
+                // which does not exist, so the lookup returned
+                // null and the dialog still never appeared.
                 Intent confirm = intent.getParcelableExtra(
-                        "android.content.pm.extra.INTENT");
+                        Intent.EXTRA_INTENT);
                 if (confirm != null) {
                     confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     ctx.startActivity(confirm);
@@ -1022,7 +1026,11 @@ public class HttpBridgeServer {
                 // activity from EXTRA_INTENT on
                 // STATUS_PENDING_USER_ACTION (-1) — that status is
                 // NOT a failure, and 1.9.16–1.9.20 misread it as
-                // one, so no dialog ever appeared.
+                // one, so no dialog ever appeared. Decision 81
+                // (v1.9.22): the key is Intent.EXTRA_INTENT —
+                // 1.9.21 guessed the wrong literal key, so the
+                // lookup returned null and the dialog still never
+                // appeared.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 String url = j.optString("url", null);
                 String apkPath = j.optString("path", null);
