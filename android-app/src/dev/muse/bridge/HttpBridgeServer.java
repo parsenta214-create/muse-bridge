@@ -1294,14 +1294,15 @@ public class HttpBridgeServer {
                     // pre-request read is bounded (500 ms): it is
                     // informational only and must not delay the
                     // launch on a main-thread stall.
-                    // P0-4 fix (CONS-027 P2 #5): elapsedRealtime
-                    // (monotonic) — the window is a duration, so a
-                    // wall-clock correction must not move it.
-                    // P2-01 (CONS-028): the verification baseline
-                    // is captured just before startActivity(),
-                    // not before the pre-foreground read — the
-                    // read can take up to 500 ms, which used to
-                    // eat into the ~3 s post-launch window.
+                    // P2-01 (CONS-028, fix round after CONS-035):
+                    // the verification baseline is captured inside
+                    // launchApp(), just before startActivity() —
+                    // after the Intent fetch as well as after the
+                    // pre-foreground read — so neither the up-to-500 ms
+                    // read nor the PackageManager lookup eats into
+                    // the ~3 s post-launch window. launchApp()
+                    // returns the baseline, or -1 when the start
+                    // was refused.
                     boolean wasForeground = svc != null
                             && pkg.equals(foregroundPackageSafe(svc,
                                     LAUNCH_PRE_READ_TIMEOUT_MS));
@@ -1310,9 +1311,8 @@ public class HttpBridgeServer {
                         // log — the launch answer to the VM names it.
                         BridgeLog.log("launch_already_foreground", "");
                     }
-                    long requestTimeMs = android.os.SystemClock.elapsedRealtime();
-                    boolean issued = launchApp(pkg);
-                    if (!issued) {
+                    long requestTimeMs = launchApp(pkg);
+                    if (requestTimeMs < 0) {
                         status = 503;
                         sendJson(out, status, new JSONObject().put("ok", false)
                                 .put("error", "launch blocked by the system"));
@@ -2641,17 +2641,24 @@ public class HttpBridgeServer {
      * moved from BridgeAccessibilityService in P0-1, v2.0).
      * Runs on this server's own application context, so it
      * needs no accessibility service — the same reason /open
-     * works with a11y off. Returns false when Android refuses
-     * the start (background-activity-start restriction); throws
-     * IllegalArgumentException when the package is not installed
-     * or has no launcher activity. P0-4: true means only that
-     * startActivity() was ISSUED without throwing — it does NOT
-     * mean the app opened (the BAL restriction can swallow the
-     * start silently). The caller verifies the foreground
+     * works with a11y off. Returns the verification baseline
+     * (elapsedRealtime — monotonic, so a wall-clock correction
+     * must not move the window, which is a duration) captured
+     * just before startActivity(), or -1 when Android refuses
+     * the start (background-activity-start restriction);
+     * throws IllegalArgumentException when the package is not
+     * installed or has no launcher activity. P0-4: a
+     * non-negative return means only that startActivity() was
+     * ISSUED without throwing — it does NOT mean the app
+     * opened (the BAL restriction can swallow the start
+     * silently). The caller verifies the foreground
      * separately (verifyLaunchForeground) and reports the
-     * truthful result.
+     * truthful result. P2-01 fix round (CONS-035): the
+     * baseline is captured here, after the Intent fetch, so
+     * the PackageManager lookup no longer eats into the
+     * ~3 s post-launch verification window.
      */
-    private boolean launchApp(String pkg) {
+    private long launchApp(String pkg) {
         if (pkg == null || pkg.isEmpty()) {
             throw new IllegalArgumentException("package must not be empty");
         }
@@ -2662,12 +2669,16 @@ public class HttpBridgeServer {
         }
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try {
+            // P2-01 (CONS-028, fix round after CONS-035):
+            // capture the baseline just before startActivity(),
+            // after the Intent fetch above.
+            long requestTimeMs = android.os.SystemClock.elapsedRealtime();
             context.startActivity(intent);
-            return true;
+            return requestTimeMs;
         } catch (ActivityNotFoundException | SecurityException e) {
             // P1-03 (CONS-014): no package name in the log.
             BridgeLog.log("launch_blocked", "");
-            return false;
+            return -1;
         }
     }
 

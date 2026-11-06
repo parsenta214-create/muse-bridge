@@ -1954,43 +1954,67 @@ def test_p1_03_request_log_never_carries_arbitrary_path():
 
 
 def test_p2_01_launch_baseline_after_pre_read():
-    """P2-01 (CONS-028, step 3): the /launch_app verification
-    baseline (requestTimeMs) must be captured just before
-    startActivity() — AFTER the pre-foreground read and BEFORE
-    launchApp() — so the up-to-500 ms pre-read no longer eats
-    into the ~3 s post-launch verification window. Source-level
-    guard: ordering of the three statements inside the
-    /launch_app handler region."""
+    """P2-01 (CONS-028, step 3; fix round after CONS-035): the
+    /launch_app verification baseline (requestTimeMs) must be
+    captured just before startActivity() — AFTER the
+    pre-foreground read AND after the Intent fetch inside
+    launchApp() — so neither the up-to-500 ms pre-read nor the
+    PackageManager lookup eats into the ~3 s post-launch
+    verification window. Source-level guard: (1) the handler
+    reads the foreground first and takes the baseline from
+    launchApp()'s return value, capturing no timestamp itself;
+    (2) inside launchApp(), the Intent fetch precedes the
+    baseline capture, which precedes startActivity()."""
     src = _java_source("HttpBridgeServer.java")
+    # (1) handler: pre-read first, baseline from launchApp().
     start = src.index('"/launch_app".equals(path)')
     end = src.index('} else if ("/open".equals(path)', start)
     region = src[start:end]
     pre = region.index("foregroundPackageSafe(svc,")
-    base = region.index(
+    call = region.index("long requestTimeMs = launchApp(pkg);")
+    assert pre < call, (pre, call)
+    assert "elapsedRealtime()" not in region
+    assert "if (requestTimeMs < 0)" in region
+    # (2) launchApp(): Intent fetch < baseline < startActivity.
+    body = src[src.index("private long launchApp(String pkg) {"):]
+    body = body[:body.index("\n    }\n")]
+    fetch = body.index("getLaunchIntentForPackage(pkg)")
+    base = body.index(
         "long requestTimeMs = android.os.SystemClock.elapsedRealtime();")
-    launch = region.index("boolean issued = launchApp(pkg);")
-    assert pre < base < launch, (pre, base, launch)
+    start_activity = body.index("context.startActivity(intent);")
+    assert fetch < base < start_activity, (fetch, base, start_activity)
+    assert "return requestTimeMs;" in body
+    assert "return -1;" in body
 
 
 def test_p2_03_launch_state_is_request_local():
-    """P2-03 (CONS-028, step 3): the launch flow's per-request
-    state must be request-local, never shared instance state —
-    that is the property that makes concurrent launches and a
-    mid-verification disconnect safe (each request's
-    verification is tied to its own timestamp + package).
-    Source-level guard: (1) requestTimeMs, wasForeground and
-    issued are declared as locals inside the /launch_app
-    handler; (2) none of them is an instance field; (3)
-    verifyLaunchForeground receives all per-request state as
-    parameters; (4) foregroundPackageSafe tolerates a dead
-    service (any exception -> null, a missed poll, never a
-    crash or false success).
+    """P2-03 (CONS-028, step 3; fix round after CONS-035): the
+    launch flow's per-request state must be request-local,
+    never shared instance state — that is the property that
+    makes concurrent launches and a mid-verification disconnect
+    safe (each request's verification is tied to its own
+    timestamp + package). Source-level guard: (1) requestTimeMs
+    and wasForeground are declared as locals inside the
+    /launch_app handler, and the timestamp itself is a local
+    inside launchApp(); (2) neither name is an instance field
+    — the field check matches declarations with AND without
+    initializers (e.g. `private long requestTimeMs = 0;`), in
+    any modifier order; (3) verifyLaunchForeground receives
+    all per-request state as parameters; (4)
+    foregroundPackageSafe tolerates a dead service (any
+    exception -> null, a missed poll, never a crash or false
+    success). Since the fix round, "not issued" is folded into
+    the timestamp (requestTimeMs < 0), so there is no separate
+    `issued` local to guard.
 
     HONEST LIMIT: there is no Java test harness in this
     project (manual aapt2/javac/d8 build, no Gradle, Android
     APIs are unavailable on the JVM), so no Java unit or
     Instrumentation test can run here. This guard proves the
-    structural property in the source; actual concurrent
+    structural property in the source; it is regex-based, not
+    an AST — it only sees class-level (4-space) field
+    declarations, so a field hidden inside an inner class or
+    split across lines would escape it. Actual concurrent
     behaviour is covered by the Python mock tests
     (test_app_launch_app_concurrent,
     test_app_launch_app_disconnect_during_verification) and
@@ -1998,21 +2022,27 @@ def test_p2_03_launch_state_is_request_local():
     """
     import re
     src = _java_source("HttpBridgeServer.java")
-    # (1) locals inside the handler.
+    # (1) locals inside the handler, timestamp local in launchApp.
     start = src.index('"/launch_app".equals(path)')
     end = src.index('} else if ("/open".equals(path)', start)
     region = src[start:end]
-    assert ("long requestTimeMs = android.os.SystemClock.elapsedRealtime();"
-            in region)
+    assert "long requestTimeMs = launchApp(pkg);" in region
     assert "boolean wasForeground = svc != null" in region
-    assert "boolean issued = launchApp(pkg);" in region
-    # (2) none of them is an instance field (a field
-    # declaration ends with ';' and has no initializer).
+    assert "if (requestTimeMs < 0)" in region
+    launch = src[src.index("private long launchApp(String pkg) {"):]
+    launch = launch[:launch.index("\n    }\n")]
+    assert ("long requestTimeMs = android.os.SystemClock.elapsedRealtime();"
+            in launch)
+    # (2) neither name is an instance field. Fields live at
+    # class level (exactly 4-space indent); method locals are
+    # indented deeper, so anchoring on 4 spaces keeps locals
+    # out. The optional initializer covers `= 0;` style
+    # declarations, and modifiers may appear in any order.
     for name, typ in (("requestTimeMs", "long"),
-                      ("wasForeground", "boolean"),
-                      ("issued", "boolean")):
+                      ("wasForeground", "boolean")):
         assert not re.search(
-            rf"^\s*(private\s+)?(static\s+)?(final\s+)?{typ}\s+{name}\s*;",
+            rf"^    (?:(?:public|protected|private|static|final"
+            rf"|volatile|transient)\s+)*{typ}\s+{name}\s*(=[^;]*)?;",
             src, re.MULTILINE), name
     # (3) verifyLaunchForeground takes the state as parameters.
     sig = src[src.index("private JSONObject verifyLaunchForeground("):]
