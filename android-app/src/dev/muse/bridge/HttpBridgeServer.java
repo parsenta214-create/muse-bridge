@@ -18,6 +18,7 @@ import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.BatteryManager;
+import android.os.Build;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -177,8 +178,23 @@ public class HttpBridgeServer {
         // v1.9.3: the debug log reads the previous run's tail and
         // opens the file once, when the server is created.
         BridgeLog.init(this.context);
-        context.registerReceiver(installReceiver,
-                new IntentFilter(INSTALL_RESULT_ACTION));
+        // Decision 78 (v1.9.19): on Android 13+ (API 33+), a
+        // dynamically-registered receiver MUST declare whether
+        // it is exported — the 2-arg registerReceiver throws
+        // SecurityException for apps targeting API 33+ (this
+        // crashed 1.9.16–1.9.18 at startup: the constructor
+        // runs on service start). The install result goes only
+        // to our own PackageInstaller commit, so NOT_EXPORTED.
+        // The 3-arg overload does not exist below API 33, so
+        // older devices keep the 2-arg call.
+        if (Build.VERSION.SDK_INT >= 33) {
+            context.registerReceiver(installReceiver,
+                    new IntentFilter(INSTALL_RESULT_ACTION),
+                    Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            context.registerReceiver(installReceiver,
+                    new IntentFilter(INSTALL_RESULT_ACTION));
+        }
     }
 
     /** Binds the listeners and starts one dedicated accept thread per

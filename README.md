@@ -1715,6 +1715,29 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     70,342 bytes, sha256 d635b11c…; 131 tests pass.
     Phase D-1 is complete (open / install_apk / clipboard /
     notification action).
+78. Startup crash fix — registerReceiver exported flag
+    (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
+    crashed the instant START BRIDGE was tapped, with no
+    log left: the HttpBridgeServer constructor registered
+    the install-result BroadcastReceiver with the 2-arg
+    registerReceiver(). On Android 13+ (API 33+), apps
+    targeting API 33+ MUST pass RECEIVER_EXPORTED or
+    RECEIVER_NOT_EXPORTED — the 2-arg call throws
+    SecurityException, uncaught, on service start. The
+    phone is Android 15 (API 35), targetSdk 34. Fix: the
+    3-arg call with Context.RECEIVER_NOT_EXPORTED (the
+    result goes only to our own PackageInstaller commit,
+    never to another app), guarded by SDK_INT >= 33 — the
+    3-arg overload does not exist below API 33, so older
+    devices keep the 2-arg call. The battery sticky query
+    (registerReceiver(null, ...)) is exempt (no receiver
+    is registered) and was already proven live on 1.9.6+.
+    APK 70,344 bytes, sha256 c84865a4…; 131 tests pass.
+    Note: the VM→phone tunnel (3130) is also failing
+    fast (empty close, with and without proxy auth) while
+    this was diagnosed, so the update goes by the chat
+    attachment and /health cannot be verified from the VM
+    until the tunnel recovers.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
