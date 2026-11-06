@@ -20,6 +20,7 @@ from bridge_protocol import (
     build_click_node,
     build_events_query,
     build_notify,
+    build_operation_end,
     build_press_key,
     build_swipe,
     build_type_node,
@@ -162,6 +163,9 @@ class TestBuildFunctionsValid(unittest.TestCase):
             build_notify("Status", "Completed"),
             {"title": "Status", "text": "Completed"},
         )
+
+    def test_build_operation_end_valid(self) -> None:
+        self.assertEqual(build_operation_end(), {})
 
     def test_build_capture_screen_query_valid(self) -> None:
         self.assertEqual(

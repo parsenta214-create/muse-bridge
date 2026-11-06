@@ -44,8 +44,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
@@ -95,6 +99,9 @@ import java.util.concurrent.TimeUnit;
  *   POST /notify          {"title":"..","text":".."} -> posts a notification
  *                         (v1.3; tap opens Downloads so the user can tap
  *                         the pushed APK to install it)
+ *   POST /operation_end   {} -> {"ok":true,"was_active":..} (v2.1: ends
+ *                         the current operation session; posts
+ *                         "操作終了" when a session was active)
  */
 public class HttpBridgeServer {
 
@@ -102,6 +109,17 @@ public class HttpBridgeServer {
     public static final int PORT = 8080;
     private static final String UPDATE_CHANNEL_ID = "muse-bridge-updates";
     private static final int UPDATE_NOTIFICATION_ID = 2;
+
+    // v2.1: operation notifications ("操作中" / "操作終了"). The
+    // bridge posts them while the VM operates the phone screen, so
+    // the user can see at a glance that Muse is operating the
+    // phone and when it finished. Dedicated channel (not the
+    // update channel); ID 3 is the ongoing "操作中", ID 4 the
+    // one-shot "操作終了". See SPEC-OPERATION-NOTIFY.md.
+    private static final String OPERATION_CHANNEL_ID = "muse-bridge-operation";
+    private static final int OPERATION_NOTIFICATION_ID = 3;
+    private static final int OPERATION_END_NOTIFICATION_ID = 4;
+    private static final long OPERATION_AUTO_END_TIMEOUT_MS = 10_000;
 
     public interface TokenProvider {
         String currentToken();
@@ -219,10 +237,51 @@ public class HttpBridgeServer {
         }
     };
 
+    // v2.1: operation-session tracker (SPEC-OPERATION-NOTIFY.md).
+    // One global session: the server posts "操作中" when a
+    // screen-changing operation starts, and "操作終了" when the
+    // VM sends POST /operation_end or 10 s pass with no operation
+    // activity and none in flight. All fields are guarded by
+    // operationLock; NotificationManager calls are thread-safe
+    // binder calls and may run on worker or scheduler threads.
+    private final Object operationLock = new Object();
+    private boolean operationActive = false;
+    private long operationLastActivityMs = 0;
+    private int operationInFlight = 0;
+    private ScheduledFuture<?> operationAutoEndFuture = null;
+    private ScheduledExecutorService operationScheduler;
+
+    /** Auto-end task: ends the session only when nothing is in
+     * flight and the last activity is at least the timeout old;
+     * otherwise reschedules (this debounce keeps a long /batch
+     * from auto-ending mid-run). Runs on the scheduler thread. */
+    private final Runnable operationAutoEndTask = new Runnable() {
+        @Override
+        public void run() {
+            synchronized (operationLock) {
+                if (!operationActive) {
+                    return;
+                }
+                long now = android.os.SystemClock.elapsedRealtime();
+                if (operationInFlight == 0
+                        && now - operationLastActivityMs
+                                >= OPERATION_AUTO_END_TIMEOUT_MS) {
+                    endOperationLocked();
+                } else {
+                    scheduleAutoEndLocked();
+                }
+            }
+        }
+    };
+
     public HttpBridgeServer(int port, TokenProvider tokens, Context context) {
         this.port = port;
         this.tokens = tokens;
         this.context = context.getApplicationContext();
+        // v2.1: the operation-notification timer (single daemon
+        // thread). Recreated in start() if a previous stop() shut
+        // it down, mirroring the worker pool.
+        ensureOperationScheduler();
         // v1.9.3: the debug log reads the previous run's tail and
         // opens the file once, when the server is created.
         BridgeLog.init(this.context);
@@ -253,6 +312,9 @@ public class HttpBridgeServer {
             return state == ServerState.RUNNING;
         }
         state = ServerState.STARTING;
+        // v2.1: a second start after STOPPED needs a fresh timer
+        // (stop() shut the old one down), like the worker pool.
+        ensureOperationScheduler();
         workers = new ThreadPoolExecutor(HTTP_WORKERS, HTTP_WORKERS,
                 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<Runnable>(HTTP_QUEUE),
@@ -290,6 +352,10 @@ public class HttpBridgeServer {
             return false;
         }
         state = ServerState.RUNNING;
+        // v2.1: a restart must clear operation notifications left
+        // in the shade by a previous process — notifications
+        // survive process death.
+        cancelOperationNotifications();
         BridgeLog.log("server", "RUNNING");
         return true;
     }
@@ -311,6 +377,21 @@ public class HttpBridgeServer {
             workers.shutdownNow();
             workers = null;
         }
+        // v2.1: stop the operation timer and clear the ongoing
+        // notification silently — the bridge is going away, not
+        // ending an operation cleanly, so no "操作終了" is posted.
+        synchronized (operationLock) {
+            if (operationAutoEndFuture != null) {
+                operationAutoEndFuture.cancel(false);
+                operationAutoEndFuture = null;
+            }
+            operationActive = false;
+        }
+        if (operationScheduler != null) {
+            operationScheduler.shutdownNow();
+            operationScheduler = null;
+        }
+        cancelOperationNotifications();
         state = ServerState.STOPPED;
         BridgeLog.log("server", "STOPPED");
     }
@@ -438,6 +519,10 @@ public class HttpBridgeServer {
         // A-1 (v1.9): per-request monotonic deadline; each phase gets
         // the smaller of its own timeout and the remaining total time.
         long deadline = android.os.SystemClock.elapsedRealtime() + TOTAL_TIMEOUT_MS;
+        // v2.1: set to true by a hook call below when this request
+        // starts a screen operation; the finally block then releases
+        // its in-flight slot.
+        boolean opNoted = false;
         try {
             InputStream in = conn.getInputStream();
             OutputStream out = conn.getOutputStream();
@@ -815,6 +900,11 @@ public class HttpBridgeServer {
                     String err;
                     try {
                         if ("open".equals(action)) {
+                            // v2.1: opening a notification changes
+                            // the foreground app — show "操作中".
+                            // ("reply" sends a message without
+                            // changing the screen, so no hook.)
+                            opNoted = noteOperation("通知を開いています");
                             err = BridgeNotificationListener.openNotification(key);
                         } else if ("reply".equals(action)) {
                             String text = j.getString("text");
@@ -836,9 +926,13 @@ public class HttpBridgeServer {
                 // the client used). 409 when the screen moved on.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
+                String nodeId = j.getString("node_id");
+                int nodeTreeHash = j.getInt("tree_hash");
+                // v2.1: the operation is accepted — show "操作中".
+                opNoted = noteOperation("タップ中");
                 try {
                     BridgeAccessibilityService.ActionOutcome o =
-                            svc.clickNode(j.getString("node_id"), j.getInt("tree_hash"));
+                            svc.clickNode(nodeId, nodeTreeHash);
                     status = o.ok ? 200 : 422;
                     sendJson(out, status, new JSONObject().put("ok", o.ok)
                             .put("snapshot_id", o.snapshotId)
@@ -856,9 +950,15 @@ public class HttpBridgeServer {
                 // Phase 2: set text on an editable node by id.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
+                String nodeId = j.getString("node_id");
+                int nodeTreeHash = j.getInt("tree_hash");
+                String nodeText = j.getString("text");
+                // v2.1: the operation is accepted — show "操作中".
+                // The typed text never goes into the notification.
+                opNoted = noteOperation("文字を入力中");
                 try {
-                    BridgeAccessibilityService.ActionOutcome o = svc.typeNode(j.getString("node_id"),
-                            j.getInt("tree_hash"), j.getString("text"));
+                    BridgeAccessibilityService.ActionOutcome o = svc.typeNode(nodeId,
+                            nodeTreeHash, nodeText);
                     status = o.ok ? 200 : 422;
                     sendJson(out, status, new JSONObject().put("ok", o.ok)
                             .put("snapshot_id", o.snapshotId)
@@ -884,9 +984,13 @@ public class HttpBridgeServer {
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", "unknown direction: " + direction));
                 } else {
+                    String nodeId = j.getString("node_id");
+                    int nodeTreeHash = j.getInt("tree_hash");
+                    // v2.1: the operation is accepted — show "操作中".
+                    opNoted = noteOperation("スクロール中");
                     try {
                         BridgeAccessibilityService.ActionOutcome o = svc.scrollNode(
-                                j.getString("node_id"), j.getInt("tree_hash"), direction);
+                                nodeId, nodeTreeHash, direction);
                         status = o.ok ? 200 : 422;
                         sendJson(out, status, new JSONObject().put("ok", o.ok)
                                 .put("snapshot_id", o.snapshotId)
@@ -907,10 +1011,15 @@ public class HttpBridgeServer {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
                 JSONObject args = j.optJSONObject("args");
+                String nodeId = j.getString("node_id");
+                int nodeTreeHash = j.getInt("tree_hash");
+                String actionName = j.getString("action");
+                // v2.1: the operation is accepted — show "操作中"
+                // with the action name (fixed enum, safe).
+                opNoted = noteOperation("操作を実行中（" + actionName + "）");
                 try {
                     BridgeAccessibilityService.ActionOutcome o = svc.nodeAction(
-                            j.getString("node_id"), j.getInt("tree_hash"),
-                            j.getString("action"), args);
+                            nodeId, nodeTreeHash, actionName, args);
                     status = o.ok ? 200 : 422;
                     sendJson(out, status, new JSONObject().put("ok", o.ok)
                             .put("snapshot_id", o.snapshotId)
@@ -939,8 +1048,13 @@ public class HttpBridgeServer {
                 // server's own context, so it works even when the
                 // accessibility service is off (P1-05 fixed).
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                String pkg = j.getString("package");
+                // v2.1: the operation is accepted — show "操作中"
+                // with the app label (falls back to the package
+                // name when no label exists).
+                opNoted = noteOperation("アプリを起動中：" + operationAppLabel(pkg));
                 try {
-                    boolean ok = launchApp(j.getString("package"));
+                    boolean ok = launchApp(pkg);
                     status = ok ? 200 : 503;
                     sendJson(out, status, new JSONObject().put("ok", ok)
                             .put("error", ok ? JSONObject.NULL
@@ -960,8 +1074,13 @@ public class HttpBridgeServer {
                 // handles the URI; 503 when Android refuses the
                 // start.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                String uri = j.getString("uri");
+                // v2.1: the operation is accepted — show "操作中".
+                // The URI itself never goes into the notification
+                // (it can carry tokens).
+                opNoted = noteOperation("リンクを開いています");
                 try {
-                    boolean ok = openUri(j.getString("uri"));
+                    boolean ok = openUri(uri);
                     status = ok ? 200 : 422;
                     sendJson(out, status, new JSONObject().put("ok", ok)
                             .put("error", ok ? JSONObject.NULL : "could not open uri"));
@@ -1132,9 +1251,13 @@ public class HttpBridgeServer {
                         ba.expectChange = a.optBoolean("expect_change", false);
                         actions.add(ba);
                     }
+                    String batchId = j.getString("batch_id");
+                    int batchTreeHash = j.getInt("tree_hash");
+                    // v2.1: the actions parsed — show "操作中" for
+                    // the whole batch (never a per-action summary).
+                    opNoted = noteOperation("複数の操作を実行中");
                     BridgeAccessibilityService.BatchResult br = svc.runBatch(
-                            j.getString("batch_id"), protocolVersion,
-                            j.getInt("tree_hash"), actions);
+                            batchId, protocolVersion, batchTreeHash, actions);
                     JSONArray results = new JSONArray();
                     for (BridgeAccessibilityService.ActionResult r : br.results) {
                         results.put(new JSONObject()
@@ -1184,21 +1307,34 @@ public class HttpBridgeServer {
             } else if ("/click".equals(path) && "POST".equals(method)) {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
-                boolean ok = svc.tap(j.getInt("x"), j.getInt("y"));
+                int x = j.getInt("x");
+                int y = j.getInt("y");
+                // v2.1: the operation is accepted — show "操作中".
+                opNoted = noteOperation("タップ中");
+                boolean ok = svc.tap(x, y);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
             } else if ("/swipe".equals(path) && "POST".equals(method)) {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
-                boolean ok = svc.swipe(j.getInt("x1"), j.getInt("y1"),
-                        j.getInt("x2"), j.getInt("y2"),
-                        j.optLong("duration_ms", 300));
+                int x1 = j.getInt("x1");
+                int y1 = j.getInt("y1");
+                int x2 = j.getInt("x2");
+                int y2 = j.getInt("y2");
+                long durationMs = j.optLong("duration_ms", 300);
+                // v2.1: the operation is accepted — show "操作中".
+                opNoted = noteOperation("スワイプ中");
+                boolean ok = svc.swipe(x1, y1, x2, y2, durationMs);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
             } else if ("/type_text".equals(path) && "POST".equals(method)) {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
-                boolean ok = svc.typeText(j.getString("text"));
+                String text = j.getString("text");
+                // v2.1: the operation is accepted — show "操作中".
+                // The typed text never goes into the notification.
+                opNoted = noteOperation("文字を入力中");
+                boolean ok = svc.typeText(text);
                 status = ok ? 200 : 422;
                 sendJson(out, status, new JSONObject().put("ok", ok)
                         .put("error", ok ? JSONObject.NULL
@@ -1206,7 +1342,11 @@ public class HttpBridgeServer {
             } else if ("/press_key".equals(path) && "POST".equals(method)) {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
-                boolean ok = svc.pressKey(j.getString("key"));
+                String key = j.getString("key");
+                // v2.1: the operation is accepted — show "操作中"
+                // with the key name (fixed enum, safe).
+                opNoted = noteOperation("キー操作中（" + key + "）");
+                boolean ok = svc.pressKey(key);
                 status = ok ? 200 : 422;
                 sendJson(out, status, new JSONObject().put("ok", ok)
                         .put("error", ok ? JSONObject.NULL : "unknown key"));
@@ -1224,6 +1364,20 @@ public class HttpBridgeServer {
                 sendJson(out, status, new JSONObject().put("ok", posted)
                         .put("error", posted ? JSONObject.NULL
                                 : "notifications not permitted — grant notification permission in the Muse Bridge app"));
+            } else if ("/operation_end".equals(path) && "POST".equals(method)) {
+                // v2.1: end the current operation session (the VM's
+                // explicit end signal). No accessibility service
+                // needed — it must work in MINIMAL. An empty body
+                // or {} is accepted; a non-empty body must be
+                // valid JSON (fields are ignored).
+                if (body.length > 0) {
+                    new JSONObject(new String(body, StandardCharsets.UTF_8));
+                }
+                boolean wasActive = endOperation();
+                BridgeLog.log("operation_end", wasActive ? "ended" : "idle");
+                status = 200;
+                sendJson(out, status, new JSONObject().put("ok", true)
+                        .put("was_active", wasActive));
             } else {
                 status = 404;
                 sendJson(out, status, new JSONObject().put("ok", false).put("error", "not found"));
@@ -1276,6 +1430,13 @@ public class HttpBridgeServer {
             } catch (Exception ignored) {
             }
         } finally {
+            // v2.1: the operation this request started (if any) has
+            // finished — release its in-flight slot so the auto-end
+            // timer can fire. Runs on every exit path, including
+            // the early returns above.
+            if (opNoted) {
+                operationFinished();
+            }
             Log.i(TAG, method + " " + path + " -> " + status);
             try {
                 conn.close();
@@ -1316,6 +1477,226 @@ public class HttpBridgeServer {
                 .build();
         nm.notify(UPDATE_NOTIFICATION_ID, notification);
         return true;
+    }
+
+    // ------------------------------------------------------------------
+    // v2.1: operation notifications ("操作中" / "操作終了").
+    // The server posts them while the VM operates the phone screen.
+    // The notification is an observer, never a gate: when posting
+    // fails (permission revoked) the operation still runs and the
+    // miss is only logged. See SPEC-OPERATION-NOTIFY.md.
+    // ------------------------------------------------------------------
+
+    /** Creates the operation timer if there is none (constructor
+     * and start(); a second start after STOPPED needs a fresh one,
+     * mirroring the worker pool). */
+    private void ensureOperationScheduler() {
+        if (operationScheduler == null || operationScheduler.isShutdown()) {
+            operationScheduler = Executors.newSingleThreadScheduledExecutor(
+                    new ThreadFactory() {
+                        @Override
+                        public Thread newThread(Runnable r) {
+                            Thread t = new Thread(r, "muse-bridge-op-timer");
+                            t.setDaemon(true);
+                            return t;
+                        }
+                    });
+        }
+    }
+
+    /** Records the start of an accepted screen operation. Posts or
+     * updates the ongoing "操作中" notification, refreshes the
+     * last-activity timestamp, and (re)schedules the auto-end
+     * timer. Always returns true — the caller records opNoted for
+     * the finally block. When notifications are disabled the
+     * tracker state is still maintained and the miss is logged
+     * once (throttled). */
+    private boolean noteOperation(String label) {
+        synchronized (operationLock) {
+            if (!operationActive) {
+                operationActive = true;
+                // A stale "操作終了" from the previous session must
+                // not sit next to the new "操作中".
+                NotificationManager nm = (NotificationManager)
+                        context.getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    nm.cancel(OPERATION_END_NOTIFICATION_ID);
+                }
+            }
+            operationLastActivityMs = android.os.SystemClock.elapsedRealtime();
+            operationInFlight++;
+            if (!postOperationRunning(label)) {
+                BridgeLog.logThrottled("op-notify-disabled", "op-notify-disabled",
+                        "operation notifications disabled");
+            }
+            scheduleAutoEndLocked();
+            return true;
+        }
+    }
+
+    /** Releases one in-flight slot (called from handle()'s finally
+     * when the request noted an operation). Floor 0: the VM may
+     * have ended the session while this operation was still
+     * running. */
+    private void operationFinished() {
+        synchronized (operationLock) {
+            if (operationInFlight > 0) {
+                operationInFlight--;
+            }
+        }
+    }
+
+    /** Explicit end of the current operation session (POST
+     * /operation_end). Returns true when a session was active
+     * (and "操作終了" was posted), false when idle. */
+    private boolean endOperation() {
+        synchronized (operationLock) {
+            return endOperationLocked();
+        }
+    }
+
+    /** Lock-held half of endOperation(); also used by the auto-end
+     * task. Caller must hold operationLock. */
+    private boolean endOperationLocked() {
+        if (!operationActive) {
+            return false;
+        }
+        operationActive = false;
+        if (operationAutoEndFuture != null) {
+            operationAutoEndFuture.cancel(false);
+            operationAutoEndFuture = null;
+        }
+        NotificationManager nm = (NotificationManager)
+                context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm != null) {
+            nm.cancel(OPERATION_NOTIFICATION_ID);
+        }
+        postOperationEnded();
+        return true;
+    }
+
+    /** (Re)schedules the auto-end task for lastActivity + timeout.
+     * Caller must hold operationLock. A delay already in the past
+     * (a long operation started more than the timeout ago) falls
+     * back to one full timeout — the task re-checks the in-flight
+     * count when it fires, so it cannot end a session mid-run. */
+    private void scheduleAutoEndLocked() {
+        if (operationAutoEndFuture != null) {
+            operationAutoEndFuture.cancel(false);
+            operationAutoEndFuture = null;
+        }
+        if (operationScheduler == null || operationScheduler.isShutdown()) {
+            return;
+        }
+        long delay = operationLastActivityMs + OPERATION_AUTO_END_TIMEOUT_MS
+                - android.os.SystemClock.elapsedRealtime();
+        if (delay < 0) {
+            delay = OPERATION_AUTO_END_TIMEOUT_MS;
+        }
+        try {
+            operationAutoEndFuture = operationScheduler.schedule(
+                    operationAutoEndTask, delay, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException ignored) {
+            // Scheduler shut down concurrently with stop(); the
+            // session simply has no auto-end — stop() clears the
+            // notification anyway.
+        }
+    }
+
+    /** Posts or updates the ongoing "操作中" notification.
+     * Returns false when notifications are not permitted. */
+    private boolean postOperationRunning(String label) {
+        NotificationManager nm = (NotificationManager)
+                context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null || !nm.areNotificationsEnabled()) {
+            return false;
+        }
+        ensureOperationChannel(nm);
+        Notification notification = new Notification.Builder(context, OPERATION_CHANNEL_ID)
+                .setContentTitle("操作中")
+                .setContentText(label)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentIntent(operationTapIntent(OPERATION_NOTIFICATION_ID))
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .build();
+        nm.notify(OPERATION_NOTIFICATION_ID, notification);
+        return true;
+    }
+
+    /** Posts the one-shot "操作終了" notification. It stays in
+     * the shade until swiped (setAutoCancel, no auto-dismiss
+     * timer); the fixed ID is reused, so at most one ever sits
+     * there. Returns false when notifications are not permitted. */
+    private boolean postOperationEnded() {
+        NotificationManager nm = (NotificationManager)
+                context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null || !nm.areNotificationsEnabled()) {
+            return false;
+        }
+        ensureOperationChannel(nm);
+        Notification notification = new Notification.Builder(context, OPERATION_CHANNEL_ID)
+                .setContentTitle("操作終了")
+                .setContentText("Muse の操作が終わりました")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentIntent(operationTapIntent(OPERATION_END_NOTIFICATION_ID))
+                .setAutoCancel(true)
+                .build();
+        nm.notify(OPERATION_END_NOTIFICATION_ID, notification);
+        return true;
+    }
+
+    /** Idempotent channel creation, same pattern as
+     * postUpdateNotification. IMPORTANCE_DEFAULT: the first
+     * "操作中" post of a session alerts once (the user asked for
+     * visibility); updates are silenced by setOnlyAlertOnce. */
+    private void ensureOperationChannel(NotificationManager nm) {
+        NotificationChannel channel = new NotificationChannel(
+                OPERATION_CHANNEL_ID, "Muse Bridge の操作",
+                NotificationManager.IMPORTANCE_DEFAULT);
+        channel.setDescription("Muse の操作中・操作終了のお知らせ。");
+        nm.createNotificationChannel(channel);
+    }
+
+    /** Tap target for both operation notifications: the Bridge
+     * app's own MainActivity, and nothing else. It must never
+     * launch another app — a notification PendingIntent can start
+     * activities from the background, so using it for anything
+     * else would bypass the background-activity-start
+     * restriction. */
+    private PendingIntent operationTapIntent(int requestCode) {
+        Intent intent = new Intent(context, MainActivity.class);
+        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        return PendingIntent.getActivity(context, requestCode, intent,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    /** Cancels both operation notifications (start/stop cleanup;
+     * notifications survive process death). */
+    private void cancelOperationNotifications() {
+        NotificationManager nm = (NotificationManager)
+                context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (nm == null) {
+            return;
+        }
+        nm.cancel(OPERATION_NOTIFICATION_ID);
+        nm.cancel(OPERATION_END_NOTIFICATION_ID);
+    }
+
+    /** Display label for a package, for the /launch_app hook.
+     * Falls back to the package name when the package is not
+     * installed or has no label (never throws). */
+    private String operationAppLabel(String pkg) {
+        try {
+            CharSequence label = context.getPackageManager().getApplicationLabel(
+                    context.getPackageManager().getApplicationInfo(pkg, 0));
+            if (label != null && label.length() > 0) {
+                return label.toString();
+            }
+        } catch (Exception ignored) {
+            // Not installed (launchApp reports 422) — fall through.
+        }
+        return pkg;
     }
 
     /**

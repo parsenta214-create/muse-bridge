@@ -455,6 +455,12 @@ def build_notify(title: str, text: str) -> dict[str, Any]:
     return validate_body_size({"title": title, "text": text})
 
 
+def build_operation_end() -> dict[str, Any]:
+    """v2.1: the /operation_end body is always empty — the end
+    signal carries no fields."""
+    return validate_body_size({})
+
+
 def build_capture_screen_query(
     scale: float = 0.5,
     format: str = "jpeg",

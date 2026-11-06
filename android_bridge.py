@@ -42,6 +42,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import errno
 import hashlib
 import json
@@ -862,6 +863,38 @@ class AndroidAdapter:
         """
         # Step 3: validated by the protocol module.
         return self._app_post("/notify", bridge_protocol.build_notify(title, text))
+
+    def operation_end(self) -> dict:
+        """End the current operation session (v2.1): POST
+        /operation_end. The bridge dismisses the "操作中"
+        notification and posts "操作終了" (when a session was
+        active); the response carries was_active.
+
+        Not gated by --allow-actions: it only dismisses a
+        notification, it changes nothing on screen. Exactly-once,
+        never retried — if the end signal is lost, the server
+        auto-ends after 10 s.
+        """
+        # Step 3: validated by the protocol module.
+        return self._app_post("/operation_end",
+                              bridge_protocol.build_operation_end())
+
+    @contextlib.contextmanager
+    def operation_session(self):
+        """Wrap a whole task's screen operations (v2.1): guarantees
+        the explicit end signal is sent in a finally, even if the
+        task raises. Sends nothing on entry — begin is automatic,
+        server-side. The finally swallows end-signal failures
+        deliberately: a failed end must never mask the task's own
+        exception, and the server auto-end covers it. Wrap a whole
+        task, not individual actions."""
+        try:
+            yield
+        finally:
+            try:
+                self.operation_end()
+            except Exception:
+                pass  # best-effort; the server auto-end is the fallback
 
     def logs(self, limit: int = 100) -> dict:
         """Return the bridge's debug log (v1.9.3).

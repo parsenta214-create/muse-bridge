@@ -352,8 +352,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
         # P0-1 (v2.0): a11y-off mode. The a11y-dependent POSTs
         # answer the structured 503 body; the available POSTs
         # (/launch_app, /open, /install_apk, /notify,
-        # /notification_action, /clipboard) fall through to normal
-        # handling.
+        # /notification_action, /clipboard, /operation_end) fall
+        # through to normal handling.
         if not MockAppHandler.accessibility:
             base = self.path.split("?")[0]
             if base in ("/batch", "/click", "/swipe", "/type_text",
@@ -388,6 +388,11 @@ class MockAppHandler(BaseHTTPRequestHandler):
                 "completed_action_ids": [a.get("action_id") for a in acts],
                 "failed_action_id": None,
                 "stopped_at": -1, "stop_reason": None})
+        if self.path == "/operation_end":
+            # v2.1: explicit end of the operation session. The
+            # stateless mock always answers was_active false — the
+            # test pins the field's presence, not server state.
+            return self._send_json(200, {"ok": True, "was_active": False})
         return self._send_json(200, {"ok": True, "echo": payload})
 
 
@@ -1794,3 +1799,94 @@ def test_app_notification_action_needs_gate(mock_app):
         adapter.notification_action(NOTIF_KEY, "open")
     with pytest.raises(PermissionError):
         adapter.notification_action(NOTIF_KEY, "reply", text="x")
+
+
+# --------------------------------------------------------------------------
+# v2.1: operation notifications ("操作中" / "操作終了").
+# --------------------------------------------------------------------------
+
+def test_operation_end_posts(mock_app):
+    """v2.1: operation_end() sends ("POST", "/operation_end", {})
+    and returns ok with was_active present."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    result = adapter.operation_end()
+    assert result["ok"] is True
+    assert "was_active" in result
+    assert ("POST", "/operation_end", {}) in MockAppHandler.requests
+
+
+def test_operation_end_not_gated(mock_app):
+    """v2.1: operation_end() is not gated by --allow-actions — it
+    only dismisses a notification, like notify()."""
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    assert adapter.operation_end()["ok"] is True
+
+
+def test_operation_end_not_retried(mock_app, monkeypatch):
+    """v2.1: POST /operation_end runs exactly once — the server
+    auto-end is the fallback for a lost end signal."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    MockAppHandler.fail_next[("POST", "/operation_end")] = (503, 1)
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    with pytest.raises(ab.TransportError):
+        adapter.operation_end()
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/operation_end"]
+    assert len(posts) == 1
+
+
+def test_operation_end_with_a11y_off(mock_app):
+    """v2.1: /operation_end works with the AccessibilityService
+    off — ending a session must work in MINIMAL."""
+    MockAppHandler.accessibility = False
+    adapter = ab.AndroidAdapter(actions_enabled=False)
+    assert adapter.operation_end()["ok"] is True
+
+
+def test_operation_session_sends_end_on_exit(mock_app):
+    """v2.1: operation_session() sends /operation_end when the
+    block exits, after the actions inside it."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with adapter.operation_session():
+        adapter.click(1, 2)
+    paths = [r[1] for r in MockAppHandler.requests if r[0] == "POST"]
+    assert paths.index("/click") < paths.index("/operation_end")
+    assert paths[-1] == "/operation_end"
+
+
+def test_operation_session_sends_end_on_exception(mock_app):
+    """v2.1: operation_session() still sends /operation_end when
+    the body raises (finally)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ValueError, match="boom"):
+        with adapter.operation_session():
+            raise ValueError("boom")
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert ("POST", "/operation_end", {}) in posts
+
+
+def test_operation_session_swallows_end_failure(mock_app, monkeypatch):
+    """v2.1: a failed end signal must not mask the task's own
+    exception — and must not raise on a clean exit either."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    # Clean exit: the end fails, but exiting must not raise.
+    MockAppHandler.fail_next[("POST", "/operation_end")] = (503, 1)
+    with adapter.operation_session():
+        pass
+    # Body exception: it still propagates, not the end failure.
+    MockAppHandler.fail_next[("POST", "/operation_end")] = (503, 1)
+    with pytest.raises(ValueError, match="boom"):
+        with adapter.operation_session():
+            raise ValueError("boom")
+
+
+def test_plain_actions_do_not_send_operation_end(mock_app):
+    """v2.1: bare actions send no /operation_end — the session
+    boundary belongs at the task level, not per action."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    adapter.click(1, 2)
+    adapter.swipe(1, 2, 3, 4)
+    adapter.launch_app("com.twitter.android")
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert not [r for r in posts if r[1] == "/operation_end"]
