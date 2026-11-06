@@ -1989,6 +1989,45 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     verified live 2026-11-06); remaining P0-1 pieces are
     /launch_app (P1-05) and structured "unavailable"
     responses.
+88. Operation notifications adopted (2026-11-06, Saardeim
+    decision, from his proposal; analysis subagent plan,
+    spec SPEC-OPERATION-NOTIFY.md). When the VM operates the
+    phone screen, the Bridge app posts a notification:
+    "操作中" with the action named while operating,
+    "操作終了" when done. Begin is automatic, server-side
+    (hook after a screen operation is accepted); end is
+    explicit POST /operation_end from the VM plus a 10 s
+    auto-end fallback. Dedicated channel
+    muse-bridge-operation, IDs 3 (ongoing) and 4 (one-shot,
+    stays until swiped). Notification tap opens only the
+    Bridge app's MainActivity (red line: never a vehicle to
+    launch other apps). Decisions: /notification_action
+    included as a trigger; operation_active in /health
+    deferred; channel IMPORTANCE_DEFAULT; no grace delay
+    for sub-second operations. Version v2.1.0 / code 34.
+    This feature does NOT fix the /launch_app background
+    false positive (confirmed live 2026-11-06: ok=true but
+    the screen never switched); that fix is separate work.
+89. Operation notifications v2.1.0 FROZEN (2026-11-06,
+    Saardeim decision). GPT reviews: CONS-023
+    (conditional fail — session generation race),
+    CONS-024 (conditional fail — stop/restart race,
+    spec out of sync), CONS-025 (code review passed,
+    conditional approval). Design: two generations —
+    operationGeneration (session) and
+    serverLifecycleGeneration (volatile, captured at
+    accept, checked at noteOperation/endOperation);
+    stop() invalidates the session (inFlight 0,
+    generation bump); start() bumps the lifecycle
+    generation before STARTING; cancel of IDs 3/4 at
+    the very start of start(); allowlists (9 press
+    keys, 32 node actions) validated before the hook
+    (400 on unknown). D1–D7 unchanged. Tests: 230
+    passed. APK v2.1.0 / code 34, SHA-256
+    e71db1d57c0fe051d411e10e7d072c5f4b9bbe715e786cb3bb6068851782a213.
+    Release conditioned on live verification of §7.3
+    items 14–15 (stop/restart race, STARTING
+    old-worker) plus the rest of the checklist.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
