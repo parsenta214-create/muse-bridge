@@ -2211,6 +2211,31 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     server compat not guaranteed; CONS-014
     P1-01/02/03/04/06/07 and CONS-028
     P2-01/02/03 still open.
+97. CONS-014 P1 FROZEN (2026-11-07 00:37
+    +07, Saardeim decision "このまま凍結
+    する"): the 6 CONS-014 P1 items
+    (P1-01/02/03/04/06/07; P1-05 already
+    fixed by v2.0 P0-1) at v2.5.0 / code 38
+    (GitHub 51325cc7; APK SHA 460521df…;
+    full Python suite 286 passed, 18
+    subtests). Spec: SPEC-CONS-014-P1.md
+    (new document; the frozen P0 and P1
+    specs were NOT edited). GPT reviews
+    CONS-032 (conditional fail), CONS-033
+    (conditional fail), CONS-034 (conditional
+    pass — code freeze approved). Live
+    Logcat verification NOT done (the user
+    froze on source-level verification:
+    guard tests + dex + code review + GPT
+    code review). Known limitations carried
+    forward (NOT fixed): live Logcat check
+    outstanding; P1-02 CGNAT caveat
+    (interface-name identification is a
+    future improvement); P1-01/P1-06 have
+    source-level guards only (no behaviour
+    tests); CONS-028 P2-01/02/03, CONS-022
+    P2, and the CONS-031 tailscale_ips [""]
+    note still open (step 3, P2 wrap-up).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
