@@ -38,6 +38,7 @@ The hook fires per-branch in `handle()`, after the operation is accepted for exe
 | `/batch` | `複数の操作を実行中` (do not summarise the 20 actions) |
 | `/launch_app` | `アプリを起動中：K PLUS` — app label via `PackageManager.getApplicationLabel()`, fallback to the package name |
 | `/open` | `リンクを開いています` (never the URI — URIs can carry tokens) |
+| `/notification_action` open | `通知を開いています` (decided 2026-11-06: included as a trigger) |
 
 End title is `操作終了`, end text is `Muse の操作が終わりました`.
 
@@ -201,6 +202,7 @@ The Java logic (tracker, timer, notification posting) **cannot** be covered by t
 10. `/notifications` shows the bridge's own operation notifications (document, don't be surprised).
 11. Tap the "操作中" notification → opens the Bridge app (`MainActivity`) and nothing else.
 12. Lock screen: no sensitive content in the notification text.
+13. Generation race (GPT test A, CONS-023): run a long operation (e.g. a batch), send `/operation_end` while it is still running, then start a new operation; when the old one finishes, the new session's "操作中" must stay up and its counter/timer must not be disturbed.
 
 ## 8. Interaction with P0 and the deferred P1 items
 
@@ -223,7 +225,7 @@ The Java logic (tracker, timer, notification posting) **cannot** be covered by t
 
 ## 10. Open questions (pending Saardeim's decision)
 
-1. **`/notification_action` "open"** also changes the foreground app, but it is outside the approved trigger list. Recommend including it (label `通知を開いています`) — confirm or explicitly exclude.
+1. **`/notification_action` "open"** — DECIDED 2026-11-06 (Saardeim approved the recommendation): included as a trigger (label `通知を開いています`).
 2. **`operation_active` in `/health`?** Recommend deferring (§8).
 3. **Channel importance** `DEFAULT` (alerts once per session) vs `LOW` (silent banner)? Recommend `DEFAULT`.
 4. **Grace delay for sub-second operations?** Recommend none for v1 (§6.1).
@@ -239,7 +241,7 @@ The Java logic (tracker, timer, notification posting) **cannot** be covered by t
 
 | File | Change |
 |---|---|
-| `android-app/src/dev/muse/bridge/HttpBridgeServer.java` | Constants, tracker fields/methods, 11 hook calls, `/operation_end` branch, `start()`/`stop()` cleanup, endpoint Javadoc line |
+| `android-app/src/dev/muse/bridge/HttpBridgeServer.java` | Constants, tracker fields/methods, 12 hook calls, `/operation_end` branch, `start()`/`stop()` cleanup, endpoint Javadoc line |
 | `android-app/build.sh` | Version bump to `2.1.0` / code `34` (at implementation time) |
 | `android_bridge.py` | `operation_end()` method + `operation_session()` context manager |
 | `bridge_protocol.py` | `build_operation_end()` trivial builder |

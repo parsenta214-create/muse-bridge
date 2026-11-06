@@ -41,8 +41,11 @@ import java.net.Socket;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -120,6 +123,26 @@ public class HttpBridgeServer {
     private static final int OPERATION_NOTIFICATION_ID = 3;
     private static final int OPERATION_END_NOTIFICATION_ID = 4;
     private static final long OPERATION_AUTO_END_TIMEOUT_MS = 10_000;
+
+    // v2.1 fix (CONS-023 P2, D6): the one-shot node actions the
+    // service accepts. Canonical list is
+    // BridgeAccessibilityService.actionIdForName(); this copy is
+    // checked before the /node_action notification hook, so an
+    // unknown action name can never reach a notification label.
+    // Case-sensitive, like the service's switch. Fail-closed: if
+    // the service gains a new action, the server 400s it until
+    // this list is updated.
+    private static final Set<String> KNOWN_NODE_ACTIONS = new HashSet<>(Arrays.asList(
+            "click", "long_click", "focus", "clear_focus",
+            "accessibility_focus", "clear_accessibility_focus",
+            "select", "clear_selection", "set_selection",
+            "copy", "cut", "paste", "expand", "collapse", "dismiss",
+            "show_on_screen", "context_click", "ime_enter",
+            "scroll_forward", "scroll_backward",
+            "scroll_up", "scroll_down", "scroll_left", "scroll_right",
+            "page_up", "page_down", "page_left", "page_right",
+            "press_and_hold", "set_progress", "scroll_to_position",
+            "set_text"));
 
     public interface TokenProvider {
         String currentToken();
@@ -250,6 +273,13 @@ public class HttpBridgeServer {
     private int operationInFlight = 0;
     private ScheduledFuture<?> operationAutoEndFuture = null;
     private ScheduledExecutorService operationScheduler;
+    // v2.1 fix (CONS-023 P1): session generation.
+    // operationInFlight counts only operations of the current
+    // generation. A request that started in an older session and
+    // finishes after an explicit end (or after a new session
+    // began) is stale and must not touch the new session's
+    // counter — operationFinished() ignores it by generation.
+    private long operationGeneration = 0;
 
     /** Auto-end task: ends the session only when nothing is in
      * flight and the last activity is at least the timeout old;
@@ -312,6 +342,14 @@ public class HttpBridgeServer {
             return state == ServerState.RUNNING;
         }
         state = ServerState.STARTING;
+        // v2.1 fix (CONS-023 P2): clear operation notifications
+        // left in the shade by a previous process BEFORE the
+        // bind attempts — a total bind failure must not leave a
+        // stale "操作中" behind. (The old position, after
+        // RUNNING, is removed: it would also cancel a
+        // legitimate "操作中" posted by a request accepted
+        // during the STARTING window.)
+        cancelOperationNotifications();
         // v2.1: a second start after STOPPED needs a fresh timer
         // (stop() shut the old one down), like the worker pool.
         ensureOperationScheduler();
@@ -352,10 +390,6 @@ public class HttpBridgeServer {
             return false;
         }
         state = ServerState.RUNNING;
-        // v2.1: a restart must clear operation notifications left
-        // in the shade by a previous process — notifications
-        // survive process death.
-        cancelOperationNotifications();
         BridgeLog.log("server", "RUNNING");
         return true;
     }
@@ -519,10 +553,12 @@ public class HttpBridgeServer {
         // A-1 (v1.9): per-request monotonic deadline; each phase gets
         // the smaller of its own timeout and the remaining total time.
         long deadline = android.os.SystemClock.elapsedRealtime() + TOTAL_TIMEOUT_MS;
-        // v2.1: set to true by a hook call below when this request
-        // starts a screen operation; the finally block then releases
-        // its in-flight slot.
-        boolean opNoted = false;
+        // v2.1: the generation noteOperation() returned when
+        // this request started a screen operation (-1 when it
+        // noted none); the finally block passes it to
+        // operationFinished() so a stale request cannot touch
+        // another session's counter (CONS-023 P1).
+        long opGeneration = -1;
         try {
             InputStream in = conn.getInputStream();
             OutputStream out = conn.getOutputStream();
@@ -904,7 +940,7 @@ public class HttpBridgeServer {
                             // the foreground app — show "操作中".
                             // ("reply" sends a message without
                             // changing the screen, so no hook.)
-                            opNoted = noteOperation("通知を開いています");
+                            opGeneration = noteOperation("通知を開いています");
                             err = BridgeNotificationListener.openNotification(key);
                         } else if ("reply".equals(action)) {
                             String text = j.getString("text");
@@ -929,7 +965,7 @@ public class HttpBridgeServer {
                 String nodeId = j.getString("node_id");
                 int nodeTreeHash = j.getInt("tree_hash");
                 // v2.1: the operation is accepted — show "操作中".
-                opNoted = noteOperation("タップ中");
+                opGeneration = noteOperation("タップ中");
                 try {
                     BridgeAccessibilityService.ActionOutcome o =
                             svc.clickNode(nodeId, nodeTreeHash);
@@ -955,7 +991,7 @@ public class HttpBridgeServer {
                 String nodeText = j.getString("text");
                 // v2.1: the operation is accepted — show "操作中".
                 // The typed text never goes into the notification.
-                opNoted = noteOperation("文字を入力中");
+                opGeneration = noteOperation("文字を入力中");
                 try {
                     BridgeAccessibilityService.ActionOutcome o = svc.typeNode(nodeId,
                             nodeTreeHash, nodeText);
@@ -987,7 +1023,7 @@ public class HttpBridgeServer {
                     String nodeId = j.getString("node_id");
                     int nodeTreeHash = j.getInt("tree_hash");
                     // v2.1: the operation is accepted — show "操作中".
-                    opNoted = noteOperation("スクロール中");
+                    opGeneration = noteOperation("スクロール中");
                     try {
                         BridgeAccessibilityService.ActionOutcome o = svc.scrollNode(
                                 nodeId, nodeTreeHash, direction);
@@ -1014,9 +1050,18 @@ public class HttpBridgeServer {
                 String nodeId = j.getString("node_id");
                 int nodeTreeHash = j.getInt("tree_hash");
                 String actionName = j.getString("action");
+                // v2.1 fix (CONS-023 P2, D6): reject unknown
+                // actions before the hook — the notification
+                // label must never contain an unvalidated value.
+                if (!KNOWN_NODE_ACTIONS.contains(actionName)) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "unknown action: " + actionName));
+                    return status;
+                }
                 // v2.1: the operation is accepted — show "操作中"
                 // with the action name (fixed enum, safe).
-                opNoted = noteOperation("操作を実行中（" + actionName + "）");
+                opGeneration = noteOperation("操作を実行中（" + actionName + "）");
                 try {
                     BridgeAccessibilityService.ActionOutcome o = svc.nodeAction(
                             nodeId, nodeTreeHash, actionName, args);
@@ -1052,7 +1097,7 @@ public class HttpBridgeServer {
                 // v2.1: the operation is accepted — show "操作中"
                 // with the app label (falls back to the package
                 // name when no label exists).
-                opNoted = noteOperation("アプリを起動中：" + operationAppLabel(pkg));
+                opGeneration = noteOperation("アプリを起動中：" + operationAppLabel(pkg));
                 try {
                     boolean ok = launchApp(pkg);
                     status = ok ? 200 : 503;
@@ -1078,7 +1123,7 @@ public class HttpBridgeServer {
                 // v2.1: the operation is accepted — show "操作中".
                 // The URI itself never goes into the notification
                 // (it can carry tokens).
-                opNoted = noteOperation("リンクを開いています");
+                opGeneration = noteOperation("リンクを開いています");
                 try {
                     boolean ok = openUri(uri);
                     status = ok ? 200 : 422;
@@ -1255,7 +1300,7 @@ public class HttpBridgeServer {
                     int batchTreeHash = j.getInt("tree_hash");
                     // v2.1: the actions parsed — show "操作中" for
                     // the whole batch (never a per-action summary).
-                    opNoted = noteOperation("複数の操作を実行中");
+                    opGeneration = noteOperation("複数の操作を実行中");
                     BridgeAccessibilityService.BatchResult br = svc.runBatch(
                             batchId, protocolVersion, batchTreeHash, actions);
                     JSONArray results = new JSONArray();
@@ -1310,7 +1355,7 @@ public class HttpBridgeServer {
                 int x = j.getInt("x");
                 int y = j.getInt("y");
                 // v2.1: the operation is accepted — show "操作中".
-                opNoted = noteOperation("タップ中");
+                opGeneration = noteOperation("タップ中");
                 boolean ok = svc.tap(x, y);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
@@ -1323,7 +1368,7 @@ public class HttpBridgeServer {
                 int y2 = j.getInt("y2");
                 long durationMs = j.optLong("duration_ms", 300);
                 // v2.1: the operation is accepted — show "操作中".
-                opNoted = noteOperation("スワイプ中");
+                opGeneration = noteOperation("スワイプ中");
                 boolean ok = svc.swipe(x1, y1, x2, y2, durationMs);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
@@ -1333,7 +1378,7 @@ public class HttpBridgeServer {
                 String text = j.getString("text");
                 // v2.1: the operation is accepted — show "操作中".
                 // The typed text never goes into the notification.
-                opNoted = noteOperation("文字を入力中");
+                opGeneration = noteOperation("文字を入力中");
                 boolean ok = svc.typeText(text);
                 status = ok ? 200 : 422;
                 sendJson(out, status, new JSONObject().put("ok", ok)
@@ -1343,9 +1388,18 @@ public class HttpBridgeServer {
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 requireService(svc);
                 String key = j.getString("key");
+                // v2.1 fix (CONS-023 P2, D6): reject unknown keys
+                // before the hook — the notification label must
+                // never contain an unvalidated value.
+                if (!isKnownPressKey(key)) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", "unknown key: " + key));
+                    return status;
+                }
                 // v2.1: the operation is accepted — show "操作中"
                 // with the key name (fixed enum, safe).
-                opNoted = noteOperation("キー操作中（" + key + "）");
+                opGeneration = noteOperation("キー操作中（" + key + "）");
                 boolean ok = svc.pressKey(key);
                 status = ok ? 200 : 422;
                 sendJson(out, status, new JSONObject().put("ok", ok)
@@ -1433,9 +1487,10 @@ public class HttpBridgeServer {
             // v2.1: the operation this request started (if any) has
             // finished — release its in-flight slot so the auto-end
             // timer can fire. Runs on every exit path, including
-            // the early returns above.
-            if (opNoted) {
-                operationFinished();
+            // the early returns above. A generation of -1 means
+            // this request noted no operation.
+            if (opGeneration >= 0) {
+                operationFinished(opGeneration);
             }
             Log.i(TAG, method + " " + path + " -> " + status);
             try {
@@ -1504,16 +1559,44 @@ public class HttpBridgeServer {
         }
     }
 
+    /** v2.1 fix (CONS-023 P2, D6): the keys the service accepts.
+     * Canonical set is BridgeAccessibilityService.pressKey()
+     * (case-insensitive chain). Checked before the /press_key
+     * notification hook, so an unknown key can never reach a
+     * notification label. Fail-closed like KNOWN_NODE_ACTIONS. */
+    private static boolean isKnownPressKey(String key) {
+        return "HOME".equalsIgnoreCase(key)
+                || "BACK".equalsIgnoreCase(key)
+                || "RECENTS".equalsIgnoreCase(key)
+                || "POWER".equalsIgnoreCase(key)
+                || "DPAD_UP".equalsIgnoreCase(key)
+                || "DPAD_DOWN".equalsIgnoreCase(key)
+                || "DPAD_LEFT".equalsIgnoreCase(key)
+                || "DPAD_RIGHT".equalsIgnoreCase(key)
+                || "DPAD_CENTER".equalsIgnoreCase(key);
+    }
+
     /** Records the start of an accepted screen operation. Posts or
      * updates the ongoing "操作中" notification, refreshes the
      * last-activity timestamp, and (re)schedules the auto-end
-     * timer. Always returns true — the caller records opNoted for
-     * the finally block. When notifications are disabled the
-     * tracker state is still maintained and the miss is logged
-     * once (throttled). */
-    private boolean noteOperation(String label) {
+     * timer. Returns the generation this operation belongs to —
+     * the caller records it for the finally block — or -1 when
+     * the server is stopping/stopped and no session was started
+     * (CONS-023 P1: a worker that already passed the accept loop
+     * must not resurrect the notification after stop() cleared
+     * it; STARTING is allowed, the server is coming up and the
+     * scheduler already exists). A new session bumps the
+     * generation first, so an in-flight request from the previous
+     * session is recognised as stale when its finally runs. When
+     * notifications are disabled the tracker state is still
+     * maintained and the miss is logged once (throttled). */
+    private long noteOperation(String label) {
         synchronized (operationLock) {
+            if (state != ServerState.RUNNING && state != ServerState.STARTING) {
+                return -1;
+            }
             if (!operationActive) {
+                operationGeneration++;
                 operationActive = true;
                 // A stale "操作終了" from the previous session must
                 // not sit next to the new "操作中".
@@ -1530,18 +1613,30 @@ public class HttpBridgeServer {
                         "operation notifications disabled");
             }
             scheduleAutoEndLocked();
-            return true;
+            return operationGeneration;
         }
     }
 
     /** Releases one in-flight slot (called from handle()'s finally
-     * when the request noted an operation). Floor 0: the VM may
-     * have ended the session while this operation was still
-     * running. */
-    private void operationFinished() {
+     * with the generation noteOperation() returned). A generation
+     * that no longer matches the current one belongs to an ended
+     * session and is ignored (CONS-023 P1) — it must not touch
+     * the new session's counter or its timer. When the last
+     * operation of the current session finishes, the auto-end
+     * timer is re-anchored at the finish time, so "操作終了"
+     * appears ~10 s after the last finish instead of up to ~10 s
+     * late (CONS-023 P1). */
+    private void operationFinished(long generation) {
         synchronized (operationLock) {
+            if (generation != operationGeneration) {
+                return;
+            }
             if (operationInFlight > 0) {
                 operationInFlight--;
+            }
+            if (operationInFlight == 0 && operationActive) {
+                operationLastActivityMs = android.os.SystemClock.elapsedRealtime();
+                scheduleAutoEndLocked();
             }
         }
     }
@@ -1562,6 +1657,11 @@ public class HttpBridgeServer {
             return false;
         }
         operationActive = false;
+        // v2.1 fix (CONS-023 P1): in-flight requests of the ended
+        // session are orphaned — their finally calls are stale
+        // (generation mismatch) and ignored. Reset the counter
+        // here so it cannot leak into the next session.
+        operationInFlight = 0;
         if (operationAutoEndFuture != null) {
             operationAutoEndFuture.cancel(false);
             operationAutoEndFuture = null;
