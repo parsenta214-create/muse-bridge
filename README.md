@@ -2052,6 +2052,26 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     The live launch test uses a normal app (e.g. X).
     P0 freeze follows after P0-4 is implemented
     and live-verified.
+91. Launch deny list ENFORCED (2026-11-06 20:16
+    +07, Saardeim decision, GPT P1 #4 in
+    CONS-20261106-027): the banking-apps
+    exclusion is enforced by the API with an
+    explicit deny list, not just an operational
+    declaration. An explicit hard-coded set of
+    package names in HttpBridgeServer.java, checked
+    before any launch attempt and before the
+    operation notification hook. Denied package
+    returns HTTP 403 {"ok": false, "error":
+    "launch denied: <package> is on the deny
+    list"}; the Python client surfaces it as an
+    error and never retries. Initial list
+    (verified 2026-11-06): com.kasikorn.retail.
+    mbanking.wap (K PLUS), com.bbl.mobilebanking
+    (Bualuang mBanking), com.scb.phone (SCB EASY),
+    com.krungsri.kma (KMA). No auto-detection;
+    adding a package is a code change + test.
+    Krungthai NEXT is not on the initial list
+    (package unconfirmed).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
