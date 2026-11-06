@@ -1802,7 +1802,14 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     bytes, sha256 aba229c4…; 131 tests pass. After
     1.9.22 is installed, the Termux install is retried
     with the 1022 URL; the confirmation dialog should
-    now actually appear.
+    now actually appear. Live test 2026-11-06 07:28 on
+    1.9.22: VERIFIED — the Termux 1022 install reached
+    "pending_user_action" (confirmation shown), the user
+    tapped Install, and the result broadcast came back
+    "installed: status=0 pkg=com.termux
+    INSTALL_SUCCEEDED: Session installed". Remote APK
+    install now works end to end; the bridge can update
+    itself the same way from now on.
 78. Startup crash fix — registerReceiver exported flag
     (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
     crashed the instant START BRIDGE was tapped, with no
