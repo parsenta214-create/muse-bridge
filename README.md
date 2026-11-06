@@ -2092,6 +2092,38 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     The P0 freeze version is still TBD at
     freeze; v2.2.0 is the live-verification
     build.
+93. P0 FROZEN (2026-11-06 22:08 +07, Saardeim
+    decision): Muse Bridge v2.0 P0 (P0-1 HTTP/
+    a11y separation, P0-2 MINIMAL standard
+    startup, P0-3 per-module Health API, P0-4
+    launch result semantics + deny list) is
+    FROZEN at v2.2.0 / code 35 (GitHub
+    3e1099a7; APK SHA-256 212432ad…).
+    Live verification complete (LIVE-VERIFY-
+    P0-4.md): FULL_ACCESS X launch → launched
+    (screen switched); MINIMAL X launch →
+    unconfirmed / VERIFICATION_UNAVAILABLE
+    (screen did NOT switch, user confirmed);
+    KBank deny → 403 (app did not open).
+    GPT reviews CONS-022 (conditional fail,
+    P0 launch warning), CONS-026 (P0-4 design),
+    CONS-027 (conditional pass, P1 fixes),
+    CONS-028 (conditional pass, code freeze
+    permitted, GPT-5.2). Known issues carried
+    forward (NOT fixed): the five deferred P1
+    items from CONS-022 (BANKING_SAFE UI
+    contradiction — the app still prompts to
+    enable a11y in MINIMAL/BANKING_SAFE;
+    UI vs Health a11y-state mismatch;
+    tailscale_ips staleness; install_apk
+    capability always true; parse_health
+    cross-field validation) + P2-01/02/03
+    from CONS-028 (verification baseline
+    timestamp; accepted/launch_requested
+    value validation; Java-side concurrent/
+    disconnect direct test). After freezing,
+    never edit a frozen file directly — make
+    a new version.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
