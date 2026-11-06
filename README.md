@@ -1925,6 +1925,33 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     P1-01/02/03 fixed. BatchRegistry wiring to
     the A-4 server rules (410/partial/tombstone)
     is NOT in scope — left to a later decision.
+85. PoC merge Step 4 frozen (2026-11-06, v1.2.0).
+    BatchRegistry aligned to the A-4 server rules
+    (MERGE_PLAN_A follow-up, Saardeim delegated
+    2026-11-06 08:26 "全て任せます"). 10-min result
+    + 10-min tombstone (BATCH_EXPIRED, the server's
+    410); boundaries use ">" (not ">="), mirroring
+    the server's `now > expiresAt` / `now >
+    tombstoneUntil` (CONS-020 P0-01 — at exactly
+    600 s the batch is still live, at exactly
+    1200 s it is still a tombstone). Outcome
+    recording incl. partial/running; payload_hash
+    and batch-level status are now required in
+    parse_batch_result and record_result (P0-02/
+    P0-03); batch() checks the response batch_id
+    (P0-04, BATCH_ID_MISMATCH). Integer ranges
+    match Java (P1-01: tree_hash/coords 32-bit,
+    duration/wait 64-bit). Unknown-id record_result
+    raises (P1-02); a hash mismatch keeps the
+    server outcome as a diagnostic (P1-03).
+    compute_content_hash now uses the server's
+    canonical form, byte-identical to
+    canonicalBatchPayload (the live test exposed
+    the old JSON hash never matching the server's
+    payload_hash; after the fix the client hash
+    equals the server's, verified live on 1.9.22).
+    Tests: 195 passed. GPT review CONS-020: all
+    P0/P1 fixed. No APK change (Python only).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

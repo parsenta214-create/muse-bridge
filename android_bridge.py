@@ -468,6 +468,10 @@ class AndroidAdapter:
         # Decision 59: the latest logical call's measurement
         # (cleared when a call starts, filled when it finishes).
         self.last_call: dict | None = None
+        # Step 4 (v1.2.0): the batch idempotency registry (A-4).
+        # It enforces the id rules client-side (conflict, expired
+        # id) and records each batch's server outcome.
+        self._batch_registry = bridge_protocol.BatchRegistry()
 
     # -- snapshot guard (A-3) ------------------------------------------------
     def _ensure_fresh_snapshot(self, tree_hash: int) -> int:
@@ -738,9 +742,26 @@ class AndroidAdapter:
         # results, stopped_at, stop_reason). The "transport" key is
         # added by _app_post before parsing and survives in the
         # returned dict (extra keys are tolerated).
-        result = self._app_post("/batch", bridge_protocol.build_batch(
-            batch_id, tree_hash, actions))
-        return bridge_protocol.parse_batch_result(result)
+        # Step 4: the registry enforces the A-4 id rules client-side
+        # before anything is sent (same id + different content ->
+        # STALE_REVISION; expired id -> BATCH_EXPIRED) and records
+        # the server's outcome (status incl. partial/running,
+        # payload_hash verified against what was sent).
+        submission = self._batch_registry.submit(batch_id, tree_hash, actions)
+        result = self._app_post("/batch", submission["body"])
+        parsed = bridge_protocol.parse_batch_result(result)
+        # Step 4 (CONS-020 P0-04): the response must be for the
+        # batch that was asked for. batch_id is NOT in the hash, so
+        # a result for a different id could otherwise pass the
+        # payload_hash check. Never record a mismatched id.
+        if parsed["batch_id"] != batch_id:
+            raise bridge_protocol.ProtocolError(
+                f"batch_id mismatch: asked for {batch_id!r}, "
+                f"server answered for {parsed['batch_id']!r}",
+                code="BATCH_ID_MISMATCH",
+            )
+        self._batch_registry.record_result(batch_id, parsed)
+        return parsed
 
     def notify(self, title: str, text: str) -> dict:
         """Ask the bridge app (v1.3+) to post an update notification.

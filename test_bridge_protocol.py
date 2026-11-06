@@ -375,6 +375,10 @@ class TestParseFunctionsValid(unittest.TestCase):
             ],
             "stopped_at": 1,
             "stop_reason": "action_failed",
+            # Step 4 (CONS-020 P0-02/P0-03): the A-4 server always
+            # returns the batch-level status and the payload_hash.
+            "status": "partial",
+            "payload_hash": "ab" * 32,
         }
         self.assertEqual(parse_batch_result(raw), raw)
 
@@ -509,6 +513,10 @@ class TestParseFunctionsInvalid(unittest.TestCase):
             ],
             "stopped_at": -1,
             "stop_reason": None,
+            # Step 4 (CONS-020 P0-02/P0-03): the batch-level fields
+            # are valid here so the test exercises the per-item check.
+            "status": "completed",
+            "payload_hash": "ab" * 32,
         }
         with self.assertRaises(ValueError):
             parse_batch_result(bad_status)
@@ -517,6 +525,27 @@ class TestParseFunctionsInvalid(unittest.TestCase):
         del missing_field["stopped_at"]
         with self.assertRaises(ValueError):
             parse_batch_result(missing_field)
+
+        # Step 4 (CONS-020 P0-02/P0-03): a missing payload_hash or
+        # a missing/invalid batch-level status is also rejected.
+        missing_hash = dict(bad_status)
+        missing_hash["results"] = [{
+            "action_id": "a1", "status": "executed", "error": None,
+            "hash_before": 111, "hash_after": 222,
+        }]
+        del missing_hash["payload_hash"]
+        with self.assertRaises(ValueError):
+            parse_batch_result(missing_hash)
+        bad_batch_status = dict(missing_hash)
+        bad_batch_status["payload_hash"] = "ab" * 32
+        bad_batch_status["status"] = "done"
+        with self.assertRaises(ValueError):
+            parse_batch_result(bad_batch_status)
+        bad_hash_format = dict(bad_batch_status)
+        bad_hash_format["status"] = "completed"
+        bad_hash_format["payload_hash"] = "not-a-hash"
+        with self.assertRaises(ValueError):
+            parse_batch_result(bad_hash_format)
 
 
 class TestErrorCodesAndErrorBody(unittest.TestCase):
@@ -560,15 +589,22 @@ class TestBatchRegistry(unittest.TestCase):
             {"action_id": "a1", "type": "tap", "x": 100, "y": 200},
             {"action_id": "a2", "type": "wait", "wait_ms": 200},
         ]
-        expected_canonical = json.dumps(
-            {"protocol_version": 1, "tree_hash": 777, "actions": actions_v1},
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
+        # Step 4 (v1.2.0): the expected hash is the server's canonical
+        # form (fixed field order, defaults filled, length-prefixed
+        # strings), written out literally — not recomputed via the
+        # function under test.
+        canonical = (
+            "v1|tree=777|actions=["
+            "{id=2:a1,type=3:tap,node=0:,x=100,y=200,x1=0,y1=0,x2=0,y2=0,"
+            "dur=300,text=0:,key=0:,wait=0,exp=false};"
+            "{id=2:a2,type=4:wait,node=0:,x=0,y=0,x1=0,y1=0,x2=0,y2=0,"
+            "dur=300,text=0:,key=0:,wait=200,exp=false}]"
         )
-        expected_hash = hashlib.sha256(expected_canonical.encode("utf-8")).hexdigest()
+        expected_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
-        # 1. Initial submission -> replayed: False
+        # 1. Initial submission -> replayed: False. Step 4 (v1.2.0):
+        # the return also carries the validated "body" (the exact
+        # payload to send).
         first = registry.submit("batch-xyz", 777, actions_v1)
         self.assertEqual(
             first,
@@ -576,6 +612,12 @@ class TestBatchRegistry(unittest.TestCase):
                 "batch_id": "batch-xyz",
                 "replayed": False,
                 "content_hash": expected_hash,
+                "body": {
+                    "batch_id": "batch-xyz",
+                    "protocol_version": 1,
+                    "tree_hash": 777,
+                    "actions": actions_v1,
+                },
             },
         )
 
@@ -587,6 +629,12 @@ class TestBatchRegistry(unittest.TestCase):
                 "batch_id": "batch-xyz",
                 "replayed": True,
                 "content_hash": expected_hash,
+                "body": {
+                    "batch_id": "batch-xyz",
+                    "protocol_version": 1,
+                    "tree_hash": 777,
+                    "actions": actions_v1,
+                },
             },
         )
 
@@ -603,6 +651,226 @@ class TestBatchRegistry(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx2:
             registry.submit("batch-xyz", 778, actions_v1)
         self.assertIn("conflict", str(ctx2.exception).lower())
+
+
+class TestBatchRegistryStep4(unittest.TestCase):
+    """Step 4 (v1.2.0): BatchRegistry mirrors the A-4 server rules
+    — 10-minute result, 10-minute tombstone, partial/running
+    outcomes, payload_hash verification."""
+
+    def _actions(self):
+        return [{"action_id": "a1", "type": "wait", "wait_ms": 500}]
+
+    def _clock(self, start=1000.0):
+        # A fake monotonic clock the test can move forward.
+        state = {"now": start}
+
+        def clock():
+            return state["now"]
+
+        return state, clock
+
+    def _result(self, batch_id, status="completed", payload_hash=None):
+        return {
+            "ok": True,
+            "batch_id": batch_id,
+            "replayed": False,
+            "results": [
+                {
+                    "action_id": "a1",
+                    "status": "executed",
+                    "error": None,
+                    "hash_before": 1,
+                    "hash_after": 1,
+                }
+            ],
+            "stopped_at": -1,
+            "stop_reason": None,
+            "snapshot_id": 7,
+            "status": status,
+            "payload_hash": payload_hash,
+            "completed_action_ids": ["a1"],
+            "failed_action_id": None,
+        }
+
+    def test_tombstone_then_free_again(self) -> None:
+        # Live (0-10 min): same content replays, different content
+        # conflicts. Tombstone (10-20 min): any submit raises
+        # BATCH_EXPIRED. After 20 min: the id is free again.
+        # Step 4 (CONS-020 P0-01): the boundaries are ">" (not
+        # ">="), mirroring the server — at exactly 600 s the batch
+        # is still live, at exactly 1200 s it is still a tombstone.
+        state, clock = self._clock()
+        registry = BatchRegistry(clock=clock)
+        actions = self._actions()
+        registry.submit("b-exp", 777, actions)
+        self.assertTrue(registry.submit("b-exp", 777, actions)["replayed"])
+        state["now"] += 599.999
+        self.assertTrue(registry.submit("b-exp", 777, actions)["replayed"])
+        state["now"] += 0.001  # exactly 600 s: still live
+        self.assertTrue(registry.submit("b-exp", 777, actions)["replayed"])
+        with self.assertRaises(ProtocolError) as ctx:
+            registry.submit("b-exp", 777, [{"action_id": "a9", "type": "wait", "wait_ms": 100}])
+        self.assertEqual(ctx.exception.code, "STALE_REVISION")
+        state["now"] += 0.001  # 600.001 s: tombstone
+        with self.assertRaises(ProtocolError) as ctx:
+            registry.submit("b-exp", 777, actions)
+        self.assertEqual(ctx.exception.code, "BATCH_EXPIRED")
+        self.assertIn("410", str(ctx.exception))
+        # A different payload in the tombstone window is still
+        # expired (not a conflict) — the id itself is dead.
+        with self.assertRaises(ProtocolError) as ctx2:
+            registry.submit("b-exp", 777, [{"action_id": "a9", "type": "wait", "wait_ms": 100}])
+        self.assertEqual(ctx2.exception.code, "BATCH_EXPIRED")
+        # The record reports itself as expired while tombstoned.
+        self.assertTrue(registry.get("b-exp")["expired"])
+        state["now"] = 1000.0 + 1199.999
+        self.assertTrue(registry.get("b-exp")["expired"])
+        state["now"] = 1000.0 + 1200.0  # exactly 1200 s: still a tombstone
+        with self.assertRaises(ProtocolError) as ctx3:
+            registry.submit("b-exp", 777, actions)
+        self.assertEqual(ctx3.exception.code, "BATCH_EXPIRED")
+        state["now"] = 1000.0 + 1200.001  # past 20 minutes total
+        self.assertIsNone(registry.get("b-exp"))
+        fresh = registry.submit("b-exp", 777, actions)
+        self.assertFalse(fresh["replayed"])
+
+    def test_record_result_partial_and_running(self) -> None:
+        # "partial" (>=1 success then stop) and "running" are valid
+        # outcomes the registry stores; the status is readable via get.
+        state, clock = self._clock()
+        registry = BatchRegistry(clock=clock)
+        actions = self._actions()
+        first = registry.submit("b-part", 777, actions)
+        recorded = registry.record_result(
+            "b-part", self._result("b-part", status="partial",
+                                   payload_hash=first["content_hash"]))
+        self.assertEqual(recorded["status"], "partial")
+        self.assertEqual(recorded["payload_hash"], first["content_hash"])
+        self.assertEqual(recorded["completed_action_ids"], ["a1"])
+        self.assertIsNone(recorded["failed_action_id"])
+        self.assertFalse(recorded["expired"])
+        self.assertEqual(recorded["age_s"], 0)
+        # A later "running" outcome (a re-send while running)
+        # overwrites the stored status.
+        registry.record_result(
+            "b-part", self._result("b-part", status="running",
+                                   payload_hash=first["content_hash"]))
+        self.assertEqual(registry.get("b-part")["status"], "running")
+
+    def test_record_result_rejects_bad_status_and_hash_mismatch(self) -> None:
+        registry = BatchRegistry()
+        actions = self._actions()
+        first = registry.submit("b-bad", 777, actions)
+        with self.assertRaises(ProtocolError):
+            registry.record_result(
+                "b-bad", self._result("b-bad", status="done",
+                                      payload_hash=first["content_hash"]))
+        with self.assertRaises(ProtocolError) as ctx:
+            registry.record_result(
+                "b-bad", self._result("b-bad", status="completed",
+                                      payload_hash="00" * 32))
+        self.assertEqual(ctx.exception.code, "PAYLOAD_HASH_MISMATCH")
+
+    def test_record_result_unknown_id_rejected_and_mismatch_kept(self) -> None:
+        # Step 4 (CONS-020 P1-02): an id that was never submitted
+        # raises instead of creating a record that would block the
+        # id for 20 minutes.
+        registry = BatchRegistry()
+        with self.assertRaises(ProtocolError) as ctx:
+            registry.record_result(
+                "never-submitted",
+                self._result("never-submitted", status="completed",
+                             payload_hash="ab" * 32))
+        self.assertEqual(ctx.exception.code, "UNKNOWN_BATCH_ID")
+        # Step 4 (CONS-020 P1-03): on a hash mismatch the server's
+        # outcome is kept as a diagnostic on the record.
+        actions = self._actions()
+        first = registry.submit("b-mis", 777, actions)
+        mismatched = self._result("b-mis", status="partial",
+                                  payload_hash="00" * 32)
+        with self.assertRaises(ProtocolError):
+            registry.record_result("b-mis", mismatched)
+        record = registry.get("b-mis")
+        self.assertEqual(record["mismatch"]["status"], "partial")
+        self.assertEqual(record["mismatch"]["payload_hash"], "00" * 32)
+        # The client's hash is stored; no server hash is verified
+        # yet (the mismatch is only a diagnostic).
+        self.assertEqual(record["content_hash"], first["content_hash"])
+        self.assertIsNone(record["payload_hash"])
+        self.assertIsNone(record["status"])
+
+    def test_integer_ranges_match_java(self) -> None:
+        # Step 4 (CONS-020 P1-01): tree_hash is a Java int, coords
+        # are Java ints, duration/wait are Java longs.
+        with self.assertRaises(ProtocolError):
+            build_batch("b-r", 2 ** 31, [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
+        with self.assertRaises(ProtocolError):
+            build_batch("b-r", -(2 ** 31) - 1, [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
+        build_batch("b-r", 2 ** 31 - 1, [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
+        with self.assertRaises(ProtocolError):
+            build_batch("b-r", 100, [{"action_id": "a1", "type": "tap", "x": 2 ** 31, "y": 0}])
+        with self.assertRaises(ProtocolError):
+            build_batch("b-r", 100, [{"action_id": "a1", "type": "wait", "wait_ms": 2 ** 63}])
+        build_batch("b-r", 100, [{"action_id": "a1", "type": "wait", "wait_ms": 2 ** 63 - 1}])
+
+    def test_get_unknown_returns_none(self) -> None:
+        self.assertIsNone(BatchRegistry().get("no-such-batch"))
+
+    def test_canonical_form_matches_server(self) -> None:
+        # The canonical string is byte-identical to the server's
+        # canonicalBatchPayload: fixed field order, defaults filled,
+        # length-prefixed strings (Java UTF-16 length — an astral
+        # character counts as 2), booleans as "true"/"false".
+        from bridge_protocol import _canonical_batch_payload
+
+        self.assertEqual(
+            _canonical_batch_payload(
+                1, 777, [{"action_id": "a1", "type": "wait", "wait_ms": 500}]
+            ),
+            "v1|tree=777|actions=[{id=2:a1,type=4:wait,node=0:,x=0,y=0,"
+            "x1=0,y1=0,x2=0,y2=0,dur=300,text=0:,key=0:,wait=500,exp=false}]",
+        )
+        # No action_id -> the server defaults to "a"+index.
+        self.assertEqual(
+            _canonical_batch_payload(
+                1, 100, [{"type": "tap", "x": 1, "y": 2}]
+            ),
+            "v1|tree=100|actions=[{id=2:a0,type=3:tap,node=0:,x=1,y=2,"
+            "x1=0,y1=0,x2=0,y2=0,dur=300,text=0:,key=0:,wait=0,exp=false}]",
+        )
+        # A Japanese string: 3 code points, 3 UTF-16 units. An emoji
+        # (astral): 1 code point, 2 UTF-16 units.
+        self.assertEqual(
+            _canonical_batch_payload(
+                1, 100,
+                [{"action_id": "a1", "type": "type", "text": "あいう"}],
+            ),
+            "v1|tree=100|actions=[{id=2:a1,type=4:type,node=0:,x=0,y=0,"
+            "x1=0,y1=0,x2=0,y2=0,dur=300,text=3:あいう,key=0:,wait=0,exp=false}]",
+        )
+        self.assertEqual(
+            _canonical_batch_payload(
+                1, 100,
+                [{"action_id": "a1", "type": "type", "text": "😀"}],
+            ),
+            "v1|tree=100|actions=[{id=2:a1,type=4:type,node=0:,x=0,y=0,"
+            "x1=0,y1=0,x2=0,y2=0,dur=300,text=2:😀,key=0:,wait=0,exp=false}]",
+        )
+        # Step 4 (CONS-020 P1-04): expect_change=True renders as
+        # "true", and several actions without action_id default to
+        # "a0", "a1", ... by index.
+        self.assertEqual(
+            _canonical_batch_payload(
+                1, 100,
+                [{"type": "tap", "x": 1, "y": 2, "expect_change": True},
+                 {"type": "wait", "wait_ms": 50}],
+            ),
+            "v1|tree=100|actions=[{id=2:a0,type=3:tap,node=0:,x=1,y=2,"
+            "x1=0,y1=0,x2=0,y2=0,dur=300,text=0:,key=0:,wait=0,exp=true};"
+            "{id=2:a1,type=4:wait,node=0:,x=0,y=0,x1=0,y1=0,x2=0,y2=0,"
+            "dur=300,text=0:,key=0:,wait=50,exp=false}]",
+        )
 
 
 class TestStep1Additions(unittest.TestCase):

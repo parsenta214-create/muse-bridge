@@ -41,6 +41,10 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # normally. A (status, N) tuple answers with that status instead.
     # Reset by the fixture.
     fail_next = {}
+    # Step 4 (CONS-020 P0-04): when set, /batch answers with this
+    # batch_id instead of the one in the request, so the adapter's
+    # batch_id check can be tested. Reset by the fixture.
+    batch_id_override = None
     # A-3 (v1.9): how /state answers, per test. "normal" always returns
     # a stable snapshot; "unstable_then_same" returns an unstable
     # snapshot first, then the same tree hash stable; "unstable_then_
@@ -287,12 +291,25 @@ class MockAppHandler(BaseHTTPRequestHandler):
             return self._send_json(503, {"ok": False, "error": "overloaded (test hook)"})
         if self.path == "/batch":
             # A-4 (v1.9): a realistic batch response, with the status,
-            # payload hash, and completed/failed action ids.
+            # payload hash, and completed/failed action ids. Step 4:
+            # the payload_hash is the real content hash (computed the
+            # same way the server does), so the client's registry can
+            # verify it against what it sent.
             acts = payload.get("actions", [])
+            payload_hash = ab.bridge_protocol.BatchRegistry.compute_content_hash(
+                payload.get("protocol_version", 1),
+                payload.get("tree_hash", 0),
+                acts,
+            )
+            # Step 4 (CONS-020 P0-04): the override answers with a
+            # different batch_id than the request carried.
+            answered_id = MockAppHandler.batch_id_override
+            if answered_id is None:
+                answered_id = payload.get("batch_id")
             return self._send_json(200, {
-                "ok": True, "batch_id": payload.get("batch_id"),
+                "ok": True, "batch_id": answered_id,
                 "snapshot_id": 7, "status": "completed",
-                "payload_hash": "ab" * 32, "replayed": False,
+                "payload_hash": payload_hash, "replayed": False,
                 "results": [{"action_id": a.get("action_id"),
                              "status": "executed", "error": None,
                              "hash_before": 123456, "hash_after": 123456}
@@ -307,6 +324,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
 def mock_app(monkeypatch):
     MockAppHandler.requests.clear()
     MockAppHandler.fail_next.clear()
+    MockAppHandler.batch_id_override = None
     MockAppHandler.state_mode = "normal"
     MockAppHandler.state_calls = 0
     MockAppHandler.text_after = 0
@@ -460,12 +478,16 @@ def test_app_batch_posts_actions(mock_app):
 
 def test_app_batch_response_fields_v19(mock_app):
     """A-4 (v1.9): the batch response carries status, payload_hash,
-    completed_action_ids, and failed_action_id."""
+    completed_action_ids, and failed_action_id. Step 4: the mock's
+    payload_hash is the real content hash, so it must match the
+    hash the client computed for the same payload."""
     adapter = ab.AndroidAdapter(actions_enabled=True)
     actions = [{"action_id": "a1", "type": "tap", "x": 1, "y": 2}]
     result = adapter.batch("b-002", 123456, actions)
+    expected_hash = ab.bridge_protocol.BatchRegistry.compute_content_hash(
+        1, 123456, actions)
     assert result["status"] == "completed"
-    assert result["payload_hash"] == "ab" * 32
+    assert result["payload_hash"] == expected_hash
     assert result["completed_action_ids"] == ["a1"]
     assert result["failed_action_id"] is None
     assert result["replayed"] is False
@@ -540,6 +562,55 @@ def test_step3_query_validation_rejects_before_request(mock_app):
     assert ("GET", "/events?since=0&limit=100", None) in gets
     assert ("GET", "/capture_screen?scale=0.5&format=jpeg&quality=80",
             None) in gets
+
+
+def test_step4_batch_registry_enforced_by_adapter(mock_app):
+    """Step 4 (v1.2.0): the adapter's batch() goes through the
+    registry. A second call with the same batch_id and different
+    content raises STALE_REVISION and sends NO request; a second
+    call with identical content re-sends (the server replays from
+    its cache) and the registry records the outcome."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    ProtocolError = ab.bridge_protocol.ProtocolError
+    actions = [{"action_id": "a1", "type": "wait", "wait_ms": 500}]
+    result = adapter.batch("b-reg", 123456, actions)
+    assert result["status"] == "completed"
+    record = adapter._batch_registry.get("b-reg")
+    assert record["status"] == "completed"
+    assert record["payload_hash"] == result["payload_hash"]
+    assert record["completed_action_ids"] == ["a1"]
+    posts_before = len([r for r in MockAppHandler.requests
+                        if r[0] == "POST" and r[1] == "/batch"])
+    with pytest.raises(ProtocolError) as ctx:
+        adapter.batch("b-reg", 123456,
+                      [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
+    assert ctx.value.code == "STALE_REVISION"
+    posts_after = len([r for r in MockAppHandler.requests
+                       if r[0] == "POST" and r[1] == "/batch"])
+    assert posts_after == posts_before  # nothing was sent
+    # Identical re-send goes out again (the server answers from
+    # its cache); the registry marks it as a replay.
+    result2 = adapter.batch("b-reg", 123456, actions)
+    assert result2["status"] == "completed"
+    assert adapter._batch_registry.get("b-reg")["status"] == "completed"
+
+
+def test_step4_batch_id_mismatch_rejected(mock_app):
+    """Step 4 (CONS-020 P0-04): when the server answers with a
+    batch_id different from the one that was asked for, batch()
+    raises BATCH_ID_MISMATCH and does NOT record the result."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    ProtocolError = ab.bridge_protocol.ProtocolError
+    MockAppHandler.batch_id_override = "some-other-batch"
+    actions = [{"action_id": "a1", "type": "wait", "wait_ms": 500}]
+    with pytest.raises(ProtocolError) as ctx:
+        adapter.batch("b-mismatch", 123456, actions)
+    assert ctx.value.code == "BATCH_ID_MISMATCH"
+    # Nothing was recorded for the requested id (the outcome
+    # belongs to a different batch).
+    record = adapter._batch_registry.get("b-mismatch")
+    assert record["status"] is None
+    assert record["payload_hash"] is None
 
 
 def test_app_phase2_actions_refused_without_flag(mock_app):

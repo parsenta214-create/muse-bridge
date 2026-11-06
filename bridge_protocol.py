@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from typing import Any
 
 DEFAULT_PORT = 8080
@@ -28,6 +29,40 @@ BODY_TIMEOUT_SEC = 10
 TOTAL_TIMEOUT_SEC = 45
 
 MAX_WORKERS = 4
+
+# Batch result lifetime (A-4, README decision 49): the server keeps a
+# batch result for 10 minutes, then a tombstone for another 10
+# minutes. The BatchRegistry mirrors that window client-side so a
+# re-used batch_id is refused locally (BATCH_EXPIRED) instead of
+# hitting the server's 410. The boundary is ">" (not ">="): the
+# server's check is `now > expiresAt` / `now > tombstoneUntil`, so at
+# exactly 600 s the batch is still live and at exactly 1200 s it is
+# still a tombstone. The server is the authority; the client mirrors
+# it (CONS-020 P0-01).
+BATCH_RESULT_TTL_S = 600
+BATCH_TOMBSTONE_TTL_S = 600
+
+# Java integer ranges (CONS-020 P1-01): the server's tree_hash and
+# coordinates are int (signed 32-bit), duration_ms and wait_ms are
+# long (signed 64-bit). The client validates these bounds so a value
+# the server would truncate (optInt/optLong) never reaches it.
+INT32_MIN = -(2 ** 31)
+INT32_MAX = 2 ** 31 - 1
+INT64_MAX = 2 ** 63 - 1
+
+# Batch outcome states the server reports (A-4): ACCEPTED -> RUNNING
+# -> COMPLETED / PARTIAL / FAILED. "partial" means at least one
+# action succeeded and then the batch stopped; "failed" means zero
+# successes. The registry validates the status when it records a
+# server result (parse_batch_result does not — it only validates
+# each result item's status).
+VALID_BATCH_OUTCOME_STATUSES = (
+    "accepted",
+    "running",
+    "completed",
+    "partial",
+    "failed",
+)
 MAX_QUEUE = 8
 MAX_CONNECTIONS = 16
 
@@ -124,6 +159,30 @@ def _require_optional_str(value: Any, name: str) -> str | None:
         return None
     if not isinstance(value, str):
         raise ProtocolError(f"{name} must be a str or None")
+    return value
+
+
+def _require_payload_hash(value: Any, name: str) -> str:
+    """Require a SHA-256 hex digest (64 lowercase hex chars).
+
+    The server always returns a payload_hash in this form
+    (String.format "%02x"); a missing, mistyped, or malformed value
+    is a protocol error, not a value to skip verification for
+    (CONS-020 P0-02).
+    """
+    if not isinstance(value, str):
+        raise ProtocolError(f"{name} must be a str")
+    if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
+        raise ProtocolError(f"{name} must be 64 lowercase hex chars")
+    return value
+
+
+def _require_batch_outcome_status(value: Any, name: str) -> str:
+    """Require one of the server's batch outcome states."""
+    if not isinstance(value, str) or value not in VALID_BATCH_OUTCOME_STATUSES:
+        raise ProtocolError(
+            f"{name} must be one of {VALID_BATCH_OUTCOME_STATUSES}"
+        )
     return value
 
 
@@ -264,8 +323,10 @@ def _validate_batch_action(action: Any, index: int) -> dict[str, Any]:
         allowed_keys.update({"x", "y"})
         if "x" not in action or "y" not in action:
             raise ProtocolError(f"actions[{index}] missing required field 'x' or 'y'")
-        out["x"] = _require_int(action["x"], f"actions[{index}].x", min_value=0)
-        out["y"] = _require_int(action["y"], f"actions[{index}].y", min_value=0)
+        # Step 4 (CONS-020 P1-01): coordinates are Java ints
+        # (signed 32-bit) on the server.
+        out["x"] = _require_int(action["x"], f"actions[{index}].x", min_value=0, max_value=INT32_MAX)
+        out["y"] = _require_int(action["y"], f"actions[{index}].y", min_value=0, max_value=INT32_MAX)
     elif action_type == "type_node":
         allowed_keys.update({"node_id", "text"})
         if "node_id" not in action or "text" not in action:
@@ -295,18 +356,22 @@ def _validate_batch_action(action: Any, index: int) -> dict[str, Any]:
             if coord not in action:
                 raise ProtocolError(f"actions[{index}] missing required field {coord!r}")
             out[coord] = _require_int(
-                action[coord], f"actions[{index}].{coord}", min_value=0
+                action[coord], f"actions[{index}].{coord}", min_value=0, max_value=INT32_MAX
             )
         if "duration_ms" in action:
+            # Step 4 (CONS-020 P1-01): duration_ms is a Java long
+            # (signed 64-bit) on the server.
             out["duration_ms"] = _require_int(
-                action["duration_ms"], f"actions[{index}].duration_ms", min_value=0
+                action["duration_ms"], f"actions[{index}].duration_ms", min_value=0, max_value=INT64_MAX
             )
     elif action_type == "wait":
         allowed_keys.add("wait_ms")
         if "wait_ms" not in action:
             raise ProtocolError(f"actions[{index}] missing required field 'wait_ms'")
+        # Step 4 (CONS-020 P1-01): wait_ms is a Java long (signed
+        # 64-bit) on the server.
         out["wait_ms"] = _require_int(
-            action["wait_ms"], f"actions[{index}].wait_ms", min_value=0
+            action["wait_ms"], f"actions[{index}].wait_ms", min_value=0, max_value=INT64_MAX
         )
 
     if "expect_change" in action:
@@ -330,7 +395,10 @@ def build_batch(
     protocol_version: int = PROTOCOL_VERSION,
 ) -> dict[str, Any]:
     _require_str(batch_id, "batch_id", non_empty=True)
-    _require_int(tree_hash, "tree_hash")
+    # Step 4 (CONS-020 P1-01): tree_hash is a Java int (signed
+    # 32-bit) on the server; a value outside that range would be
+    # truncated by the server's getInt, so the client rejects it.
+    _require_int(tree_hash, "tree_hash", min_value=INT32_MIN, max_value=INT32_MAX)
     # Step 2 (v1.0.1): the version is validated here, not just
     # hardcoded — the live server rejects any version other than 1
     # with 400, so a caller asking for another version fails fast.
@@ -635,6 +703,11 @@ def parse_batch_result(data: dict[str, Any]) -> dict[str, Any]:
         "results",
         "stopped_at",
         "stop_reason",
+        # Step 4 (CONS-020 P0-02/P0-03): the A-4 server always
+        # returns the batch-level status and the payload_hash, so a
+        # response without them is malformed, not a value to tolerate.
+        "status",
+        "payload_hash",
     )
     for key in required_keys:
         if key not in d:
@@ -652,6 +725,8 @@ def parse_batch_result(data: dict[str, Any]) -> dict[str, Any]:
 
     _require_int(d["stopped_at"], "batch_result.stopped_at", min_value=-1)
     _require_optional_str(d["stop_reason"], "batch_result.stop_reason")
+    _require_batch_outcome_status(d["status"], "batch_result.status")
+    _require_payload_hash(d["payload_hash"], "batch_result.payload_hash")
     return dict(d)
 
 
@@ -699,11 +774,104 @@ def parse_error_body(data: dict[str, Any] | str | bytes) -> dict[str, Any]:
     }
 
 
-class BatchRegistry:
-    """Local idempotency registry for POST /batch requests."""
+def _canon_str(name: str, value: Any) -> str:
+    """Render one length-prefixed string field, as the server does.
 
-    def __init__(self) -> None:
-        self._records: dict[str, str] = {}
+    The server's appendCanon writes name=<len>:<value>, where <len>
+    is Java's String.length() — the number of UTF-16 code units,
+    not code points (an astral character counts as 2).
+    """
+    text = "" if value is None else str(value)
+    utf16_len = len(text.encode("utf-16-le")) // 2
+    return f"{name}={utf16_len}:{text}"
+
+
+def _canonical_batch_payload(
+    protocol_version: int, tree_hash: int, actions: list[dict[str, Any]]
+) -> str:
+    """Build the server's canonical batch payload string.
+
+    Byte-identical to BridgeAccessibilityService.canonicalBatchPayload
+    (A-4): "v{version}|tree={treeHash}|actions=[{...};{...}]" with a
+    fixed per-action field order (id, type, node, x, y, x1, y1, x2,
+    y2, dur, text, key, wait, exp), the server's defaults filled in
+    for absent fields (action_id defaults to "a"+index, node/text/
+    key to "", coordinates to 0, duration_ms to 300, wait_ms to 0,
+    expect_change to false), and length-prefixed strings. The
+    booleans render as "true"/"false" (Java's StringBuilder).
+    """
+    parts: list[str] = [f"v{protocol_version}", f"|tree={tree_hash}", "|actions=["]
+    for i, action in enumerate(actions):
+        if i > 0:
+            parts.append(";")
+        parts.append("{")
+        parts.append(_canon_str("id", action.get("action_id", f"a{i}")))
+        parts.append(",")
+        parts.append(_canon_str("type", action.get("type", "")))
+        parts.append(",")
+        parts.append(_canon_str("node", action.get("node_id", "")))
+        parts.append(",")
+        parts.append(f"x={action.get('x', 0)}")
+        parts.append(f",y={action.get('y', 0)}")
+        parts.append(f",x1={action.get('x1', 0)}")
+        parts.append(f",y1={action.get('y1', 0)}")
+        parts.append(f",x2={action.get('x2', 0)}")
+        parts.append(f",y2={action.get('y2', 0)}")
+        parts.append(f",dur={action.get('duration_ms', 300)}")
+        parts.append(",")
+        parts.append(_canon_str("text", action.get("text", "")))
+        parts.append(",")
+        parts.append(_canon_str("key", action.get("key", "")))
+        parts.append(f",wait={action.get('wait_ms', 0)}")
+        exp = action.get("expect_change", False)
+        parts.append(f",exp={'true' if exp else 'false'}")
+        parts.append("}")
+    parts.append("]")
+    return "".join(parts)
+
+
+class BatchRegistry:
+    """Local idempotency registry for POST /batch requests.
+
+    Step 4 (v1.2.0): the registry mirrors the server's A-4 rules
+    (README decision 49). A record is live for BATCH_RESULT_TTL_S
+    (10 min): the same batch_id with the same content replays, and
+    with different content it conflicts (STALE_REVISION, the
+    server's 409). Then it becomes a tombstone for another
+    BATCH_TOMBSTONE_TTL_S (10 min): any submit with that batch_id
+    raises BATCH_EXPIRED (the server's 410) — the caller must use a
+    NEW batch_id, never re-use the expired one. After 20 minutes
+    total the record is purged and the id is free again. The
+    boundaries use ">" (not ">="), mirroring the server's `now >
+    expiresAt` / `now > tombstoneUntil` — at exactly 600 s the
+    batch is still live, at exactly 1200 s it is still a tombstone
+    (CONS-020 P0-01). The registry also records the server's
+    outcome for each batch (status incl. partial/running,
+    payload_hash, completed/failed ids) and verifies the server's
+    payload_hash matches the content the client sent. Memory only:
+    no exactly-once across a process restart (a stated design
+    constraint).
+    """
+
+    def __init__(self, clock: Any = None) -> None:
+        # clock is a zero-arg callable returning a monotonic time
+        # (default time.monotonic). It is injectable so tests can
+        # move time forward without waiting.
+        self._clock = clock if clock is not None else time.monotonic
+        self._records: dict[str, dict[str, Any]] = {}
+
+    def _purge_expired(self, now: float) -> None:
+        # Step 4 (CONS-020 P0-01): the boundary is ">" (not ">="),
+        # mirroring the server's `now > tombstoneUntil` — at exactly
+        # 20 minutes the record is still a tombstone.
+        lifetime = BATCH_RESULT_TTL_S + BATCH_TOMBSTONE_TTL_S
+        stale = [
+            batch_id
+            for batch_id, record in self._records.items()
+            if now - record["created_at"] > lifetime
+        ]
+        for batch_id in stale:
+            del self._records[batch_id]
 
     @staticmethod
     def compute_content_hash(
@@ -711,30 +879,23 @@ class BatchRegistry:
     ) -> str:
         """Return a SHA-256 hash of the canonical batch payload.
 
-        Step 2 (v1.0.1): the hash is over {protocol_version,
-        tree_hash, actions} — the Phase B design (README decision
-        46) requires the version in the hash, so a batch built for a
-        different protocol version never collides with one for this
-        version. protocol_version is a required argument: the hash
-        must never be computed without it. The canonical form uses
-        sort_keys and separators (",", ":") so dict key order does
-        not change the hash. This is a pure function — it hashes
-        whatever version it is given; the version policy (only 1 is
-        accepted) is enforced at the entry points, build_batch and
-        submit.
+        Step 4 (v1.2.0): the canonical form is now byte-identical
+        to the live server's canonicalBatchPayload (A-4, README
+        decision 49; BridgeAccessibilityService.java) — a fixed
+        field order with defaults filled in and length-prefixed
+        strings — so the client's hash EQUALS the server's
+        payload_hash and record_result can verify it. Earlier
+        versions hashed a JSON object with sort_keys; the field set
+        was the same ({protocol_version, tree_hash, actions}) but
+        the serialisation differed, so the hashes never matched the
+        server's. protocol_version is a required argument: the hash
+        must never be computed without it. This is a pure function
+        — it hashes whatever version it is given; the version policy
+        (only 1 is accepted) is enforced at the entry points,
+        build_batch and submit.
         """
-        canonical_obj = {
-            "protocol_version": protocol_version,
-            "tree_hash": tree_hash,
-            "actions": actions,
-        }
-        canonical_json = json.dumps(
-            canonical_obj,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        )
-        return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+        canonical = _canonical_batch_payload(protocol_version, tree_hash, actions)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def submit(
         self,
@@ -747,11 +908,18 @@ class BatchRegistry:
 
         Replays (replayed: True) when the same batch_id was submitted
         with identical content (same protocol_version, tree_hash, and
-        actions). Raises ProtocolError (code STALE_REVISION) when the
-        same batch_id was submitted with different content. The
-        version is validated (only 1 is accepted) because the live
-        server rejects any other version with 400.
+        actions) while the record is live. Raises ProtocolError
+        (code STALE_REVISION) when the same batch_id was submitted
+        with different content while live, and ProtocolError (code
+        BATCH_EXPIRED) when the batch_id is in its tombstone window
+        — the caller must use a NEW batch_id. The version is
+        validated (only 1 is accepted) because the live server
+        rejects any other version with 400. The returned dict also
+        carries the validated "body" (the build_batch output) so
+        the caller sends exactly the payload that was registered.
         """
+        now = self._clock()
+        self._purge_expired(now)
         _require_int(protocol_version, "protocol_version", min_value=1, max_value=1)
         validated = build_batch(batch_id, tree_hash, actions, protocol_version)
         content_hash = self.compute_content_hash(
@@ -759,20 +927,141 @@ class BatchRegistry:
             validated["tree_hash"],
             validated["actions"],
         )
-        if batch_id not in self._records:
-            self._records[batch_id] = content_hash
-            return {
-                "batch_id": batch_id,
-                "replayed": False,
-                "content_hash": content_hash,
-            }
-        if self._records[batch_id] == content_hash:
-            return {
-                "batch_id": batch_id,
-                "replayed": True,
-                "content_hash": content_hash,
-            }
-        raise ProtocolError(
-            f"batch_id conflict for {batch_id!r}: existing content_hash does not match",
-            code="STALE_REVISION",
+        record = self._records.get(batch_id)
+        if record is not None:
+            age = now - record["created_at"]
+            # Step 4 (CONS-020 P0-01): the boundary is ">" (not
+            # ">="), mirroring the server's `now > expiresAt` — at
+            # exactly 600 s the batch is still live.
+            if age > BATCH_RESULT_TTL_S:
+                raise ProtocolError(
+                    f"batch_id {batch_id!r} expired: the server's result "
+                    "has lapsed (410); use a NEW batch_id, never re-use "
+                    "the expired one",
+                    code="BATCH_EXPIRED",
+                )
+            if record["content_hash"] == content_hash:
+                return {
+                    "batch_id": batch_id,
+                    "replayed": True,
+                    "content_hash": content_hash,
+                    "body": validated,
+                }
+            raise ProtocolError(
+                f"batch_id conflict for {batch_id!r}: existing content_hash does not match",
+                code="STALE_REVISION",
+            )
+        self._records[batch_id] = {
+            "content_hash": content_hash,
+            "created_at": now,
+            "status": None,
+            "payload_hash": None,
+            "completed_action_ids": None,
+            "failed_action_id": None,
+            "stopped_at": None,
+            "stop_reason": None,
+            "mismatch": None,
+        }
+        return {
+            "batch_id": batch_id,
+            "replayed": False,
+            "content_hash": content_hash,
+            "body": validated,
+        }
+
+    def record_result(
+        self, batch_id: str, result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Record the server's outcome for a batch.
+
+        result is a parsed batch response (the parse_batch_result
+        output). The batch-level "status" and the "payload_hash"
+        are required — the server always returns them (CONS-020
+        P0-02/P0-03), so a response without them is malformed. The
+        status must be one of the server's states
+        (accepted/running/completed/partial/failed). When the
+        server's payload_hash differs from the content_hash this
+        registry holds, the outcome is stored as a "mismatch"
+        diagnostic on the record and a ProtocolError (code
+        PAYLOAD_HASH_MISMATCH) is raised — the server executed
+        different content than the client sent (CONS-020 P1-03).
+        The batch_id must have been submitted first (CONS-020
+        P1-02): an unknown id raises ProtocolError (code
+        UNKNOWN_BATCH_ID) instead of creating a record that would
+        block the id for 20 minutes. Returns the stored record
+        (see get).
+        """
+        if not isinstance(result, dict):
+            raise ProtocolError("batch result must be a dict")
+        now = self._clock()
+        self._purge_expired(now)
+        status = _require_batch_outcome_status(
+            result.get("status"), "batch_result.status"
         )
+        payload_hash = _require_payload_hash(
+            result.get("payload_hash"), "batch_result.payload_hash"
+        )
+        record = self._records.get(batch_id)
+        if record is None:
+            raise ProtocolError(
+                f"unknown batch_id {batch_id!r}: submit it before "
+                "recording a result",
+                code="UNKNOWN_BATCH_ID",
+            )
+        outcome = {
+            "status": status,
+            "payload_hash": payload_hash,
+            "completed_action_ids": result.get("completed_action_ids"),
+            "failed_action_id": result.get("failed_action_id"),
+            "stopped_at": result.get("stopped_at"),
+            "stop_reason": result.get("stop_reason"),
+        }
+        if (
+            record["content_hash"] is not None
+            and payload_hash != record["content_hash"]
+        ):
+            # Keep the server's outcome as a diagnostic (it is not
+            # the normal outcome — the batch's content does not
+            # match what was sent), then raise.
+            record["mismatch"] = outcome
+            raise ProtocolError(
+                f"payload_hash mismatch for batch_id {batch_id!r}: the "
+                "server executed different content than the client sent",
+                code="PAYLOAD_HASH_MISMATCH",
+            )
+        record.update(outcome)
+        return self.get(batch_id)  # type: ignore[return-value]
+
+    def get(self, batch_id: str) -> dict[str, Any] | None:
+        """Return the stored record for a batch_id, or None.
+
+        The record carries the content_hash, the outcome (status,
+        payload_hash, completed_action_ids, failed_action_id,
+        stopped_at, stop_reason), the age in seconds ("age_s"), and
+        "expired" (True while the id is in its tombstone window — a
+        submit with it would raise BATCH_EXPIRED). A "mismatch"
+        holds the server's outcome when its payload_hash did not
+        match what was sent (diagnostic only, CONS-020 P1-03). A
+        purged id (older than 20 minutes) returns None: it is free
+        again.
+        """
+        now = self._clock()
+        self._purge_expired(now)
+        record = self._records.get(batch_id)
+        if record is None:
+            return None
+        age = now - record["created_at"]
+        return {
+            "batch_id": batch_id,
+            "content_hash": record["content_hash"],
+            "status": record["status"],
+            "payload_hash": record["payload_hash"],
+            "completed_action_ids": record["completed_action_ids"],
+            "failed_action_id": record["failed_action_id"],
+            "stopped_at": record["stopped_at"],
+            "stop_reason": record["stop_reason"],
+            "mismatch": record["mismatch"],
+            "age_s": int(age),
+            # Step 4 (CONS-020 P0-01): ">" mirrors the server.
+            "expired": age > BATCH_RESULT_TTL_S,
+        }
