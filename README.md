@@ -1810,6 +1810,31 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     INSTALL_SUCCEEDED: Session installed". Remote APK
     install now works end to end; the bridge can update
     itself the same way from now on.
+82. PoC merge Step 1 frozen (2026-11-06, v1.0.0).
+    `bridge_protocol.py` + `test_bridge_protocol.py`
+    added to the repo, no wiring (Plan A Step 1). The
+    files are the AntiGravity PoC protocol layer with
+    two fixes: `parse_health` version == 1 (was >= 1)
+    and a batch max of 20 actions. Reviews:
+    CONS-20261106-016 (pasted-code, conditional
+    approval, P0 none) and CONS-20261106-017 (GitHub +
+    Notion linked — do not freeze as-is). The linked
+    review found a real P0: `unittest.main()` sat
+    before the new test class, so a direct run executed
+    only 35 tests while pytest ran 38; fixed by moving
+    `unittest.main()` to the end of the file. Tests
+    were also reinforced (ProtocolError instead of
+    ValueError, 20-exact acceptance, version boundary
+    cases). Staging: 41 tests, identical across direct
+    run, pytest, and unittest-module. Full suite after
+    the merge: 172 passed (131 + 41). Notion draft
+    pages frozen (Status Frozen, Version v1.0.0) with
+    SHA-256 verified on merge (53ef2ffe… /
+    071f8c96…). Step 2 (wiring) still open; its known
+    must-fix is the BatchRegistry hash missing
+    protocol_version (PoC hashes {tree_hash, actions},
+    Phase B design requires {protocol_version,
+    tree_hash, actions}).
 78. Startup crash fix — registerReceiver exported flag
     (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
     crashed the instant START BRIDGE was tapped, with no
