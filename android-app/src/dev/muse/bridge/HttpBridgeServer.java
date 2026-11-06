@@ -176,12 +176,42 @@ public class HttpBridgeServer {
                 installStatus = "installed";
                 installDetail = detail;
                 BridgeLog.log("install_result", "success");
+                installRunning = false;
+            } else if (st == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                // Decision 80 (v1.9.21): -1 is NOT a failure.
+                // STATUS_PENDING_USER_ACTION (-1) means the
+                // install needs the user's tap, and the
+                // confirmation activity arrives in EXTRA_INTENT
+                // — the caller MUST start it, or no dialog ever
+                // appears. (1.9.16–1.9.20 treated every
+                // non-success status as "failed", so the Termux
+                // installs stalled silently at this step with
+                // "failed status=-1".) Launch the confirmation
+                // and keep the job running: the final result
+                // broadcast arrives after the user acts.
+                // EXTRA_INTENT is a hidden API, so use its
+                // literal key ("android.content.pm.extra.INTENT").
+                Intent confirm = intent.getParcelableExtra(
+                        "android.content.pm.extra.INTENT");
+                if (confirm != null) {
+                    confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    ctx.startActivity(confirm);
+                    installStatus = "pending_user_action";
+                    installDetail = "waiting for the install confirmation";
+                    BridgeLog.log("install_result",
+                            "pending user action; confirmation shown");
+                } else {
+                    installStatus = "failed";
+                    installDetail = detail + " (no confirmation intent)";
+                    BridgeLog.log("install_result", "failed " + detail);
+                    installRunning = false;
+                }
             } else {
                 installStatus = "failed";
                 installDetail = detail;
                 BridgeLog.log("install_result", "failed " + detail);
+                installRunning = false;
             }
-            installRunning = false;
         }
     };
 
@@ -987,6 +1017,12 @@ public class HttpBridgeServer {
                 // INSTALL_PACKAGES is signature-level). 400 on a
                 // bad request, 409 while a job is running, 422
                 // when a given path does not exist.
+                // Decision 80 (v1.9.21): the dialog appears because
+                // the install receiver launches the confirmation
+                // activity from EXTRA_INTENT on
+                // STATUS_PENDING_USER_ACTION (-1) — that status is
+                // NOT a failure, and 1.9.16–1.9.20 misread it as
+                // one, so no dialog ever appeared.
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 String url = j.optString("url", null);
                 String apkPath = j.optString("path", null);

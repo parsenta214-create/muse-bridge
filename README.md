@@ -1683,11 +1683,19 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     (same flow, the bridge's own APK as the path or URL).
     Live test 2026-11-06 07:05 on 1.9.19: the download
     and the commit worked (113,880,067 bytes in ~27 s,
-    committed 07:05:38) but the install failed instantly
-    with status=-1 and no message — the manifest lacked
-    REQUEST_INSTALL_PACKAGES (fixed in decision 79).
-    Retry after 1.9.20 + the Settings toggle, with the
-    1022 URL (latest) to also rule out a downgrade.
+    committed 07:05:38) but the install "failed" instantly
+    with status=-1 and no message. Correction (decision
+    80): -1 is STATUS_PENDING_USER_ACTION — the install
+    was waiting for the user's tap, and the receiver
+    misread it as a failure, so no confirmation dialog
+    ever appeared. (The manifest also lacked
+    REQUEST_INSTALL_PACKAGES — fixed in decision 79 —
+    but that was not the cause of the -1.) Retried on
+    1.9.20 with the 1022 URL: same -1, twice; the
+    "Install unknown apps" toggle was confirmed ON by
+    screenshot. The {"path"} option also turned out to
+    need a file the bridge can read: /sdcard/Download
+    answers EACCES (no storage permission).
 76. Clipboard read/write — GET / POST /clipboard
     (2026-11-06, v1.9.17 / code 27). `GET /clipboard`
     returns {"ok": true, "text": "..."|null, "truncated":
@@ -1757,7 +1765,29 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     update incompatible / signature). APK 70,345 bytes,
     sha256 2b97e701…; 131 tests pass. After 1.9.20, the
     Termux install is retried with the 1022 URL (latest)
-    to also rule out a downgrade.
+    to also rule out a downgrade. (Correction in
+    decision 80: the -1 was STATUS_PENDING_USER_ACTION,
+    not a permission failure — but the permission and
+    the Settings toggle were still necessary.)
+80. Pending-user-action handling — launch EXTRA_INTENT
+    (2026-11-06, v1.9.21 / code 31). Verified against
+    the SDK: STATUS_PENDING_USER_ACTION is -1. The
+    Termux installs on 1.9.19/1.9.20 never failed — the
+    system was waiting for the user's tap, and the
+    receiver treated every non-success status as
+    "failed", so the confirmation dialog never appeared
+    and the job died silently. Fix: on
+    STATUS_PENDING_USER_ACTION the receiver launches the
+    confirmation activity from EXTRA_INTENT (hidden API
+    — literal key "android.content.pm.extra.INTENT",
+    like EXTRA_LEGACY_STATUS in decision 79) with
+    FLAG_ACTIVITY_NEW_TASK, sets the status to
+    "pending_user_action", and keeps the job running;
+    the final result broadcast arrives after the user
+    taps Install/Cancel. APK 70,343 bytes, sha256
+    21932849…; 131 tests pass. After 1.9.21 is installed,
+    the Termux install is retried with the 1022 URL —
+    this time a dialog should actually appear.
 78. Startup crash fix — registerReceiver exported flag
     (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
     crashed the instant START BRIDGE was tapped, with no

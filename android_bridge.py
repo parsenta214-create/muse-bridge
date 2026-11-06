@@ -649,10 +649,13 @@ class AndroidAdapter:
         return self._app_post("/install_apk", body)
 
     def install_status(self) -> dict:
-        """Install-apk job state (decision 75, v1.9.16): GET
-        /install_status. Read-only: {"ok": true, "status":
-        "idle"|"downloading"|"installing"|"committed"|
-        "installed"|"failed", "detail": "..."}."""
+        """Install-apk job state (decision 75, v1.9.16; states
+        extended by decision 80, v1.9.21): GET /install_status.
+        Read-only: {"ok": true, "status": "idle"|"downloading"|
+        "installing"|"committed"|"pending_user_action"|
+        "installed"|"failed", "detail": "..."}. "pending_user_action"
+        means the install confirmation dialog is on the phone
+        waiting for the user's tap (STATUS_PENDING_USER_ACTION)."""
         return self._app_request("GET", "/install_status")
 
     def get_clipboard(self) -> dict:
