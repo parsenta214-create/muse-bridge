@@ -1835,6 +1835,40 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     protocol_version (PoC hashes {tree_hash, actions},
     Phase B design requires {protocol_version,
     tree_hash, actions}).
+83. PoC merge Step 2 frozen (2026-11-06, v1.0.1).
+    Error-code conversion wired only (MERGE_PLAN_A
+    Step 2): `_app_request_once` now uses
+    `bridge_protocol.error_code_for_status` and the
+    TransportError message carries the code
+    ([INVALID_REQUEST], [UNAUTHORIZED], [UNAVAILABLE],
+    ...). The hints are unchanged (400/408/413/431
+    input validation, 401 token, 503 overload), and
+    the retry classifier still extracts the status
+    from the new message format. The Step 2 must-fix
+    from the GPT reviews is also in: the
+    BatchRegistry hash is now over
+    {protocol_version, tree_hash, actions};
+    `build_batch` outputs `protocol_version: 1`
+    explicitly and takes a protocol_version argument
+    (only 1 accepted); `submit` takes
+    protocol_version (default 1) and passes it
+    through. `compute_content_hash` is a pure
+    function (no validation); the version policy is
+    enforced at build_batch and submit. GPT review
+    CONS-20261106-018: design sound, no P0 code
+    bugs; P0-01 was a Notion SHA-256 reassembly
+    check — resolved mechanically (the 16 PARTs
+    reassemble byte-for-byte, SHA b5d710d0…;
+    Notion normalises the code fence from ```python
+    to ```py, which is why GPT could not match it).
+    P1-01 (408/431 error-code tests) and P1-02
+    (new-format retry-classifier test) fixed.
+    P1-03 (build_batch's protocol_version argument)
+    kept: submit needs it to pass the version
+    through. Full suite: 181 passed. Live verified
+    on 1.9.22: /health and /state ok, 401
+    [UNAUTHORIZED], 413 [TOO_LARGE]. Notion draft
+    pages frozen (Status Frozen, Version v1.0.1).
 78. Startup crash fix — registerReceiver exported flag
     (2026-11-06, v1.9.19 / code 29). 1.9.16 and 1.9.18
     crashed the instant START BRIDGE was tapped, with no

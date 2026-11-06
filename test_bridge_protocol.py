@@ -517,7 +517,7 @@ class TestBatchRegistry(unittest.TestCase):
             {"action_id": "a2", "type": "wait", "wait_ms": 200},
         ]
         expected_canonical = json.dumps(
-            {"tree_hash": 777, "actions": actions_v1},
+            {"protocol_version": 1, "tree_hash": 777, "actions": actions_v1},
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -653,6 +653,67 @@ class TestStep1Additions(unittest.TestCase):
             "snapshot_stable": None,
         }
         self.assertEqual(parse_state(raw), raw)
+
+
+class TestStep2HashVersion(unittest.TestCase):
+    """MERGE_PLAN_A Step 2: protocol_version is explicit in
+    build_batch and in the BatchRegistry content hash."""
+
+    def test_build_batch_includes_protocol_version_1(self) -> None:
+        built = build_batch(
+            "b1", 100, [{"action_id": "a1", "type": "wait", "wait_ms": 100}]
+        )
+        self.assertEqual(built["protocol_version"], 1)
+
+    def test_build_batch_other_protocol_version_rejected(self) -> None:
+        actions = [{"action_id": "a1", "type": "wait", "wait_ms": 100}]
+        with self.assertRaises(ProtocolError):
+            build_batch("b1", 100, actions, protocol_version=2)
+        with self.assertRaises(ProtocolError):
+            build_batch("b1", 100, actions, protocol_version=0)
+
+    def test_hash_includes_protocol_version(self) -> None:
+        actions = [{"action_id": "a1", "type": "tap", "x": 10, "y": 20}]
+        hash_v1 = BatchRegistry.compute_content_hash(1, 777, actions)
+        # Same content, same version -> same hash.
+        self.assertEqual(
+            BatchRegistry.compute_content_hash(1, 777, actions), hash_v1
+        )
+        # Same content, different version -> different hash.
+        self.assertNotEqual(
+            BatchRegistry.compute_content_hash(2, 777, actions), hash_v1
+        )
+
+    def test_hash_ignores_dict_key_order(self) -> None:
+        actions = [{"action_id": "a1", "type": "tap", "x": 10, "y": 20}]
+        reordered = [{"y": 20, "x": 10, "type": "tap", "action_id": "a1"}]
+        self.assertEqual(
+            BatchRegistry.compute_content_hash(1, 777, actions),
+            BatchRegistry.compute_content_hash(1, 777, reordered),
+        )
+
+    def test_hash_differs_when_actions_differ(self) -> None:
+        actions = [{"action_id": "a1", "type": "tap", "x": 10, "y": 20}]
+        changed = [{"action_id": "a1", "type": "tap", "x": 11, "y": 20}]
+        self.assertNotEqual(
+            BatchRegistry.compute_content_hash(1, 777, actions),
+            BatchRegistry.compute_content_hash(1, 777, changed),
+        )
+
+    def test_submit_other_protocol_version_rejected(self) -> None:
+        registry = BatchRegistry()
+        actions = [{"action_id": "a1", "type": "wait", "wait_ms": 100}]
+        with self.assertRaises(ProtocolError):
+            registry.submit("b1", 100, actions, protocol_version=2)
+
+    def test_submit_same_batch_same_version_replays(self) -> None:
+        registry = BatchRegistry()
+        actions = [{"action_id": "a1", "type": "wait", "wait_ms": 100}]
+        first = registry.submit("b1", 100, actions, protocol_version=1)
+        second = registry.submit("b1", 100, actions, protocol_version=1)
+        self.assertFalse(first["replayed"])
+        self.assertTrue(second["replayed"])
+        self.assertEqual(first["content_hash"], second["content_hash"])
 
 
 if __name__ == "__main__":

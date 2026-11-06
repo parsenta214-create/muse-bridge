@@ -53,6 +53,7 @@ import threading
 import time
 import urllib.error
 
+import bridge_protocol  # Local sibling: protocol error codes (Step 2 wiring).
 import retry  # Local sibling (retry.py): backoff math only; the bridge
 # classifier below is its own, because the bridge retries a different
 # set of failures than the Gemini API.
@@ -965,6 +966,15 @@ class AndroidAdapter:
                 detail = exc.read().decode("utf-8", "replace")
             except Exception:  # noqa: BLE001 - keep the original status
                 detail = ""
+            # Step 2 (MERGE_PLAN_A): the error classification uses
+            # bridge_protocol.error_code_for_status. The hints are
+            # unchanged — 400/408/413/431 stay input-validation
+            # rejections, 401 stays a token problem, 503 stays
+            # overload/not-enabled. The code (e.g. INVALID_REQUEST,
+            # UNAUTHORIZED, UNAVAILABLE) is now part of the message
+            # so callers and logs can classify without re-parsing
+            # the status.
+            code = bridge_protocol.error_code_for_status(exc.code)
             # A-1 (v1.9): the bridge now rejects bad input with its own
             # statuses; the hint must not blame the token for those.
             if exc.code == 401:
@@ -978,8 +988,8 @@ class AndroidAdapter:
             else:
                 hint = "unexpected bridge error"
             raise TransportError(
-                f"app returned HTTP {exc.code} for {method} {path}: {detail} "
-                f"({hint})") from exc
+                f"app returned HTTP {exc.code} [{code}] for {method} {path}: "
+                f"{detail} ({hint})") from exc
         except Exception as exc:  # noqa: BLE001 - report the failure
             raise TransportError(
                 f"cannot reach the app at {APP_URL}: {exc}") from exc

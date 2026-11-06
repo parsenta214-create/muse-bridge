@@ -13,6 +13,12 @@ from typing import Any
 DEFAULT_PORT = 8080
 TOKEN_HEADER = "X-Bridge-Token"
 
+# Protocol version of this module. The live bridge (Phase B, README
+# decision 46) accepts only version 1; anything else is a 400.
+# Step 2 (v1.0.1): the version is now explicit in build_batch output
+# and in the BatchRegistry content hash (MERGE_PLAN_A item 2).
+PROTOCOL_VERSION = 1
+
 MAX_BODY_BYTES = 262144
 MAX_HEADER_BYTES = 8192
 MAX_EVENTS_LIMIT = 200
@@ -309,9 +315,14 @@ def build_batch(
     batch_id: str,
     tree_hash: int,
     actions: list[dict[str, Any]],
+    protocol_version: int = PROTOCOL_VERSION,
 ) -> dict[str, Any]:
     _require_str(batch_id, "batch_id", non_empty=True)
     _require_int(tree_hash, "tree_hash")
+    # Step 2 (v1.0.1): the version is validated here, not just
+    # hardcoded — the live server rejects any version other than 1
+    # with 400, so a caller asking for another version fails fast.
+    _require_int(protocol_version, "protocol_version", min_value=1, max_value=1)
     if not isinstance(actions, list) or len(actions) == 0:
         raise ProtocolError("actions must be a non-empty list")
     if len(actions) > 20:
@@ -319,8 +330,13 @@ def build_batch(
     validated_actions = [
         _validate_batch_action(action, idx) for idx, action in enumerate(actions)
     ]
+    # Step 2 (v1.0.1, MERGE_PLAN_A item 2): the protocol version is
+    # now explicit in the batch body. The server defaults it to 1 and
+    # rejects anything else with 400, and the A-5 client rule says the
+    # client sends protocol_version: 1.
     return validate_body_size(
         {
+            "protocol_version": protocol_version,
             "batch_id": batch_id,
             "tree_hash": tree_hash,
             "actions": validated_actions,
@@ -678,8 +694,28 @@ class BatchRegistry:
         self._records: dict[str, str] = {}
 
     @staticmethod
-    def compute_content_hash(tree_hash: int, actions: list[dict[str, Any]]) -> str:
-        canonical_obj = {"tree_hash": tree_hash, "actions": actions}
+    def compute_content_hash(
+        protocol_version: int, tree_hash: int, actions: list[dict[str, Any]]
+    ) -> str:
+        """Return a SHA-256 hash of the canonical batch payload.
+
+        Step 2 (v1.0.1): the hash is over {protocol_version,
+        tree_hash, actions} — the Phase B design (README decision
+        46) requires the version in the hash, so a batch built for a
+        different protocol version never collides with one for this
+        version. protocol_version is a required argument: the hash
+        must never be computed without it. The canonical form uses
+        sort_keys and separators (",", ":") so dict key order does
+        not change the hash. This is a pure function — it hashes
+        whatever version it is given; the version policy (only 1 is
+        accepted) is enforced at the entry points, build_batch and
+        submit.
+        """
+        canonical_obj = {
+            "protocol_version": protocol_version,
+            "tree_hash": tree_hash,
+            "actions": actions,
+        }
         canonical_json = json.dumps(
             canonical_obj,
             sort_keys=True,
@@ -693,10 +729,23 @@ class BatchRegistry:
         batch_id: str,
         tree_hash: int,
         actions: list[dict[str, Any]],
+        protocol_version: int = PROTOCOL_VERSION,
     ) -> dict[str, Any]:
-        validated = build_batch(batch_id, tree_hash, actions)
+        """Register a batch by its content hash.
+
+        Replays (replayed: True) when the same batch_id was submitted
+        with identical content (same protocol_version, tree_hash, and
+        actions). Raises ProtocolError (code STALE_REVISION) when the
+        same batch_id was submitted with different content. The
+        version is validated (only 1 is accepted) because the live
+        server rejects any other version with 400.
+        """
+        _require_int(protocol_version, "protocol_version", min_value=1, max_value=1)
+        validated = build_batch(batch_id, tree_hash, actions, protocol_version)
         content_hash = self.compute_content_hash(
-            validated["tree_hash"], validated["actions"]
+            validated["protocol_version"],
+            validated["tree_hash"],
+            validated["actions"],
         )
         if batch_id not in self._records:
             self._records[batch_id] = content_hash

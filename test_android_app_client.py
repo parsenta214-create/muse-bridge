@@ -105,7 +105,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
             import urllib.parse
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
             err = query.get("err", [None])[0]
-            if err in ("400", "408", "413", "431", "503"):
+            if err in ("400", "401", "408", "413", "431", "503"):
                 return self._send_json(int(err), {"ok": False, "error": "simulated"})
         if self.path == "/capture_screen" or self.path.startswith("/capture_screen?"):
             import urllib.parse
@@ -545,6 +545,29 @@ def test_app_503_hint_mentions_overload_v19(mock_app):
     assert "wrong token" not in msg
 
 
+def test_app_error_message_carries_protocol_code(mock_app):
+    """MERGE_PLAN_A Step 2: the TransportError message carries the
+    protocol error code from bridge_protocol.error_code_for_status,
+    so callers can classify without re-parsing the status. The hints
+    are unchanged (input validation / token / overload)."""
+    adapter = ab.AndroidAdapter()
+    cases = [
+        (400, "[INVALID_REQUEST]", "input validation"),
+        (401, "[UNAUTHORIZED]", "wrong token"),
+        (408, "[TIMEOUT]", "input validation"),
+        (413, "[TOO_LARGE]", "input validation"),
+        (431, "[HEADER_TOO_LARGE]", "input validation"),
+        (503, "[UNAVAILABLE]", "overloaded"),
+    ]
+    for code, expected_code, expected_hint in cases:
+        with pytest.raises(ab.TransportError) as excinfo:
+            adapter._app_request("GET", f"/state?err={code}")
+        msg = str(excinfo.value)
+        assert f"HTTP {code}" in msg
+        assert expected_code in msg
+        assert expected_hint in msg
+
+
 def test_app_state_snapshot_fields_v19(mock_app):
     """A-3 (v1.9): /state carries snapshot_id/snapshot_valid/
     snapshot_stable, so the client can tell whether the snapshot it
@@ -668,6 +691,24 @@ def test_bridge_error_classifier():
     bad = ab.TransportError("cannot reach the app at http://127.0.0.1:8080")
     bad.__cause__ = ValueError("bad value")
     assert not ab._is_retryable_bridge_error(bad)
+
+
+def test_bridge_error_classifier_new_format():
+    """Step 2 (P1-02): the retry classifier also reads the NEW
+    message format with the protocol error code in brackets."""
+    assert ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 503 [UNAVAILABLE] for GET /health: {} "
+        "(accessibility service not enabled, or the bridge is overloaded)"))
+    assert ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 500 [INTERNAL_ERROR] for GET /state: {} "
+        "(unexpected bridge error)"))
+    assert not ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 400 [INVALID_REQUEST] for GET /state: {} "
+        "(request rejected by the bridge input validation "
+        "(bad request, timeout, or too large))"))
+    assert not ab._is_retryable_bridge_error(ab.TransportError(
+        "app returned HTTP 401 [UNAUTHORIZED] for GET /state: {} "
+        "(wrong token, or the token changed on the phone)"))
 
 
 def test_app_last_call_records_success(mock_app):
