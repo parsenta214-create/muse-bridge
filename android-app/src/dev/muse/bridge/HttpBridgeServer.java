@@ -673,6 +673,18 @@ public class HttpBridgeServer {
     }
 
     private int handle(Socket conn, long lifecycleGeneration) {
+        // SPEC-PING-001: remember the last client IP (the Muse
+        // client's Tailscale address) as the ping target. Loopback
+        // is ignored — local dashboard / Termux connections are
+        // 127.0.0.1. Never fail a request for this.
+        try {
+            String remote = conn.getInetAddress().getHostAddress();
+            if (remote != null && !remote.startsWith("127.")
+                    && !"::1".equals(remote)) {
+                PingProber.setLastClientIp(remote);
+            }
+        } catch (Exception ignored) {
+        }
         String method = "?";
         String path = "?";
         int status = 500;
@@ -903,6 +915,9 @@ public class HttpBridgeServer {
                                 .put("actions", actions));
                     }
                     status = 200;
+                    // SPEC-PING-001: null (JSONObject.NULL) when no
+                    // probe has run yet.
+                    JSONObject ping = pingToClientJson();
                     sendJson(out, status, new JSONObject()
                             .put("ok", true)
                             .put("app_version", AppVersion.name(context))
@@ -922,6 +937,8 @@ public class HttpBridgeServer {
                             .put("ime_visible", st.imeVisible)
                             .put("event_seq", st.eventSeq)
                             .put("device", deviceState())
+                            .put("ping_to_client",
+                                    ping == null ? JSONObject.NULL : ping)
                             .put("truncated", st.truncated));
                 }
             } else if ("/logs".equals(path)) {
@@ -2088,6 +2105,30 @@ public class HttpBridgeServer {
      * battery_pct=-1 marks "unknown": charging=false alone means
      * "not charging" only when battery_pct >= 0.
      */
+    /** SPEC-PING-001: the latest phone-to-client probe result for
+     * /state (null when no probe has run yet). Never fails /state. */
+    private static JSONObject pingToClientJson() {
+        try {
+            PingProber.Result r = PingProber.getLastResult();
+            if (r == null) {
+                return null;
+            }
+            JSONObject o = new JSONObject()
+                    .put("target", r.target)
+                    .put("method", r.method)
+                    .put("rtt_ms", r.rttMs)
+                    .put("sent", r.sent)
+                    .put("received", r.received)
+                    .put("at", r.measuredAtMs);
+            if (r.error != null) {
+                o.put("error", r.error);
+            }
+            return o;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private JSONObject deviceState() {
         int batteryPct = -1;
         boolean charging = false;

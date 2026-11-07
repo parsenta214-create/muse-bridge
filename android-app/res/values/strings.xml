@@ -59,4 +59,15 @@
     <string name="card_access">アクセス</string>
     <string name="card_connection">接続情報</string>
     <string name="mode_short_full">フルアクセス</string>
+    <!-- SPEC-PING-001: phone-to-client probe row. -->
+    <string name="ping_no_client">まだ Muse 側からの接続がありません</string>
+    <string name="ping_measuring">計測中…</string>
+    <string name="ping_result">Muse 側への ping： %1$dms（%2$d/%3$d）・%4$s</string>
+    <string name="ping_failed">ping 失敗（%1$s）</string>
+    <string name="ping_target">宛先 %1$s</string>
+    <string name="ping_row_desc">Muse 側への ping。タップで再計測します。</string>
+    <string name="ping_just_now">たった今</string>
+    <string name="ping_seconds_ago">%1$d 秒前</string>
+    <string name="ping_minutes_ago">%1$d 分前</string>
+    <string name="ping_hours_ago">%1$d 時間前</string>
 </resources>

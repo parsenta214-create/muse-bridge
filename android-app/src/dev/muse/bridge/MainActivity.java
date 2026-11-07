@@ -58,6 +58,10 @@ public class MainActivity extends Activity {
     private TextView flowStatusDevice;
     private TextView flowStatusTailscale;
     private TextView flowStatusServer;
+    /** SPEC-PING-001: the phone-to-client probe row under the flow. */
+    private View pingRow;
+    private TextView pingText;
+    private TextView pingDetail;
     private TextView modeStatusValue;
     private TextView a11yStatusValue;
     private TextView notifStatusValue;
@@ -240,6 +244,12 @@ public class MainActivity extends Activity {
         flowStatusDevice = findViewById(R.id.flow_status_device);
         flowStatusTailscale = findViewById(R.id.flow_status_tailscale);
         flowStatusServer = findViewById(R.id.flow_status_server);
+        pingRow = findViewById(R.id.ping_row);
+        pingText = findViewById(R.id.ping_text);
+        pingDetail = findViewById(R.id.ping_detail);
+        // SPEC-PING-001: tap the ping row to re-probe (throttled
+        // to 30 s inside PingProber).
+        pingRow.setOnClickListener(v -> probePing());
         modeStatusValue = findViewById(R.id.status_mode_value);
         a11yStatusValue = findViewById(R.id.status_a11y_value);
         notifStatusValue = findViewById(R.id.status_notif_value);
@@ -488,6 +498,11 @@ public class MainActivity extends Activity {
         flowArrowServer.setTextColor(
                 getColor(running ? R.color.status_ok : R.color.status_neutral));
 
+        // SPEC-PING-001: probe the client when the screen is shown
+        // (throttled to 30 s inside PingProber) and show the latest
+        // result.
+        probePing();
+
         if (a11yOn) {
             setStatusRow(modeStatusValue, getString(R.string.status_mode_full),
                     getColor(R.color.status_ok), null);
@@ -572,6 +587,60 @@ public class MainActivity extends Activity {
     private void refreshAddress() {
         addressText.setText(addressRevealed ? currentAddress : MASKED);
         addressToggleLabel.setText(addressRevealed ? R.string.token_hide : R.string.token_show);
+    }
+
+    /** SPEC-PING-001: start a phone-to-client probe (background
+     * thread, throttled inside PingProber) and refresh the ping row
+     * when the result arrives. */
+    private void probePing() {
+        PingProber.probe(result -> runOnUiThread(this::updatePingDisplay));
+        updatePingDisplay();
+    }
+
+    /** SPEC-PING-001: show the latest probe result in the ping row.
+     * No result yet: either no client has connected, or a probe is
+     * running. */
+    private void updatePingDisplay() {
+        PingProber.Result r = PingProber.getLastResult();
+        String target = PingProber.getLastClientIp();
+        if (r == null) {
+            if (target == null) {
+                pingText.setText(R.string.ping_no_client);
+                pingDetail.setText("");
+            } else {
+                pingText.setText(R.string.ping_measuring);
+                pingDetail.setText(getString(R.string.ping_target, target));
+            }
+            pingRow.setContentDescription(getString(R.string.ping_row_desc));
+            return;
+        }
+        String method = "icmp".equals(r.method) ? "ICMP" : "TCP";
+        String detail = getString(R.string.ping_target, r.target)
+                + "（" + method + "）・タップで再計測";
+        if (r.ok()) {
+            pingText.setText(getString(R.string.ping_result, r.rttMs,
+                    r.received, r.sent, formatAge(r.measuredAtMs)));
+            pingDetail.setText(detail);
+        } else {
+            pingText.setText(getString(R.string.ping_failed, r.error));
+            pingDetail.setText(detail);
+        }
+        pingRow.setContentDescription(
+                pingText.getText() + "。" + pingDetail.getText());
+    }
+
+    /** SPEC-PING-001: "たった今" / "N 秒前" / "N 分前" / "N 時間前". */
+    private String formatAge(long measuredAtMs) {
+        long ageSec = (System.currentTimeMillis() - measuredAtMs) / 1000;
+        if (ageSec < 5) {
+            return getString(R.string.ping_just_now);
+        } else if (ageSec < 60) {
+            return getString(R.string.ping_seconds_ago, ageSec);
+        } else if (ageSec < 3600) {
+            return getString(R.string.ping_minutes_ago, ageSec / 60);
+        } else {
+            return getString(R.string.ping_hours_ago, ageSec / 3600);
+        }
     }
 
     /** SPEC-UI-002: one flow node — a coloured dot (circle) plus a
