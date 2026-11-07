@@ -3191,6 +3191,10 @@ def test_ping001_prober_uses_icmp_with_tcp_fallback():
     # reader's liveness is checked on both paths (NEW-05).
     assert "processExited" in src
     assert "reader.isAlive()" in src
+    # CONS-056 fix round: the second kill is confirmed too, and a
+    # stuck reader is unblocked by closing the process input
+    # stream (NEW-06).
+    assert "pingIn.close()" in src
 
 
 def test_ping001_server_records_client_ip_and_state():

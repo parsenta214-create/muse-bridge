@@ -3,6 +3,7 @@ package dev.muse.bridge;
 import android.os.SystemClock;
 
 import java.io.BufferedReader;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
@@ -194,10 +195,11 @@ public class PingProber {
                     "-W", String.valueOf(PING_TIMEOUT_S), target)
                     .redirectErrorStream(true)
                     .start();
+            InputStream pingIn = p.getInputStream();
             StringBuilder out = new StringBuilder();
             Thread reader = new Thread(() -> {
                 try (BufferedReader r = new BufferedReader(
-                        new InputStreamReader(p.getInputStream()))) {
+                        new InputStreamReader(pingIn))) {
                     String line;
                     while ((line = r.readLine()) != null) {
                         out.append(line).append('\n');
@@ -210,13 +212,28 @@ public class PingProber {
             boolean finished = p.waitFor(PING_WAIT_TIMEOUT_S, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
-                // CONS-055 NEW-05: waitFor/join return even when
-                // they time out — confirm the exit explicitly
-                // instead of assuming it.
+                // CONS-055 NEW-05 / CONS-056 NEW-06: waitFor/join
+                // return even when they time out — confirm the
+                // exit explicitly instead of assuming it.
                 boolean processExited = p.waitFor(2, TimeUnit.SECONDS);
                 reader.join(2000);
                 if (!processExited) {
                     p.destroyForcibly();
+                    // CONS-056 NEW-06: confirm the second kill
+                    // too, then give the reader a final bounded
+                    // chance to drain.
+                    p.waitFor(2, TimeUnit.SECONDS);
+                    reader.join(2000);
+                }
+                if (reader.isAlive()) {
+                    // The reader may be stuck in a blocking read;
+                    // closing the stream unblocks it. The timeout
+                    // path never parses the output anyway.
+                    try {
+                        pingIn.close();
+                    } catch (Exception ignored) {
+                    }
+                    reader.join(500);
                 }
                 return null;
             }
