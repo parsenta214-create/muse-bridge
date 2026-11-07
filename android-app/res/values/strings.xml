@@ -1,27 +1,48 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Muse Bridge</string>
-    <string name="title_version">Version</string>
-    <string name="accessibility_service_description">Lets the Muse Bridge read the screen and perform taps and swipes for automation. Enable it only while you want the bridge to work.</string>
-    <string name="title_status">Status</string>
-    <string name="title_token">Bridge token (keep private)</string>
-    <string name="title_address">Bridge address</string>
-    <string name="btn_start">Start bridge</string>
-    <string name="btn_stop">Stop bridge</string>
-    <string name="btn_accessibility">Open accessibility settings</string>
-    <string name="btn_mode_minimal">Banking safe: OFF — tap to turn on</string>
-    <string name="btn_mode_banking_safe">Banking safe: ON — tap to turn off</string>
-    <string name="btn_notification">Open notification access settings</string>
+    <string name="title_version">バージョン</string>
+    <string name="accessibility_service_description">Muse Bridgeが画面を読み、自動化のためにタップやスワイプを行うための権限です。Bridgeを使いたい間だけ有効にしてください。</string>
+    <string name="title_status">ステータス</string>
+    <string name="title_token">Bridgeトークン（他人に見せないで）</string>
+    <string name="title_address">Bridgeアドレス</string>
+    <string name="btn_start">Bridgeを開始</string>
+    <string name="btn_stop">Bridgeを停止</string>
+    <string name="btn_accessibility">アクセシビリティ設定を開く</string>
+    <string name="btn_mode_minimal">銀行安全モード：オフ — タップでオン</string>
+    <string name="btn_mode_banking_safe">銀行安全モード：オン — タップでオフ</string>
+    <!-- SPEC-UI-001 fix: while a11y is on, the effective mode is FULL ACCESS, so the button says when the persisted mode applies. -->
+    <string name="btn_mode_minimal_a11y_on">銀行安全モード：オフ（アクセシビリティOFF時に適用）— タップでオン</string>
+    <string name="btn_mode_banking_safe_a11y_on">銀行安全モード：オン（アクセシビリティOFF時に適用）— タップでオフ</string>
+    <string name="btn_notification">通知アクセス設定を開く</string>
     <string name="btn_add_tile">クイック設定に追加</string>
     <string name="tile_label">Muse Bridge</string>
     <string name="toast_tile_added">クイック設定に追加したよ。タイルをタップするとオンオフできるよ。</string>
     <string name="toast_tile_already_added">もう追加済みだよ。</string>
     <string name="toast_tile_failed">追加できなかったよ。クイック設定の編集から「Muse Bridge」を手動で追加してね。</string>
-    <string name="btn_regenerate">Regenerate token</string>
+    <string name="btn_regenerate">トークンを再発行</string>
     <string name="btn_log">ログを見る</string>
     <string name="btn_log_refresh">更新</string>
     <string name="btn_log_export">TXTで保存</string>
     <string name="toast_log_saved">ログを保存したよ。</string>
     <string name="toast_log_save_failed">保存できなかったよ。もう一度試してね。</string>
-    <string name="hint">The bridge listens only on this phone (Tailscale address and localhost). Every request needs the token above. Stop the bridge when you are done.</string>
+    <string name="hint">Bridgeはこの端末内でのみ待ち受けます（Tailscaleアドレスとlocalhost）。すべてのリクエストに上のトークンが必要です。使い終わったらBridgeを停止してください。</string>
+    <!-- SPEC-UI-001: status rows -->
+    <string name="status_bridge_label">Bridge</string>
+    <string name="status_mode_label">モード</string>
+    <string name="status_a11y_label">アクセシビリティ</string>
+    <string name="status_notif_label">通知アクセス</string>
+    <string name="status_running">実行中</string>
+    <string name="status_stopped">停止中</string>
+    <string name="status_mode_full">フルアクセス（画面操作可）</string>
+    <string name="status_mode_minimal">最小</string>
+    <string name="status_mode_banking">銀行安全</string>
+    <string name="status_enabled">有効</string>
+    <string name="status_not_enabled">未設定</string>
+    <string name="status_granted">許可済み</string>
+    <string name="status_not_granted">未許可</string>
+    <string name="status_note_a11y_banking">銀行アプリ優先のため意図的にオフ</string>
+    <string name="status_note_a11y_minimal">設定を開いてオンにしてください</string>
+    <string name="status_note_notif">設定を開いてオンにしてください</string>
+    <string name="token_toggle_hint">タップで表示／非表示を切り替えます</string>
 </resources>

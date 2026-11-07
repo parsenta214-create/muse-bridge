@@ -2194,7 +2194,7 @@ def test_widget_updates_pushed_from_service_and_mode_toggle():
     assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
     main = _java_source("MainActivity.java")
     start = main.index("modeButton.setOnClickListener")
-    end = main.index("Button notif = findViewById", start)
+    end = main.index("notifButton = findViewById", start)
     assert ("BridgeWidgetProvider.updateAllWidgets(MainActivity.this)"
             in main[start:end])
 

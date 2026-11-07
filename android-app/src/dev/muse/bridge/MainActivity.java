@@ -14,6 +14,9 @@ import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
@@ -38,11 +41,22 @@ public class MainActivity extends Activity {
     private static final String PERMISSION_RUN_COMMAND =
             "com.termux.permission.RUN_COMMAND";
 
-    private TextView statusText;
+    // SPEC-UI-001: status is four label+value rows, each value coloured
+    // by its state (see colors.xml).
+    private TextView bridgeStatusValue;
+    private TextView modeStatusValue;
+    private TextView a11yStatusValue;
+    private TextView notifStatusValue;
     private TextView addressText;
     private TextView tokenText;
     private TextView versionText;
     private Button modeButton;
+    private Button startButton;
+    private Button stopButton;
+    private Button a11yButton;
+    private Button notifButton;
+    /** SPEC-UI-001: the token is masked by default; tap to reveal. */
+    private boolean tokenRevealed = false;
 
     /** CONS-029 P1-2 fix: refresh the status display when the
      * AccessibilityService connects or disconnects. refresh()
@@ -188,14 +202,26 @@ public class MainActivity extends Activity {
                     REQUEST_RUN_COMMAND);
         }
 
-        statusText = findViewById(R.id.status_text);
+        bridgeStatusValue = findViewById(R.id.status_bridge_value);
+        modeStatusValue = findViewById(R.id.status_mode_value);
+        a11yStatusValue = findViewById(R.id.status_a11y_value);
+        notifStatusValue = findViewById(R.id.status_notif_value);
         addressText = findViewById(R.id.address_text);
         tokenText = findViewById(R.id.token_text);
         versionText = findViewById(R.id.version_text);
 
-        Button start = findViewById(R.id.start_button);
-        Button stop = findViewById(R.id.stop_button);
-        Button a11y = findViewById(R.id.accessibility_button);
+        // SPEC-UI-001: tap the token to toggle masked / revealed.
+        tokenText.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                tokenRevealed = !tokenRevealed;
+                refreshToken();
+            }
+        });
+
+        startButton = findViewById(R.id.start_button);
+        stopButton = findViewById(R.id.stop_button);
+        a11yButton = findViewById(R.id.accessibility_button);
         Button regen = findViewById(R.id.regenerate_button);
         Button log = findViewById(R.id.log_button);
         log.setOnClickListener(new View.OnClickListener() {
@@ -205,21 +231,21 @@ public class MainActivity extends Activity {
             }
         });
 
-        start.setOnClickListener(new View.OnClickListener() {
+        startButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 startForegroundService(new Intent(MainActivity.this, BridgeService.class));
                 refresh();
             }
         });
-        stop.setOnClickListener(new View.OnClickListener() {
+        stopButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 stopService(new Intent(MainActivity.this, BridgeService.class));
                 refresh();
             }
         });
-        a11y.setOnClickListener(new View.OnClickListener() {
+        a11yButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
@@ -244,8 +270,8 @@ public class MainActivity extends Activity {
                 BridgeWidgetProvider.updateAllWidgets(MainActivity.this);
             }
         });
-        Button notif = findViewById(R.id.notification_button);
-        notif.setOnClickListener(new View.OnClickListener() {
+        notifButton = findViewById(R.id.notification_button);
+        notifButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
@@ -346,8 +372,14 @@ public class MainActivity extends Activity {
         versionText.setText("v" + AppVersion.name(this)
                 + " (" + AppVersion.code(this) + ")");
 
-        StringBuilder status = new StringBuilder();
-        status.append(BridgeService.isRunning() ? "Bridge: running" : "Bridge: stopped");
+        // SPEC-UI-001: each status row shows its state word in the
+        // colour for that state, with the explanation in grey after
+        // it (setStatusRow). Colour never carries information alone.
+        boolean running = BridgeService.isRunning();
+        setStatusRow(bridgeStatusValue,
+                getString(running ? R.string.status_running : R.string.status_stopped),
+                getColor(running ? R.color.status_ok : R.color.status_bad), null);
+
         // P0-2 (v2.0): the effective mode. a11y on means FULL
         // ACCESS; a11y off means the persisted MINIMAL /
         // BANKING SAFE.
@@ -362,46 +394,96 @@ public class MainActivity extends Activity {
         // is kept as the Settings-state check for diagnostics.)
         boolean a11yOn = BridgeAccessibilityService.getInstance() != null;
         String mode = a11yOn ? "FULL ACCESS" : getPersistedMode(this);
-        status.append("\nMode: ").append(mode);
         if (a11yOn) {
-            status.append(" — screen control available");
+            setStatusRow(modeStatusValue, getString(R.string.status_mode_full),
+                    getColor(R.color.status_ok), null);
+        } else if (MODE_BANKING_SAFE.equals(mode)) {
+            setStatusRow(modeStatusValue, getString(R.string.status_mode_banking),
+                    getColor(R.color.status_warn), null);
+        } else {
+            setStatusRow(modeStatusValue, getString(R.string.status_mode_minimal),
+                    getColor(R.color.status_neutral), null);
         }
-        // CONS-029 P1-1 fix: the BANKING_SAFE explanation used to
-        // appear here AND on the Accessibility row ("banking apps
-        // take priority" twice). The Mode row no longer repeats
-        // it — the Accessibility row below is the one place that
-        // explains why the service is off.
-        status.append("\nAccessibility service: ")
-                .append(a11yOn ? "enabled" : "NOT enabled");
-        if (!a11yOn && MODE_BANKING_SAFE.equals(mode)) {
+
+        if (a11yOn) {
+            setStatusRow(a11yStatusValue, getString(R.string.status_enabled),
+                    getColor(R.color.status_ok), null);
+        } else if (MODE_BANKING_SAFE.equals(mode)) {
             // P1-1 (CONS-022): in BANKING_SAFE the service stays
             // off BY DESIGN — never prompt the user to enable
-            // it. The old code appended the enable prompt
-            // whenever a11y was off, including BANKING_SAFE,
-            // contradicting the spec.
-            status.append(" — left off on purpose, banking apps take priority");
-        } else if (!a11yOn) {
+            // it.
+            setStatusRow(a11yStatusValue, getString(R.string.status_not_enabled),
+                    getColor(R.color.status_warn),
+                    getString(R.string.status_note_a11y_banking));
+        } else {
             // MINIMAL only: prompt to enable a11y.
-            status.append(" — open accessibility settings and turn on Muse Bridge");
+            setStatusRow(a11yStatusValue, getString(R.string.status_not_enabled),
+                    getColor(R.color.status_bad),
+                    getString(R.string.status_note_a11y_minimal));
         }
-        status.append("\nNotification access: ")
-                .append(BridgeNotificationListener.isAccessGranted(this)
-                        ? "granted" : "NOT granted");
-        if (!BridgeNotificationListener.isAccessGranted(this)) {
-            status.append(" — open notification access settings and turn on Muse Bridge");
-        }
-        statusText.setText(status.toString());
+
+        boolean notifGranted = BridgeNotificationListener.isAccessGranted(this);
+        setStatusRow(notifStatusValue,
+                getString(notifGranted ? R.string.status_granted : R.string.status_not_granted),
+                getColor(notifGranted ? R.color.status_ok : R.color.status_bad),
+                notifGranted ? null : getString(R.string.status_note_notif));
+
+        // SPEC-UI-001: only the action that applies is shown/enabled.
+        startButton.setVisibility(running ? View.GONE : View.VISIBLE);
+        stopButton.setVisibility(running ? View.VISIBLE : View.GONE);
+        a11yButton.setEnabled(!a11yOn);
+        a11yButton.setAlpha(a11yOn ? 0.5f : 1.0f);
+        notifButton.setEnabled(!notifGranted);
+        notifButton.setAlpha(notifGranted ? 0.5f : 1.0f);
 
         // P0-2 (v2.0): the mode button shows the persisted mode
         // (what applies when a11y is off) and what a tap does.
-        modeButton.setText(MODE_BANKING_SAFE.equals(getPersistedMode(this))
-                ? R.string.btn_mode_banking_safe : R.string.btn_mode_minimal);
+        // SPEC-UI-001 fix: while a11y is on, the effective mode is
+        // FULL ACCESS, so the button says when the persisted mode
+        // applies — otherwise "banking safe: ON" looks active
+        // next to a "FULL ACCESS" status row.
+        boolean bankingSafe = MODE_BANKING_SAFE.equals(getPersistedMode(this));
+        if (a11yOn) {
+            modeButton.setText(bankingSafe
+                    ? R.string.btn_mode_banking_safe_a11y_on
+                    : R.string.btn_mode_minimal_a11y_on);
+        } else {
+            modeButton.setText(bankingSafe
+                    ? R.string.btn_mode_banking_safe : R.string.btn_mode_minimal);
+        }
 
         String ip = findTailscaleIp();
         addressText.setText(ip != null
                 ? "http://" + ip + ":" + HttpBridgeServer.PORT + "  (and http://127.0.0.1:" + HttpBridgeServer.PORT + ")"
                 : "http://127.0.0.1:" + HttpBridgeServer.PORT + "  (Tailscale address not found)");
 
-        tokenText.setText(getOrCreateToken(this));
+        refreshToken();
+    }
+
+    /** SPEC-UI-001: the token is masked by default (first 4 + … + last 4). */
+    private void refreshToken() {
+        String token = getOrCreateToken(this);
+        tokenText.setText(tokenRevealed ? token : maskToken(token));
+    }
+
+    private static String maskToken(String token) {
+        if (token == null || token.length() < 8) {
+            return "••••";
+        }
+        return token.substring(0, 4) + "…" + token.substring(token.length() - 4);
+    }
+
+    /** SPEC-UI-001: state word in its colour, optional note in grey. */
+    private void setStatusRow(TextView view, String state, int stateColor, String note) {
+        SpannableStringBuilder sb = new SpannableStringBuilder(state);
+        sb.setSpan(new ForegroundColorSpan(stateColor), 0, state.length(),
+                Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (note != null && !note.isEmpty()) {
+            int start = sb.length();
+            sb.append(" — ").append(note);
+            sb.setSpan(new ForegroundColorSpan(getColor(R.color.status_neutral)),
+                    start, sb.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        view.setText(sb);
     }
 }
