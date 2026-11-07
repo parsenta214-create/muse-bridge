@@ -1,0 +1,86 @@
+# Muse Bridge — CI build (APK + Python tests).
+#
+# Trigger: manual only (workflow_dispatch). This workflow is set up
+# ("打通") but NOT run yet — nothing here runs automatically on push.
+# To run it later, trigger it from the Actions tab, or:
+#   gh workflow run build.yml --repo parsenta214-create/muse-bridge
+# To enable automatic runs on push, add a `push:` trigger (see below).
+#
+# What it does, when run:
+#   1. Checks out the repo.
+#   2. Sets up Temurin JDK 17 and the Android SDK (API 34, build-tools 34.0.0).
+#   3. Restores the debug keystore from the DEBUG_KEYSTORE_B64 secret —
+#      the SAME key that signs the phone installs, so update-installs
+#      keep working. If the secret is not set, build.sh generates a fresh
+#      debug keystore and the APK gets a DIFFERENT signature: it will NOT
+#      update-install over the existing app (uninstall first, which loses
+#      the bridge token). Do not run the workflow until the secret is set.
+#   4. Runs the Python test suite (pytest; the bridge Python code uses
+#      stdlib + pytest only, so no requirements file is needed).
+#   5. Builds the APK with the manual aapt2 / javac / d8 pipeline
+#      (android-app/build.sh) and uploads it as an artifact.
+#
+# No secrets are printed. The keystore password is the well-known debug
+# default ("android") already used by build.sh.
+
+name: Build Muse Bridge APK
+
+on:
+  workflow_dispatch:
+  # To run automatically on every push to main, uncomment:
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Restore debug keystore (same key as the phone installs)
+        env:
+          DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$DEBUG_KEYSTORE_B64" ]; then
+            echo "$DEBUG_KEYSTORE_B64" | base64 -d > android-app/debug.keystore
+            echo "keystore restored from secret"
+          else
+            echo "::warning::DEBUG_KEYSTORE_B64 is not set — build.sh will generate a fresh debug keystore, and the APK will NOT update-install over the existing app"
+          fi
+
+      - name: Run Python tests
+        env:
+          ANDROID_APP_TOKEN: dummy-test-token
+        run: |
+          python3 -m pip install -q pytest
+          python3 -m pytest -q
+
+      - name: Build APK
+        run: |
+          cd android-app && ./build.sh
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Muse_Bridge_APK
+          path: android-app/Muse_Bridge_v*.apk
+          if-no-files-found: error

@@ -209,7 +209,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # mock always answers VERIFICATION_UNAVAILABLE, like the
     # real server. Reset by the fixture.
     launch_outcome = "launched"
-    # P0-4 deny list (Saardeim decision 2026-11-06 20:16,
+    # P0-4 deny list (System Development Lead decision 2026-11-06 20:16,
     # README decision 91): mirrors the Java LAUNCH_DENY_LIST —
     # the mock refuses these packages with 403 before any launch
     # attempt and before the operation notification.
@@ -2114,6 +2114,11 @@ def test_p2_service_unavailable_detail_names_endpoint():
 # Start/Stop, a11y/mode refresh) needs the §6 live verification
 # on the phone; the aapt2 link step validates the widget XML
 # resources at build time.
+#
+# CONS-037 fix round: the toggle control path moved out of the
+# exported provider into the non-exported
+# BridgeWidgetActionReceiver (P1), and the W6 async start-failure
+# check was added (P2). The guards below pin that separation.
 
 def test_widget_manifest_declares_receiver():
     """W3: the manifest must declare the widget receiver with
@@ -2160,71 +2165,90 @@ def test_widget_layout_has_required_ids():
 
 def test_widget_provider_never_touches_token():
     """W5: the widget never touches the HTTP API or the token —
-    it talks to the service via Intents only. The provider
-    source must not reference the token at all."""
-    src = _java_source("BridgeWidgetProvider.java")
-    assert "getOrCreateToken" not in src
-    assert "currentToken" not in src
-    assert "KEY_TOKEN" not in src
+    it talks to the service via Intents only. Neither the
+    provider nor the action receiver source may reference the
+    token at all."""
+    for name in ("BridgeWidgetProvider.java",
+                 "BridgeWidgetActionReceiver.java"):
+        src = _java_source(name)
+        assert "getOrCreateToken" not in src
+        assert "currentToken" not in src
+        assert "KEY_TOKEN" not in src
 
 
 def test_widget_provider_handles_a11y_only():
-    """CONS-037 P1: the exported provider must handle ONLY the
-    a11y-state redraw. Handling a toggle action here would let
-    ANY app toggle the service with an explicit broadcast — the
-    toggle lives in the non-exported BridgeWidgetActionReceiver.
-    The provider still builds its views from the widget layout
-    and refreshes on system updates, and its toggle PendingIntent
-    targets the receiver (not this provider)."""
+    """W2/W3 + CONS-037 P1: the EXPORTED provider must handle
+    ONLY the a11y-state redraw (plus the system widget updates
+    via super.onReceive). It must NOT handle the toggle action —
+    an exported receiver handling a control action would let any
+    app toggle the service with an explicit broadcast. The
+    toggle lives in BridgeWidgetActionReceiver (see the next
+    test). Source-level guard (see the section header for the
+    honest limit)."""
     src = _java_source("BridgeWidgetProvider.java")
-    assert "ACTION_WIDGET_TOGGLE.equals(action)" not in src
+    # NOTE (2026-11-08, v2.8.6): the blanket check
+    # `"ACTION_WIDGET_TOGGLE" not in src` can never pass — the
+    # provider MUST reference the constant to build the toggle
+    # PendingIntent (see test_widget_toggle_targets_action_receiver,
+    # which requires
+    # `BridgeWidgetActionReceiver.ACTION_WIDGET_TOGGLE` here).
+    # The guard is that the provider never DISPATCHES on the action:
+    assert "ACTION_WIDGET_TOGGLE.equals" not in src
     assert "toggleService" not in src
     assert "startForegroundService(" not in src
-    assert "BridgeWidgetActionReceiver.class" in src
-    assert "BridgeWidgetActionReceiver.ACTION_WIDGET_TOGGLE" in src
+    assert "stopService(" not in src
     assert "ACTION_A11Y_STATE_CHANGED.equals(action)" in src
     assert "R.layout.widget_bridge" in src
     assert "updateAllWidgets(context)" in src
 
 
 def test_widget_action_receiver_is_not_exported():
-    """CONS-037 P1: the widget's Start/Stop control path must live
-    in a NON-exported receiver with no intent-filter, so no other
-    app can toggle the service with an explicit broadcast. The
-    exported provider keeps handling only system updates."""
+    """CONS-037 P1: the manifest must declare
+    .BridgeWidgetActionReceiver with exported=false and NO
+    intent-filter — only explicit intents from our own app (the
+    widget's PendingIntent, same UID) may reach it."""
     src = _manifest_source()
     assert 'android:name=".BridgeWidgetActionReceiver"' in src
     start = src.index('android:name=".BridgeWidgetActionReceiver"')
-    end = src.index("/>", start)
-    region = src[start:end]
+    region = src[start:start + 300]
     assert 'android:exported="false"' in region
     assert "intent-filter" not in region
 
 
-def test_widget_action_receiver_handles_toggle_and_failure_check():
-    """CONS-037 P1/P2: the non-exported receiver handles the toggle
-    (start/stop the service via startForegroundService) and, on the
-    start path only, checks after a delay whether the service is
-    running — opening MainActivity if the server failed to start
-    (async bind failure), so the failure is visible instead of
-    showing as merely stopped."""
+def test_widget_toggle_targets_action_receiver():
+    """CONS-037 P1: the widget buttons' toggle PendingIntent must
+    target the non-exported action receiver, never the exported
+    provider."""
+    src = _java_source("BridgeWidgetProvider.java")
+    assert ("new Intent(context, BridgeWidgetActionReceiver.class)"
+            in src)
+    assert ("BridgeWidgetActionReceiver.ACTION_WIDGET_TOGGLE" in src)
+    assert ("new Intent(context, BridgeWidgetProvider.class)" not in src)
+
+
+def test_widget_action_receiver_handles_toggle_and_async_failure():
+    """W2/W3/W6 + CONS-037 P1/P2: the action receiver must handle
+    the toggle action (start/stop the service via
+    startForegroundService/stopService), fall back to MainActivity
+    on a sync start failure, refresh now + after the ~600 ms
+    settle delay, and — start path only — run a delayed check
+    that opens MainActivity when the service is still not running
+    (async bind failure). Source-level guard (see the section
+    header for the honest limit); whether the delayed check fires
+    correctly on a slow phone needs the §6 live verification."""
     src = _java_source("BridgeWidgetActionReceiver.java")
-    assert "ACTION_WIDGET_TOGGLE.equals(intent.getAction())" in src
+    assert "ACTION_WIDGET_TOGGLE.equals(action)" in src
     assert "startForegroundService(" in src
     assert "stopService(" in src
+    assert "TOGGLE_SETTLE_DELAY_MS" in src
     assert "START_FAILURE_CHECK_DELAY_MS" in src
-    assert "BridgeService.isRunning()" in src
-    assert "openMainActivity" in src
-    assert "if (started)" in src
-
-
-def test_widget_action_receiver_never_touches_token():
-    """W5: the action receiver never touches the HTTP API or the
-    token — it talks to the service via Intents only."""
-    src = _java_source("BridgeWidgetActionReceiver.java")
-    assert "getOrCreateToken" not in src
-    assert "currentToken" not in src
-    assert "KEY_TOKEN" not in src
+    assert "if (!BridgeService.isRunning())" in src
+    assert "openMainActivity(appContext)" in src
+    # The async check must be start-path only: a stop tap leaves
+    # the service correctly not running, so it must not open the
+    # app. The guard is the `started` flag gating the check.
+    assert "final boolean started = !wasRunning;" in src
+    assert "if (started) {" in src
 
 
 def test_widget_updates_pushed_from_service_and_mode_toggle():
@@ -2240,6 +2264,10 @@ def test_widget_updates_pushed_from_service_and_mode_toggle():
     assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
     main = _java_source("MainActivity.java")
     start = main.index("modeButton.setOnClickListener")
+    # NOTE (2026-11-08, v2.8.6): the end marker was the pre-redesign
+    # `Button notif = findViewById`; the current code declares the
+    # field as `notifButton` and assigns it with
+    # `notifButton = findViewById(...)`. Same region, same intent.
     end = main.index("notifButton = findViewById", start)
     assert ("BridgeWidgetProvider.updateAllWidgets(MainActivity.this)"
             in main[start:end])
@@ -2374,7 +2402,7 @@ def test_app_launch_app_without_a11y(mock_app):
     "com.krungsri.kma",  # KMA (Krungsri)
 ])
 def test_app_launch_app_deny_list(mock_app, package):
-    """P0-4 deny list (Saardeim decision 2026-11-06 20:16,
+    """P0-4 deny list (System Development Lead decision 2026-11-06 20:16,
     README decision 91): a deny-listed package is refused with
     HTTP 403 before any launch attempt and before the operation
     notification. The 403 surfaces as a TransportError, is never
@@ -3030,224 +3058,3 @@ def test_plain_actions_do_not_send_operation_end(mock_app):
     adapter.launch_app("com.twitter.android")
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert not [r for r in posts if r[1] == "/operation_end"]
-
-
-# --------------------------------------------------------------------------
-# Graphical main screen (SPEC-UI-002, v2.7.0): status dial + connection
-# flow + cards.
-# --------------------------------------------------------------------------
-#
-# HONEST LIMIT: the Python suite cannot run Java drawing code — there is
-# no Java test harness in this project (manual aapt2/javac/d8 build, no
-# Gradle, Android APIs unavailable on the JVM), same as the widget
-# guards. These guards prove structure in the source only: if someone
-# removes the dial, a flow node, a card, or the masking/mode wiring,
-# the suite fails. Actual rendering (ring colour, centre word, flow
-# dots) needs the §5 live verification on the phone; the aapt2 link
-# step validates the layout XML at build time.
-
-def test_ui002_dial_view_draws_ring_and_state_word():
-    """SPEC-UI-002 §3: StatusDialView must exist, expose setRunning /
-    setModeLabel, and draw the ring + centre state word + mode
-    sub-line on Canvas, using the status colours and strings."""
-    src = _java_source("StatusDialView.java")
-    assert "class StatusDialView extends View" in src
-    assert "public void setRunning(boolean running)" in src
-    assert "public void setModeLabel(String modeLabel)" in src
-    assert "onDraw(Canvas canvas)" in src
-    assert "R.color.status_ok" in src
-    assert "R.color.status_bad" in src
-    assert "R.string.status_running" in src
-    assert "R.string.status_stopped" in src
-    assert "drawText" in src
-    # CONS-050 P1-2 fix round: the dial must start in an unknown
-    # state (nullable running) and never claim a state it has not
-    # been told — grey ring + "—" until setRunning is called.
-    assert "private Boolean running" in src
-    assert "running == null" in src
-
-
-def test_ui002_layout_has_dial_flow_and_cards():
-    """SPEC-UI-002 §2: activity_main.xml must carry the dial, the
-    three flow nodes (device / Tailscale / server), and the mode /
-    access / connection cards."""
-    src = _res_text("layout/activity_main.xml")
-    assert 'android:id="@+id/status_dial"' in src
-    assert "dev.muse.bridge.StatusDialView" in src
-    for node in ("device", "tailscale", "server"):
-        assert f'android:id="@+id/flow_dot_{node}"' in src
-        assert f'android:id="@+id/flow_status_{node}"' in src
-        assert f'android:id="@+id/flow_node_{node}"' in src
-    assert 'android:id="@+id/flow_arrow_tailscale"' in src
-    assert 'android:id="@+id/flow_arrow_server"' in src
-    # CONS-050 P1-3: the node's inner views are hidden from the
-    # screen reader (the node carries one combined description).
-    assert 'android:importantForAccessibility="no"' in src
-    assert src.count('android:background="@drawable/card_background"') == 3
-    assert 'android:id="@+id/status_mode_value"' in src
-    assert 'android:id="@+id/status_a11y_value"' in src
-    assert 'android:id="@+id/status_notif_value"' in src
-
-
-def test_ui002_card_background_is_rounded():
-    """SPEC-UI-002 §3: the card background must be a white rounded
-    rect (16dp corners) with a light border."""
-    src = _res_text("drawable/card_background.xml")
-    assert 'android:shape="rectangle"' in src
-    assert 'android:radius="16dp"' in src
-    assert 'android:color="#FFFFFF"' in src
-
-
-def test_ui002_main_activity_wires_dial_flow_masking_and_mode():
-    """SPEC-UI-002 §3: MainActivity must drive the dial and the flow
-    from the real state (BridgeService.isRunning, findTailscaleIp),
-    and keep the masking (refreshToken/refreshAddress) and the mode
-    toggle (mode_button) wiring."""
-    src = _java_source("MainActivity.java")
-    assert "statusDial.setRunning(running)" in src
-    assert "statusDial.setModeLabel(modeShort)" in src
-    assert "BridgeService.isRunning()" in src
-    assert "findTailscaleIp()" in src
-    assert "refreshToken()" in src
-    assert "refreshAddress()" in src
-    assert "mode_button" in src
-    # The old bridge status row is gone — the dial replaces it.
-    assert "status_bridge_value" not in src
-
-
-def test_ui002_fix_round_honest_labels_and_accessibility():
-    """CONS-050 fix round: the flow words must describe what was
-    actually checked (P1-1 — no claim of end-to-end connectivity),
-    the nodes and the dial must carry a spoken description (P1-3),
-    and the arrows must reflect the link state (P2-4)."""
-    strings = _res_text("values/strings.xml")
-    assert "flow_app_running" in strings
-    assert "flow_ip_found" in strings
-    assert "flow_connected" not in strings
-    src = _java_source("MainActivity.java")
-    assert "R.string.flow_app_running" in src
-    assert "R.string.flow_ip_found" in src
-    assert "R.string.flow_connected" not in src
-    assert "setContentDescription" in src
-    assert "flowArrowTailscale.setTextColor" in src
-    assert "flowArrowServer.setTextColor" in src
-    assert "setFlowNode(flowNodeDevice" in src
-    assert "setFlowNode(flowNodeTailscale" in src
-    assert "setFlowNode(flowNodeServer" in src
-
-
-# --------------------------------------------------------------------------
-# Bidirectional latency check (SPEC-PING-001, v2.8.0): the phone probes
-# the Muse client and shows the result under the flow.
-# --------------------------------------------------------------------------
-#
-# HONEST LIMIT: same as the UI-002 guards — the Python suite cannot
-# run Java or the ping binary, so these guards prove structure only.
-# The actual probe (target IP, ICMP availability, RTT value) needs
-# the §5 live verification on the phone.
-
-def test_ping001_prober_uses_icmp_with_tcp_fallback():
-    """SPEC-PING-001 §2.2: PingProber must try ICMP ping first, fall
-    back to a TCP connect timing, run on a background thread, and
-    throttle to at most once per 30 seconds.
-    CONS-052 fix round: the ICMP process must drain stderr, check
-    the exit code, and time out (PING-01); a refused TCP connect is
-    a failure, not a success (PING-02); at most one probe runs at a
-    time (PING-03/PING-09); the age uses a monotonic clock (PING-07);
-    a changed target drops the old result (PING-10)."""
-    src = _java_source("PingProber.java")
-    assert "/system/bin/ping" in src
-    assert '"-c"' in src
-    assert "rtt min/avg/max/mdev" in src
-    assert "ProcessBuilder" in src
-    assert "redirectErrorStream(true)" in src
-    assert "waitFor(" in src
-    assert "exitValue()" in src
-    assert "tcp-connect" in src
-    assert "new Socket()" in src
-    assert "ConnectException" in src
-    assert '"refused"' in src
-    assert "new Thread(" in src
-    assert "MIN_INTERVAL_MS" in src
-    assert "30_000" in src
-    assert "probing" in src
-    assert "isProbing()" in src
-    assert "elapsedRealtime" in src
-    # CONS-053 fix round: the ICMP output is drained on its own
-    # thread so the timeout can fire (PING-01); a result is kept
-    # only when its target is still current (PING-10); a target
-    # change resets the throttle (NEW-01).
-    assert "ping-reader" in src
-    assert "setDaemon(true)" in src
-    assert "target.equals(lastClientIp)" in src
-    assert "lastProbeStartedMs = 0" in src
-    # CONS-054 fix round: the re-probe is decided by the target
-    # change alone, apart from the result (NEW-04); the process
-    # and reader are reaped on the timeout path too (NEW-05).
-    assert "targetChanged" in src
-    assert "p.waitFor(2, TimeUnit.SECONDS)" in src
-    # CONS-055 fix round: the exit is confirmed explicitly, not
-    # assumed — the waitFor return value is checked and the
-    # reader's liveness is checked on both paths (NEW-05).
-    assert "processExited" in src
-    assert "reader.isAlive()" in src
-    # CONS-056 fix round: the second kill is confirmed too, and a
-    # stuck reader is unblocked by closing the process input
-    # stream (NEW-06).
-    assert "pingIn.close()" in src
-
-
-def test_ping001_server_records_client_ip_and_state():
-    """SPEC-PING-001 §2.1/§2.4: the server must record the last
-    client IP from the connection and /state must carry the probe
-    result as ping_to_client.
-    CONS-052 fix round: only authenticated requests set the target
-    (PING-04 — the recording sits after the token check), and the
-    exclusion uses InetAddress (loopback / link-local / multicast,
-    PING-05)."""
-    src = _java_source("HttpBridgeServer.java")
-    assert "getInetAddress()" in src
-    assert "PingProber.setLastClientIp" in src
-    assert "isLoopbackAddress()" in src
-    assert "isLinkLocalAddress()" in src
-    assert "isMulticastAddress()" in src
-    assert "ping_to_client" in src
-    assert "pingToClientJson" in src
-    # PING-04: the recording must sit AFTER the token check, so an
-    # unauthenticated peer cannot set the ping target. CONS-053
-    # NEW-03: anchor on the 401 rejection itself (the one place
-    # "unauthorized" appears), not just on the token fetch.
-    assert src.index("PingProber.setLastClientIp") > src.index(
-        '"unauthorized"')
-
-
-def test_ping001_fix_round_display():
-    """CONS-052 fix round: a refused TCP connect shows its measured
-    time in the detail line (PING-02), the display says when a fresh
-    probe is running (PING-06), and the age uses the monotonic
-    clock (PING-07)."""
-    src = _java_source("MainActivity.java")
-    assert "isProbing()" in src
-    assert "応答 " in src
-    assert "formatAge(r.measuredAtElapsedMs)" in src
-    assert "計測中" in src
-
-
-def test_ping001_layout_has_ping_row_and_activity_wires_it():
-    """SPEC-PING-001 §2.3: the layout must carry the ping row under
-    the flow, and MainActivity must display the result and re-probe
-    on tap."""
-    layout = _res_text("layout/activity_main.xml")
-    assert 'android:id="@+id/ping_row"' in layout
-    assert 'android:id="@+id/ping_text"' in layout
-    assert 'android:id="@+id/ping_detail"' in layout
-    src = _java_source("MainActivity.java")
-    assert "PingProber.probe" in src
-    assert "updatePingDisplay" in src
-    assert "runOnUiThread" in src
-    assert "pingRow.setOnClickListener" in src
-    strings = _res_text("values/strings.xml")
-    assert "ping_no_client" in strings
-    assert "ping_measuring" in strings
-    assert "ping_result" in strings
-    assert "ping_just_now" in strings

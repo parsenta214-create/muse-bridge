@@ -1704,7 +1704,7 @@ public class HttpBridgeServer {
                 // accessibility service is off (P1-05 fixed).
                 JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 String pkg = j.getString("package");
-                // P0-4 deny list (Saardeim decision 2026-11-06
+                // P0-4 deny list (System Development Lead decision 2026-11-06
                 // 20:16, README decision 91): refuse BEFORE any
                 // launch attempt and BEFORE the operation
                 // notification hook — a refused launch posts no
@@ -2793,7 +2793,7 @@ public class HttpBridgeServer {
 
     /**
      * TARMUX_KICKASS step 1 — local Termux sshd diagnosis.
-     * "TARMUX_KICKASS" is the working name Saardeim gave this
+     * "TARMUX_KICKASS" is the working name the System Development Lead gave this
      * work: TERMUX, kicked back to life. Step 1 does NOT kick
      * anything — it only checks, from inside the phone, whether
      * Termux's sshd is listening on 127.0.0.1:8022, by opening
@@ -2974,7 +2974,7 @@ public class HttpBridgeServer {
      * at most this long; a timeout just means "not observed". */
     private static final long LAUNCH_PRE_READ_TIMEOUT_MS = 500;
 
-    /** P0-4 deny list (Saardeim decision 2026-11-06 20:16,
+    /** P0-4 deny list (System Development Lead decision 2026-11-06 20:16,
      * README decision 91, GPT P1 #4 in CONS-20261106-027):
      * banking apps and other apps where heavy security is
      * expected are NOT launch targets at all. An explicit,

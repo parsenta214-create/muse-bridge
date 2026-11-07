@@ -1,3 +1,17 @@
+# Muse Bridge
+
+AI（Muse）が Android スマホを遠隔操作するための橋渡しアプリです。スマホに入れた Muse Bridge が、画面を見て・触って・入力して、Tailscale 経由の HTTP で Muse からの指示を受けます。USB も ADB も要りません。
+
+- 概要（日本語・素人向け）：[MUSE_BRIDGE_OVERVIEW.md](MUSE_BRIDGE_OVERVIEW.md)
+- Muse 用の案内（地図・手順・禁則）：[AGENTS.md](AGENTS.md)
+- アプリ本体の説明：[android-app/README.md](android-app/README.md)
+- 凍結仕様書：`SPEC-*.md`（P0 / P1 / CONS-014 P1 / 操作通知 / ウィジェットほか）
+- ビルド：`android-app/build.sh`（手動 aapt2 / javac / d8、Gradle なし）。テスト：`pytest -q`。詳しくは AGENTS.md へ。
+
+この README の先頭部分は、元になった Google の computer-use-preview の説明です。その下（`Local trial setup` 以降）が Muse Bridge の作業記録で、末尾近くに番号付きの凍結決定（1〜97）があります。
+
+---
+
 # Computer Use Preview
 
 ## Quick Start
@@ -246,7 +260,7 @@ otherwise unchanged except where noted.
 
 ### Spec decisions (frozen 2026-11-05)
 
-Saardeim delegated spec decisions up to spec freeze to Muse for this
+The System Development Lead delegated spec decisions up to spec freeze to Muse for this
 Phase 1/2 work. The decisions below are the frozen spec for this
 project; change them only with a new explicit decision.
 
@@ -285,7 +299,7 @@ project; change them only with a new explicit decision.
 
 ### Spec decisions (frozen 2026-11-05)
 
-Saardeim delegated spec decisions up to spec freeze to Muse for this
+The System Development Lead delegated spec decisions up to spec freeze to Muse for this
 Phase 1/2 work. The decisions below are the frozen spec for this
 project; change them only with a new explicit decision.
 
@@ -1449,16 +1463,16 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Samsung smartcapture, Tailscale, the bridge itself) —
     the (b) feature works end to end.
 65. Notify before operating the phone (2026-11-06, operating
-    rule from Saardeim, 05:40 +07): before Muse operates the
+    rule from the System Development Lead, 05:40 +07): before Muse operates the
     phone from the VM side — taps, swipes, app opens, or any
     bridge action that changes what is on the screen — Muse
-    must notify Saardeim first. Read-only probes (/health,
+    must notify the System Development Lead first. Read-only probes (/health,
     /state, /logs, /notifications) need no advance notice. He
     is often using the phone himself (e.g. ChatGPT in the
     foreground) and does not want the screen taken over
     without warning. Recorded in MEMORY.md (Preferences).
 66. DPAD keys in press_key (2026-11-06, v1.9.9 / code 19):
-    Saardeim asked whether scrolling accepts anything but
+    the System Development Lead asked whether scrolling accepts anything but
     swipes (virtual/physical keys). Verified in the Android 34
     SDK: GLOBAL_ACTION_DPAD_UP/DOWN/LEFT/RIGHT/CENTER exist
     (API 33+) and ACTION_SCROLL_FORWARD/BACKWARD exists on
@@ -1483,7 +1497,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     not scroll X's timeline, so DPAD is not a usable scroll
     method for X; swipe stays the scroll method. The bridge
     side works as designed — the limitation is X's behaviour.
-    Retried 05:54 at Saardeim's request ("もう一回"): the
+    Retried 05:54 at the System Development Lead's request ("もう一回"): the
     first retry went to the Muse app (he had switched to the
     chat to send the message), so it was redone properly on
     X — DPAD_DOWN x5 again, texts identical before/after,
@@ -1927,7 +1941,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     is NOT in scope — left to a later decision.
 85. PoC merge Step 4 frozen (2026-11-06, v1.2.0).
     BatchRegistry aligned to the A-4 server rules
-    (MERGE_PLAN_A follow-up, Saardeim delegated
+    (MERGE_PLAN_A follow-up, the System Development Lead delegated
     2026-11-06 08:26 "全て任せます"). 10-min result
     + 10-min tombstone (BATCH_EXPIRED, the server's
     410); boundaries use ">" (not ">="), mirroring
@@ -1969,7 +1983,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     is now stored in ~/.ssh/known_hosts; termux_exec.sh works.
     push_apk.sh / termux_exec.sh are usable again. Tests: 197
     passed.
-87. Muse Bridge v2.0 startup spec adopted (2026-11-06, Saardeim
+87. Muse Bridge v2.0 startup spec adopted (2026-11-06, System Development Lead
     decision, GPT consultation CONS-20261106-021). Management
     plane (HTTP/auth/logs/notifications/health) separated from
     operation plane (AccessibilityService screen control).
@@ -1989,7 +2003,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     verified live 2026-11-06); remaining P0-1 pieces are
     /launch_app (P1-05) and structured "unavailable"
     responses.
-88. Operation notifications adopted (2026-11-06, Saardeim
+88. Operation notifications adopted (2026-11-06, System Development Lead
     decision, from his proposal; analysis subagent plan,
     spec SPEC-OPERATION-NOTIFY.md). When the VM operates the
     phone screen, the Bridge app posts a notification:
@@ -2009,7 +2023,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     false positive (confirmed live 2026-11-06: ok=true but
     the screen never switched); that fix is separate work.
 89. Operation notifications v2.1.0 FROZEN (2026-11-06,
-    Saardeim decision). GPT reviews: CONS-023
+    System Development Lead decision). GPT reviews: CONS-023
     (conditional fail — session generation race),
     CONS-024 (conditional fail — stop/restart race,
     spec out of sync), CONS-025 (code review passed,
@@ -2028,7 +2042,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Release conditioned on live verification of §7.3
     items 14–15 (stop/restart race, STARTING
     old-worker) plus the rest of the checklist.
-90. P0-4 ADOPTED (2026-11-06 19:50 +07, Saardeim
+90. P0-4 ADOPTED (2026-11-06 19:50 +07, System Development Lead
     decision, CONS-20261106-026): /launch_app
     background-launch fix — A (honest reporting) +
     B (foreground verification, conditional) +
@@ -2047,13 +2061,13 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Banking apps (e.g. KBank / K PLUS) and other
     apps where heavy security is expected are
     EXCLUDED from the /launch_app target scope
-    from the start (Saardeim 2026-11-06 19:51
+    from the start (the System Development Lead, 2026-11-06 19:51
     +07) — they are not launch targets at all.
     The live launch test uses a normal app (e.g. X).
     P0 freeze follows after P0-4 is implemented
     and live-verified.
 91. Launch deny list ENFORCED (2026-11-06 20:16
-    +07, Saardeim decision, GPT P1 #4 in
+    +07, System Development Lead decision, GPT P1 #4 in
     CONS-20261106-027): the banking-apps
     exclusion is enforced by the API with an
     explicit deny list, not just an operational
@@ -2073,7 +2087,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     Krungthai NEXT is not on the initial list
     (package unconfirmed).
 92. Version bump to v2.2.0 / code 35
-    (2026-11-06 21:02 +07, Saardeim requested
+    (2026-11-06 21:02 +07, the System Development Lead requested
     a version-management update after installing
     the P0-4 build): the P0-4 build was built
     as v2.1.0 / code 34, the same version as
@@ -2092,7 +2106,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     The P0 freeze version is still TBD at
     freeze; v2.2.0 is the live-verification
     build.
-93. P0 FROZEN (2026-11-06 22:08 +07, Saardeim
+93. P0 FROZEN (2026-11-06 22:08 +07, System Development Lead
     decision): Muse Bridge v2.0 P0 (P0-1 HTTP/
     a11y separation, P0-2 MINIMAL standard
     startup, P0-3 per-module Health API, P0-4
@@ -2125,7 +2139,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     never edit a frozen file directly — make
     a new version.
 94. TARMUX_KICKASS step 1, trial build v2.4.0 /
-    code 37 (2026-11-06 23:18 +07, Saardeim
+    code 37 (2026-11-06 23:18 +07, System Development Lead
     decision "ローカル診断を作ろう"): local
     Termux sshd diagnosis only — NO repair,
     no RUN_COMMAND, no screen operation.
@@ -2141,17 +2155,17 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     string (sshd alive locally = proxy/port
     8022 fault; sshd down locally = repair
     would help; old app = not available).
-    "TARMUX_KICKASS" is Saardeim's working
+    "TARMUX_KICKASS" is the System Development Lead's working
     name for the Termux kick-back-to-life
     work; step 1 only diagnoses. Full Python
     suite 269 passed (18 subtests). APK
     v2.4.0 / code 37, SHA-256 a6171b32….
-    NOT frozen, NOT live-verified: Saardeim
+    NOT frozen, NOT live-verified: the System Development Lead
     installs by hand (SSH push is down with
     termux_ssh), then live check is /health
     termux_sshd_local vs VM termux_ssh.
 95. TARMUX_KICKASS step 2, trial build v2.5.0 /
-    code 38 (2026-11-06 23:26 +07, Saardeim
+    code 38 (2026-11-06 23:26 +07, System Development Lead
     decision "RUN_COMMAND修復を作って"):
     POST /repair_termux {"action":"sshd"}.
     Fixed commands only — termux-wake-lock
@@ -2175,14 +2189,14 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     now. Full Python suite 272 passed (18
     subtests). APK v2.5.0 / code 38, SHA-256
     a915f85c…. NOT frozen, NOT live-verified:
-    Saardeim installs by hand, grants
+    the System Development Lead installs by hand, grants
     RUN_COMMAND, then the live test is one
     POST /repair_termux and a VM termux_ssh
     re-check. Live result of step 1 that
     motivated this: v2.4.0 local diagnosis
     reachable=false, ECONNREFUSED — sshd
     down locally (2026-11-06 23:22 +07).
-96. P1 FROZEN (2026-11-06 23:42 +07, Saardeim
+96. P1 FROZEN (2026-11-06 23:42 +07, System Development Lead
     decision): the 5 CONS-022 P1 items +
     CONS-029/030 fixes, at v2.3.0 / code 36
     (GitHub 65ec0b26; APK SHA e42ac55d…;
@@ -2212,7 +2226,7 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     P1-01/02/03/04/06/07 and CONS-028
     P2-01/02/03 still open.
 97. CONS-014 P1 FROZEN (2026-11-07 00:37
-    +07, Saardeim decision "このまま凍結
+    +07, System Development Lead decision "このまま凍結
     する"): the 6 CONS-014 P1 items
     (P1-01/02/03/04/06/07; P1-05 already
     fixed by v2.0 P0-1) at v2.5.0 / code 38

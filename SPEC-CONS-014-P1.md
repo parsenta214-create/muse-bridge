@@ -1,6 +1,6 @@
 # Muse Bridge — CONS-014 P1 Spec (P1-01/02/03/04/06/07)
 
-- Status: FROZEN (v2.5.0 CONS-014 P1 code frozen by Saardeim 2026-11-07 00:37 +07; README decision 97). Do not edit directly — make a new version for changes.
+- Status: FROZEN (v2.5.0 CONS-014 P1 code frozen by the System Development Lead 2026-11-07 00:37 +07; README decision 97). Do not edit directly — make a new version for changes.
 - Source: GPT consultation CONS-20261106-014 (v1.9.13 review, the P1 list); CONS-20261106-032 (P1 implementation review, conditional fail); CONS-20261106-033 (fix-round re-review, conditional fail); CONS-20261106-034 (fix-round-2 re-review, conditional pass — code freeze approved, live Logcat verification remaining).
 - Decision: README decision 97 (CONS-014 P1 freeze).
 - Version: v2.5.0 / code 38 (GitHub 51325cc7). This build also contains TARMUX_KICKASS steps 1+2 (/health termux_sshd_local, POST /repair_termux), which are NOT frozen by this decision — only the CONS-014 P1 items below are frozen.
