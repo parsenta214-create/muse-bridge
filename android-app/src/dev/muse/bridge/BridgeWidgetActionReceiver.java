@@ -57,11 +57,15 @@ public class BridgeWidgetActionReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (intent == null || !ACTION_WIDGET_TOGGLE.equals(intent.getAction())) {
+        String action = intent == null ? null : intent.getAction();
+        if (!ACTION_WIDGET_TOGGLE.equals(action)) {
             return;
         }
         boolean wasRunning = BridgeService.isRunning();
         if (wasRunning) {
+            // SPEC-LOG-001 LOG-03: a widget stop is a widget stop.
+            BridgeService.pendingStopReason =
+                    HttpBridgeServer.StopReason.WIDGET;
             context.stopService(new Intent(context, BridgeService.class));
         } else {
             try {

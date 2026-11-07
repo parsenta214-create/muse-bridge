@@ -41,6 +41,9 @@ public class BridgeTileService extends TileService {
     public void onClick() {
         super.onClick();
         if (BridgeService.isRunning()) {
+            // SPEC-LOG-001 LOG-03: a tile stop is a widget stop.
+            BridgeService.pendingStopReason =
+                    HttpBridgeServer.StopReason.WIDGET;
             stopService(new Intent(this, BridgeService.class));
         } else {
             try {

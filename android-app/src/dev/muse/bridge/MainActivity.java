@@ -142,21 +142,16 @@ public class MainActivity extends Activity {
 
     /** Tailscale IPv4 range 100.64.0.0/10 (CGNAT): first octet
      * 100, second octet 64–127. CONS-029 P1-3 fix: the old
-     * startsWith("100.") matched all of 100.0.0.0/8. This is
-     * the Tailscale IP DETECTION; the server bind check
-     * (HttpBridgeServer.bindAddresses) uses the same test
-     * (CONS-014 P1-02). */
+     * startsWith("100.") matched all of 100.0.0.0/8. This is the
+     * Tailscale IP DETECTION for display (/health tailscale_ips,
+     * the service notification address) — best effort only.
+     * SPEC-LOG-001 BIND-01 (v2.8.6): the server bind decision no
+     * longer uses this test (100.64/10 is also carrier CGNAT);
+     * it uses VpnBindSelector + the ConnectivityManager VPN
+     * discovery instead. The range check lives in
+     * VpnBindSelector; this method delegates to it. */
     public static boolean isTailscaleIp(String ip) {
-        if (ip == null) return false;
-        String[] parts = ip.split("\\.");
-        if (parts.length != 4) return false;
-        try {
-            int first = Integer.parseInt(parts[0]);
-            int second = Integer.parseInt(parts[1]);
-            return first == 100 && second >= 64 && second <= 127;
-        } catch (NumberFormatException e) {
-            return false;
-        }
+        return VpnBindSelector.isTailscaleRange(ip);
     }
 
     /** Best-effort Tailscale IPv4 addresses (100.64.0.0/10), or an
@@ -305,6 +300,9 @@ public class MainActivity extends Activity {
         stopButton.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View v) {
+                // SPEC-LOG-001 LOG-03: the app Stop button is a manual stop.
+                BridgeService.pendingStopReason =
+                        HttpBridgeServer.StopReason.MANUAL;
                 stopService(new Intent(MainActivity.this, BridgeService.class));
                 refresh();
             }

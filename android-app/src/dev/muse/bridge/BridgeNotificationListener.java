@@ -7,6 +7,7 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
@@ -50,6 +51,53 @@ public class BridgeNotificationListener extends NotificationListenerService {
     private static long lastDroppedSeq = 0;
 
     private static BridgeNotificationListener instance;
+
+    // SPEC-LOG-001 LOG-04 (P1-D): stop-time quiesce. The server's
+    // stop() (1) stops accepting new notifications, (2) waits for
+    // in-flight callbacks to finish (bounded), (3) flushes the
+    // suppressed count. accepting=false makes new callbacks return
+    // immediately; the in-flight counter lets stop() wait for the
+    // ones already running. The accepting flag is re-checked right
+    // before each log call, so a callback that started before the
+    // stop can never write to the log after the final flush.
+    private static final Object quiesceLock = new Object();
+    private static int inFlight = 0;
+    private static volatile boolean accepting = true;
+
+    /** Stop/start accepting new notification callbacks (server stop/start). */
+    public static void setAccepting(boolean accept) {
+        accepting = accept;
+    }
+
+    /** Wait until no notification callback is in flight, or the
+     * timeout expires. Returns true when quiesced, false on timeout
+     * (the caller then records the incomplete items and continues).
+     * The timeout is measured on the monotonic clock. */
+    public static boolean awaitQuiesce(long timeoutMs) {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        synchronized (quiesceLock) {
+            while (inFlight > 0) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0) {
+                    return false;
+                }
+                try {
+                    quiesceLock.wait(remaining);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /** Number of notification callbacks currently in flight (for the stop log). */
+    public static int inFlightCount() {
+        synchronized (quiesceLock) {
+            return inFlight;
+        }
+    }
 
     public static BridgeNotificationListener getInstance() {
         return instance;
@@ -105,16 +153,54 @@ public class BridgeNotificationListener extends NotificationListenerService {
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        // The system calls this for new posts AND updates.
-        String type = hasLiveEvent(sbn.getKey()) ? "updated" : "posted";
-        record(sbn, type, 0);
-        BridgeLog.log("notification", type);
+        if (!accepting) {
+            return;
+        }
+        synchronized (quiesceLock) {
+            inFlight++;
+        }
+        try {
+            // The system calls this for new posts AND updates.
+            String type = hasLiveEvent(sbn.getKey()) ? "updated" : "posted";
+            record(sbn, type, 0);
+            // Re-check: a stop that started after entry must not
+            // let this callback write to the log after the flush.
+            if (!accepting) {
+                return;
+            }
+            // SPEC-LOG-001 LOG-04: throttle the flood lines — every
+            // notification used to add a log line and drown the
+            // server lines. First one is immediate; repeats within
+            // 10 s are counted as "(+N suppressed)".
+            BridgeLog.logThrottled("notification", "notification", type);
+        } finally {
+            synchronized (quiesceLock) {
+                inFlight--;
+                quiesceLock.notifyAll();
+            }
+        }
     }
 
     @Override
     public void onNotificationRemoved(StatusBarNotification sbn) {
-        record(sbn, "removed", System.currentTimeMillis());
-        BridgeLog.log("notification", "removed");
+        if (!accepting) {
+            return;
+        }
+        synchronized (quiesceLock) {
+            inFlight++;
+        }
+        try {
+            record(sbn, "removed", System.currentTimeMillis());
+            if (!accepting) {
+                return;
+            }
+            BridgeLog.logThrottled("notification", "notification", "removed");
+        } finally {
+            synchronized (quiesceLock) {
+                inFlight--;
+                quiesceLock.notifyAll();
+            }
+        }
     }
 
     /** True when the latest buffered event for this key is a post or

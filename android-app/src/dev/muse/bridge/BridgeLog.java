@@ -4,8 +4,10 @@ import android.content.Context;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
+import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -46,6 +48,15 @@ public class BridgeLog {
     private static final long MAX_FILE_BYTES = 64 * 1024;
     private static final String FILE_NAME = "bridge.log";
     private static final String BACKUP_NAME = "bridge.log.1";
+    // SPEC-LOG-001 LOG-01 (P1-H): the run start time is persisted
+    // as separate metadata, NOT in the log ring — a marker line in
+    // the log body falls out of the 200-line tail, so the start
+    // time would become "unknown" even for a healthy log. The
+    // file holds two lines: the previous run's start time and
+    // the current run's start time (or "unknown" when absent).
+    private static final String RUN_META_NAME = "run-meta";
+    private static final String RUN_META_TMP_NAME = "run-meta.tmp";
+    private static final String UNKNOWN_START = "unknown";
     private static final long THROTTLE_MS = 10_000;
     private static final int MAX_EVENT_LEN = 64;
     private static final int MAX_DETAIL_LEN = 200;
@@ -55,6 +66,10 @@ public class BridgeLog {
     // (a token-shaped value) is replaced outright. Callers must
     // still not pass user data, but a careless caller can no
     // longer leak a full IP or a token through this choke point.
+    // SPEC-LOG-001 §7 (P1-F): the app has exactly one token
+    // format — the bridge token (32+ hex, generated in
+    // MainActivity.getOrCreateToken) — and LONG_HEX_PATTERN
+    // covers it. No other token format exists in the app.
     private static final java.util.regex.Pattern IPV4_PATTERN =
             java.util.regex.Pattern.compile(
                     "\\b(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\b");
@@ -64,6 +79,9 @@ public class BridgeLog {
     private static final Deque<String> lines = new ArrayDeque<>();
     private static final List<String> previousLines = new ArrayList<>();
     private static File logFile;
+    private static File runMetaFile;
+    private static String currentStartTime = UNKNOWN_START;
+    private static String previousStartTime = UNKNOWN_START;
     private static final Map<String, Long> lastLogged = new HashMap<>();
     private static final Map<String, Integer> suppressed = new HashMap<>();
     private static boolean initialized = false;
@@ -87,16 +105,76 @@ public class BridgeLog {
             // keeps working even when the file is unavailable.
             logFile = null;
         }
+        // SPEC-LOG-001 LOG-01 (P1-H): persist the run start times
+        // as separate metadata. Startup procedure: (1) read the
+        // previous run's currentStartTime from run-meta and fix it
+        // as this run's previousStartTime, (2) take the new
+        // currentStartTime, (3) save both, (4) only then start
+        // logging. A corrupt, missing, or old-format file yields
+        // "unknown" and must never stop logging or the server.
+        try {
+            runMetaFile = new File(ctx.getFilesDir(), RUN_META_NAME);
+            String prev = UNKNOWN_START;
+            if (runMetaFile.exists()) {
+                List<String> meta = readTail(runMetaFile, 2);
+                // Line 2 of the old file is the previous run's
+                // current start time; line 1 is its previous.
+                if (meta.size() >= 2 && isStartTime(meta.get(1))) {
+                    prev = meta.get(1);
+                } else if (meta.size() >= 1 && isStartTime(meta.get(0))) {
+                    prev = meta.get(0);
+                }
+            }
+            previousStartTime = prev;
+            currentStartTime = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+                    Locale.US).format(new Date());
+            saveRunMeta(previousStartTime, currentStartTime);
+        } catch (Exception ignored) {
+            previousStartTime = UNKNOWN_START;
+            currentStartTime = UNKNOWN_START;
+        }
     }
 
-    /** One log line: "[MM-dd HH:mm:ss] EVENT detail". */
-    public static synchronized void log(String event, String detail) {
+    private static boolean isStartTime(String s) {
+        return s != null && s.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}");
+    }
+
+    /** Crash-resistant save: write to a temp file in the same
+     * directory, sync it, then atomically rename over run-meta.
+     * A process killed mid-write leaves either the old file or
+     * the new one — never a half-written file. */
+    private static void saveRunMeta(String previous, String current) {
+        if (runMetaFile == null) {
+            return;
+        }
+        try {
+            File tmp = new File(runMetaFile.getParentFile(), RUN_META_TMP_NAME);
+            FileOutputStream fos = new FileOutputStream(tmp);
+            try {
+                String content = previous + "\n" + current + "\n";
+                fos.write(content.getBytes(StandardCharsets.UTF_8));
+                fos.getFD().sync();
+            } finally {
+                fos.close();
+            }
+            tmp.renameTo(runMetaFile);
+        } catch (Exception ignored) {
+            // Metadata loss is acceptable; the log still works.
+        }
+    }
+
+    /** One log line: "[MM-dd HH:mm:ss] EVENT detail". Returns
+     * true when the line reached the log file (SPEC-LOG-001
+     * P1-C: the server's stop() needs to know whether the STOPPED
+     * record was written). The ring buffer always keeps the line
+     * even when the file write fails. */
+    public static synchronized boolean log(String event, String detail) {
         String line = format(event, detail);
         lines.addLast(line);
         while (lines.size() > MAX_LINES) {
             lines.removeFirst();
         }
-        appendToFile(line);
+        return appendToFile(line);
     }
 
     /**
@@ -123,6 +201,19 @@ public class BridgeLog {
         log(event, d);
     }
 
+    /**
+     * SPEC-LOG-001 LOG-04 (P1-D): final flush at stop time. If
+     * repeats of this key were suppressed, emit one line with the
+     * count and the "final flush" marker, then clear the count.
+     * No-op when nothing was suppressed.
+     */
+    public static synchronized void flushThrottled(String key, String event) {
+        Integer n = suppressed.remove(key);
+        if (n != null && n > 0) {
+            log(event, "(+" + n + " suppressed, final flush)");
+        }
+    }
+
     /** Copy of the current run's lines, oldest first. */
     public static synchronized List<String> snapshot() {
         return new ArrayList<>(lines);
@@ -135,9 +226,14 @@ public class BridgeLog {
 
     /**
      * The full log as one text: a header (app version + export
-     * time), the current run's lines, then the previous run's tail.
-     * Shared by the on-phone viewer (LogActivity) and the .txt
-     * export, so both show exactly what GET /logs returns.
+     * time), the previous run's tail first, then the current
+     * run's lines — the whole export is chronological
+     * (oldest first). SPEC-LOG-001 LOG-01: the old order put the
+     * current run first, so the file jumped backwards in time.
+     * Each section carries its run start time (from the run-meta
+     * file, not from the log body). Shared by the on-phone viewer
+     * (LogActivity) and the .txt export, so both show exactly
+     * what GET /logs returns.
      */
     public static String renderText(String appVersion, int appVersionCode) {
         StringBuilder out = new StringBuilder();
@@ -147,16 +243,20 @@ public class BridgeLog {
         out.append("app ").append(appVersion)
                 .append(" (").append(appVersionCode).append(")\n");
         out.append("exported ").append(now).append("\n\n");
-        List<String> current = snapshot();
-        for (String line : current) {
-            out.append(line).append("\n");
-        }
         List<String> prev = previousSnapshot();
         if (!prev.isEmpty()) {
-            out.append("\n--- previous run ---\n");
+            out.append("--- previous run (started ")
+                    .append(previousStartTime).append(") ---\n");
             for (String line : prev) {
                 out.append(line).append("\n");
             }
+            out.append("\n");
+        }
+        out.append("--- current run (started ")
+                .append(currentStartTime).append(") ---\n");
+        List<String> current = snapshot();
+        for (String line : current) {
+            out.append(line).append("\n");
         }
         return out.toString();
     }
@@ -192,6 +292,51 @@ public class BridgeLog {
         return cleaned;
     }
 
+    /**
+     * SPEC-LOG-001 §7: mask one IP address for a log line. IPv4 is
+     * masked to its first two octets; an IPv4-mapped IPv6
+     * (::ffff:100.111.74.42) is normalized to IPv4 first; a full
+     * IPv6 address is masked to its first two groups. This is used
+     * at the call sites that log an address (listen, client-first,
+     * interface list); sanitize() above remains the backstop for
+     * IPv4 and token-shaped values in free text. A generic IPv6
+     * regex is deliberately NOT added to sanitize(): it would also
+     * match the HH:mm:ss timestamps and corrupt them.
+     */
+    public static String maskIp(String ip) {
+        if (ip == null) {
+            return "";
+        }
+        if (ip.startsWith("::ffff:")) {
+            return maskIpv4(ip.substring(7));
+        }
+        if (ip.contains(":")) {
+            String[] groups = ip.split(":", -1);
+            List<String> first = new ArrayList<>();
+            for (String g : groups) {
+                if (!g.isEmpty()) {
+                    first.add(g);
+                }
+                if (first.size() == 2) {
+                    break;
+                }
+            }
+            if (first.size() == 2) {
+                return first.get(0) + ":" + first.get(1) + ":*.*";
+            }
+            return "*.*";
+        }
+        return maskIpv4(ip);
+    }
+
+    private static String maskIpv4(String ip) {
+        String[] parts = ip.split("\\.");
+        if (parts.length == 4) {
+            return parts[0] + "." + parts[1] + ".*.*";
+        }
+        return ip;
+    }
+
     private static List<String> readTail(File f, int maxLines) {
         ArrayDeque<String> tail = new ArrayDeque<>();
         try {
@@ -220,9 +365,9 @@ public class BridgeLog {
         }
     }
 
-    private static void appendToFile(String line) {
+    private static boolean appendToFile(String line) {
         if (logFile == null) {
-            return;
+            return false;
         }
         try {
             if (logFile.exists() && logFile.length() > MAX_FILE_BYTES) {
@@ -232,7 +377,9 @@ public class BridgeLog {
             w.write(line);
             w.write("\n");
             w.close();
+            return true;
         } catch (Exception ignored) {
+            return false;
         }
     }
 }

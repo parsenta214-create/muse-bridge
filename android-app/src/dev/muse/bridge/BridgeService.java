@@ -20,6 +20,13 @@ public class BridgeService extends Service {
 
     private static volatile boolean running = false;
 
+    /** SPEC-LOG-001 LOG-03: the reason for the next stop, set by
+     * the stop entry points (app button / notification action =
+     * MANUAL, widget / tile = WIDGET) before they stop the service.
+     * onDestroy reads and clears it; when unset, the stop is a
+     * service destroy. */
+    public static volatile HttpBridgeServer.StopReason pendingStopReason = null;
+
     private HttpBridgeServer server;
 
     public static boolean isRunning() {
@@ -84,6 +91,8 @@ public class BridgeService extends Service {
         // v1.7: the notification's Stop action (and the tile) stop the
         // service through the same entry point that starts it.
         if (intent != null && ACTION_STOP.equals(intent.getAction())) {
+            // SPEC-LOG-001 LOG-03: a notification Stop is a manual stop.
+            pendingStopReason = HttpBridgeServer.StopReason.MANUAL;
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -94,7 +103,13 @@ public class BridgeService extends Service {
     public void onDestroy() {
         running = false;
         if (server != null) {
-            server.stop();
+            // SPEC-LOG-001 LOG-03: pass the stop reason (MANUAL /
+            // WIDGET when a stop entry point set it, else a service
+            // destroy, e.g. the system killing the service).
+            HttpBridgeServer.StopReason r = pendingStopReason;
+            pendingStopReason = null;
+            server.stop(r == null
+                    ? HttpBridgeServer.StopReason.SERVICE_DESTROY : r);
             server = null;
         }
         // v2.6.0 (SPEC-WIDGET.md, W3): push a widget refresh so

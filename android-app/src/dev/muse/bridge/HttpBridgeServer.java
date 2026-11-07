@@ -14,12 +14,16 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageInstaller;
 import android.net.ConnectivityManager;
+import android.net.LinkAddress;
+import android.net.LinkProperties;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -45,10 +49,15 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
@@ -57,6 +66,8 @@ import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Minimal raw-socket HTTP server for the bridge. No external dependencies.
@@ -198,8 +209,33 @@ public class HttpBridgeServer {
 
     /** Server lifecycle (A-2). start() only reports RUNNING when at
      * least one listener socket is bound; a bind failure leaves
-     * FAILED instead of pretending to run. */
-    public enum ServerState { NEW, STARTING, RUNNING, FAILED, STOPPING, STOPPED }
+     * FAILED instead of pretending to run. SPEC-LOG-001 BIND-02
+     * adds DEGRADED: the server is listening on loopback only (no
+     * Tailscale bind), which must NOT be reported as normal. */
+    public enum ServerState { NEW, STARTING, RUNNING, DEGRADED, FAILED, STOPPING, STOPPED }
+
+    /** SPEC-LOG-001 LOG-03: why the server stopped. The first
+     * determined reason wins (AtomicReference + compareAndSet);
+     * the STOPPED record itself is guarded separately by
+     * stopCompleted, because determining the reason and recording
+     * STOPPED once are two different problems (P1-C). */
+    public enum StopReason { MANUAL, SERVICE_DESTROY, WIDGET, RESTART, ERROR, UNKNOWN }
+
+    private final AtomicReference<StopReason> stopReason = new AtomicReference<>(null);
+    private final AtomicBoolean stopCompleted = new AtomicBoolean(false);
+    /** Set by stop() before the state moves to STOPPING; checked
+     * before each bind. CONS-063 P0-02: the lifecycle lock is the
+     * synchronized start()/stop() monitor — stop() cannot run
+     * while start() holds it, so a confirmed stop can never
+     * interleave with a bind. The flag is the explicit pre-bind
+     * confirmation required by SPEC §3.6 step 8. */
+    private volatile boolean stopRequested = false;
+
+    /** SPEC-LOG-001 LOG-05: remote IPs already logged as
+     * client-first this run (insertion order, FIFO at 64).
+     * Guarded by its own monitor; reset on every start(). */
+    private final Set<String> clientFirstSeen = new LinkedHashSet<>();
+    private static final int CLIENT_FIRST_MAX = 64;
 
     private final int port;
     private final TokenProvider tokens;
@@ -392,11 +428,16 @@ public class HttpBridgeServer {
     }
 
     /** Binds the listeners and starts one dedicated accept thread per
-     * listener. Returns true only when at least one socket is bound.
-     * A second start after STOPPED creates a fresh worker pool. */
+     * listener. Returns true when at least one socket is bound
+     * (RUNNING, or DEGRADED on loopback only); false on total bind
+     * failure. A second start after STOPPED creates a fresh worker
+     * pool. SPEC-LOG-001: the bind targets come from
+     * selectBindTargets() (VPN network selection + DEGRADED), and
+     * the listen / bind-summary lines carry interface names. */
     public synchronized boolean start() {
-        if (state == ServerState.RUNNING || state == ServerState.STARTING) {
-            return state == ServerState.RUNNING;
+        if (state == ServerState.RUNNING || state == ServerState.STARTING
+                || state == ServerState.DEGRADED) {
+            return state == ServerState.RUNNING || state == ServerState.DEGRADED;
         }
         // v2.1 fix (CONS-024 P1-NEW): a new lifecycle. Bump
         // before state becomes STARTING, so any request accepted
@@ -406,6 +447,12 @@ public class HttpBridgeServer {
         // noteOperation() during the STARTING window.
         serverLifecycleGeneration++;
         state = ServerState.STARTING;
+        stopRequested = false;
+        stopReason.set(null);
+        stopCompleted.set(false);
+        synchronized (clientFirstSeen) {
+            clientFirstSeen.clear();
+        }
         // v2.1 fix (CONS-023 P2): clear operation notifications
         // left in the shade by a previous process BEFORE the
         // bind attempts — a total bind failure must not leave a
@@ -421,34 +468,67 @@ public class HttpBridgeServer {
                 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<Runnable>(HTTP_QUEUE),
                 new ThreadPoolExecutor.AbortPolicy());
-        List<InetAddress> addrs = bindAddresses();
+        // SPEC-LOG-001 LOG-04 (P1-D): accept notification callbacks
+        // again (stop() turned them off).
+        BridgeNotificationListener.setAccepting(true);
+        // SPEC-LOG-001 P1-C: report a STOPPED record that failed
+        // to reach the log file in a previous run, if any.
+        reportPreviousStoppedRecordFailure();
+        BindResult bind = selectBindTargets();
+        // SPEC-LOG-001 LOG-02: the enumerated interfaces, one line.
+        BridgeLog.log("ifaces", bind.ifaceSummary);
+        // Pre-bind cancel check (SPEC §3.6 step 8). With the
+        // synchronized start()/stop() monitor this cannot fire —
+        // stop() cannot run while start() holds the monitor — but
+        // the check is the explicit confirmation the SPEC asks for.
+        if (stopRequested) {
+            state = ServerState.STOPPING;
+            workers.shutdownNow();
+            workers = null;
+            state = ServerState.STOPPED;
+            recordStopped(StopReason.UNKNOWN);
+            return false;
+        }
         // P1-06 (CONS-014): each accept thread is bound to the
         // lifecycle generation current at its creation. An old
         // thread that wakes after a stop/restart sees the
         // mismatch and exits instead of spinning on its closed
         // socket while the new lifecycle is STARTING/RUNNING.
         final long acceptGeneration = serverLifecycleGeneration;
-        for (InetAddress addr : addrs) {
+        int boundCount = 0;
+        int failedCount = 0;
+        boolean boundTailscale = false;
+        boolean boundLoopback = false;
+        for (BindTarget t : bind.targets) {
             try {
                 ServerSocket ss = new ServerSocket();
                 ss.setReuseAddress(true);
-                ss.bind(new InetSocketAddress(addr, port));
+                ss.bind(new InetSocketAddress(t.addr, port));
                 listeners.add(ss);
                 final ServerSocket sock = ss;
-                Thread t = new Thread(new Runnable() {
+                Thread th = new Thread(new Runnable() {
                     @Override
                     public void run() {
                         acceptLoop(sock, acceptGeneration);
                     }
-                }, "muse-bridge-accept-" + addr.getHostAddress());
-                acceptThreads.add(t);
-                t.start();
+                }, "muse-bridge-accept-" + t.addr.getHostAddress());
+                acceptThreads.add(th);
+                th.start();
                 // P1-03 fix round (CONS-032): never log the full IP
                 // to Logcat — the port alone identifies the
                 // listener here; the masked address is already in
                 // BridgeLog ("listen").
                 Log.i(TAG, "listening on port " + port);
-                BridgeLog.log("listen", addr.getHostAddress() + ":" + port);
+                // SPEC-LOG-001 LOG-02: interface name + masked IP.
+                BridgeLog.log("listen",
+                        (t.ifName == null ? "unknown" : t.ifName) + " "
+                        + BridgeLog.maskIp(t.addr.getHostAddress()) + ":" + port);
+                boundCount++;
+                if (t.addr.isLoopbackAddress()) {
+                    boundLoopback = true;
+                } else {
+                    boundTailscale = true;
+                }
             } catch (Exception e) {
                 // P1-03 fix round (CONS-032): exception class only —
                 // the message may carry user data, and the full IP
@@ -459,9 +539,18 @@ public class HttpBridgeServer {
                 // the message may carry user data. The IP is
                 // masked to two octets by BridgeLog.sanitize().
                 BridgeLog.log("bind-failed",
-                        addr.getHostAddress() + ": " + e.getClass().getSimpleName());
+                        BridgeLog.maskIp(t.addr.getHostAddress()) + ": "
+                        + e.getClass().getSimpleName());
+                failedCount++;
             }
         }
+        // SPEC-LOG-001 LOG-02: the bind summary, after the loop so
+        // bound/failed are actual counts. Loopback is included in
+        // bound (its interface is listed in the detail).
+        BridgeLog.log("bind-summary", "bound=" + boundCount
+                + " excluded=" + bind.excluded + " failed=" + failedCount
+                + (boundTailscale ? " (tailscale bound)" : "")
+                + (boundLoopback ? " (loopback bound)" : ""));
         if (listeners.isEmpty()) {
             state = ServerState.FAILED;
             workers.shutdownNow();
@@ -470,23 +559,57 @@ public class HttpBridgeServer {
             BridgeLog.log("server", "FAILED: no listener bound");
             return false;
         }
+        if (!boundTailscale) {
+            // Loopback only: DEGRADED, not RUNNING (BIND-02). The
+            // reason is the selector's, or the bind failure's.
+            state = ServerState.DEGRADED;
+            String reason = bind.degradedReason != null
+                    ? bind.degradedReason : "tailscale-bind-failed";
+            BridgeLog.log("server", "DEGRADED: " + reason);
+            return true;
+        }
         state = ServerState.RUNNING;
         BridgeLog.log("server", "RUNNING");
         return true;
     }
 
+    /** Stop with an unknown reason (kept for existing callers). */
     public synchronized void stop() {
+        stop(StopReason.UNKNOWN);
+    }
+
+    /** SPEC-LOG-001 LOG-03/LOG-04 (P1-C, P1-D): stop with a reason.
+     * Order: (1) stop accepting new notifications, (2) wait for
+     * in-flight notification processing (5 s cap), (3) flush the
+     * suppressed count, (4) stop the server, (5) record STOPPED
+     * exactly once, (6) the log file is appended per line, so
+     * there is no separate save step. The first-determined reason
+     * wins; a second stop() is a no-op (state is STOPPED). */
+    public synchronized void stop(StopReason reason) {
         if (state == ServerState.STOPPED || state == ServerState.NEW) {
             return;
         }
+        stopReason.compareAndSet(null,
+                reason == null ? StopReason.UNKNOWN : reason);
+        stopRequested = true;
         state = ServerState.STOPPING;
-        for (ServerSocket ss : listeners) {
-            try {
-                ss.close();
-            } catch (Exception ignored) {
-            }
+        // (1) Stop accepting new notifications.
+        BridgeNotificationListener.setAccepting(false);
+        // (2) Wait for in-flight notification processing (5 s cap,
+        // monotonic clock). On timeout, record the incomplete items
+        // and continue — the stop must never hang. A callback that
+        // started before the stop cannot write to the log after
+        // the flush: the listener re-checks the accepting flag
+        // right before each log call.
+        boolean quiesced = BridgeNotificationListener.awaitQuiesce(5000);
+        if (!quiesced) {
+            BridgeLog.log("notification", "stop continued with "
+                    + BridgeNotificationListener.inFlightCount() + " in-flight");
         }
-        listeners.clear();
+        // (3) Flush the suppressed count.
+        BridgeLog.flushThrottled("notification", "notification");
+        // (4) Stop the server.
+        closeListeners();
         acceptThreads.clear();
         if (workers != null) {
             workers.shutdownNow();
@@ -517,39 +640,289 @@ public class HttpBridgeServer {
         }
         cancelOperationNotifications();
         state = ServerState.STOPPED;
-        BridgeLog.log("server", "STOPPED");
+        // (5) Record STOPPED exactly once.
+        recordStopped(reason);
+    }
+
+    private void closeListeners() {
+        for (ServerSocket ss : listeners) {
+            try {
+                ss.close();
+            } catch (Exception ignored) {
+            }
+        }
+        listeners.clear();
+    }
+
+    /** Record STOPPED exactly once (P1-C). The AtomicBoolean guards
+     * the record; the synchronized stop() + the STOPPED state check
+     * are the primary guards. On a log-file write failure, persist
+     * a flag so the next start() can report it. */
+    private boolean recordStopped(StopReason fallback) {
+        if (!stopCompleted.compareAndSet(false, true)) {
+            return false;
+        }
+        StopReason r = stopReason.get();
+        if (r == null) {
+            r = fallback == null ? StopReason.UNKNOWN : fallback;
+        }
+        boolean written = BridgeLog.log("server", "STOPPED: " + r.name());
+        if (!written) {
+            try {
+                context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE)
+                        .edit().putBoolean("prev_stopped_record_failed", true).apply();
+            } catch (Exception ignored) {
+            }
+        }
+        return written;
+    }
+
+    /** Report a STOPPED record that failed to reach the log file in
+     * a previous run, if any (P1-C). Called once per start(). */
+    private void reportPreviousStoppedRecordFailure() {
+        try {
+            android.content.SharedPreferences prefs =
+                    context.getSharedPreferences(MainActivity.PREFS, Context.MODE_PRIVATE);
+            if (prefs.getBoolean("prev_stopped_record_failed", false)) {
+                prefs.edit().remove("prev_stopped_record_failed").apply();
+                BridgeLog.log("server", "previous STOPPED record failed");
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     public boolean isRunning() {
-        return state == ServerState.RUNNING;
+        return state == ServerState.RUNNING || state == ServerState.DEGRADED;
     }
 
-    private List<InetAddress> bindAddresses() {
-        List<InetAddress> out = new ArrayList<>();
+    /** One bind target: an address plus the interface carrying it
+     * (for the LOG-02 listen line). */
+    private static final class BindTarget {
+        final InetAddress addr;
+        final String ifName;
+
+        BindTarget(InetAddress addr, String ifName) {
+            this.addr = addr;
+            this.ifName = ifName;
+        }
+    }
+
+    /** Result of the bind-target selection (SPEC-LOG-001 §3.6/§3.7). */
+    private static final class BindResult {
+        /** Addresses to bind (Tailscale + loopback, or loopback only). */
+        final List<BindTarget> targets = new ArrayList<>();
+        /** DEGRADED reason when no Tailscale bind is selected; null otherwise. */
+        String degradedReason;
+        /** Non-loopback IPv4 addresses found but not bound (e.g. CGNAT). */
+        int excluded;
+        /** "name:masked-ip, ..." for the LOG-02 ifaces line. */
+        String ifaceSummary = "";
+    }
+
+    /**
+     * SPEC-LOG-001 BIND-01: select the bind targets from the VPN
+     * network state — never from the 100.64/10 range alone (that
+     * range is Tailscale AND carrier CGNAT, so it cannot tell them
+     * apart; the 2026-11-08 outage bound the CGNAT address). The
+     * Tailscale address comes from the ConnectivityManager VPN
+     * discovery below; 127.0.0.1 is always bound. The interface
+     * name is never used as the selector (a Tailscale TUN may be
+     * "tun0", not "tailscale0").
+     */
+    private BindResult selectBindTargets() {
+        BindResult result = new BindResult();
+        // Enumerate all interfaces (NetworkInterface is not
+        // deprecated) for the ifaces line and the excluded count.
+        List<String> ifaceParts = new ArrayList<>();
+        List<InetAddress> nonLoopbackV4 = new ArrayList<>();
         try {
-            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+            for (NetworkInterface ni
+                    : Collections.list(NetworkInterface.getNetworkInterfaces())) {
                 for (InetAddress addr : Collections.list(ni.getInetAddresses())) {
-                    if (addr instanceof Inet4Address && !addr.isLoopbackAddress()) {
-                        String ip = addr.getHostAddress();
-                        // P1-02 (CONS-014): the old startsWith("100.")
-                        // matched all of 100.0.0.0/8, but 100.64.0.0/10
-                        // is also Carrier-Grade NAT — a non-Tailscale
-                        // interface could be bound by mistake. Use the
-                        // same 100.64.0.0/10 test as the Tailscale IP
-                        // detection (MainActivity.isTailscaleIp).
-                        if (ip != null && MainActivity.isTailscaleIp(ip)) {
-                            out.add(addr);
-                        }
+                    if (!(addr instanceof java.net.Inet4Address)) {
+                        continue;
+                    }
+                    String ip = addr.getHostAddress();
+                    ifaceParts.add(ni.getName() + ":"
+                            + BridgeLog.maskIp(ip));
+                    if (!addr.isLoopbackAddress()) {
+                        nonLoopbackV4.add(addr);
                     }
                 }
             }
         } catch (Exception ignored) {
         }
+        result.ifaceSummary = joinComma(ifaceParts);
+        // VPN discovery (§3.6 steps 1–7) + the pure decision.
+        List<VpnBindSelector.VpnNetwork> vpns = discoverVpnNetworks();
+        VpnBindSelector.Decision decision = VpnBindSelector.select(vpns);
+        if (decision.isBind()) {
+            try {
+                InetAddress tailscale = InetAddress.getByName(decision.bindIp);
+                result.targets.add(new BindTarget(tailscale, decision.bindInterface));
+            } catch (Exception e) {
+                // The selector returned an address that does not
+                // resolve (should not happen): fall back to DEGRADED.
+                result.degradedReason = "tailscale-interface-unavailable";
+            }
+        } else {
+            result.degradedReason = decision.degradedReason;
+        }
         try {
-            out.add(InetAddress.getByName("127.0.0.1"));
+            result.targets.add(new BindTarget(
+                    InetAddress.getByName("127.0.0.1"), "lo"));
         } catch (Exception ignored) {
         }
-        return out;
+        // Excluded: non-loopback IPv4 addresses not in the targets.
+        for (InetAddress addr : nonLoopbackV4) {
+            boolean inTargets = false;
+            for (BindTarget t : result.targets) {
+                if (t.addr.equals(addr)) {
+                    inTargets = true;
+                    break;
+                }
+            }
+            if (!inTargets) {
+                result.excluded++;
+            }
+        }
+        return result;
+    }
+
+    private static String joinComma(List<String> parts) {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < parts.size(); i++) {
+            if (i > 0) {
+                out.append(", ");
+            }
+            out.append(parts.get(i));
+        }
+        return out.toString();
+    }
+
+    /**
+     * SPEC-LOG-001 §3.6 steps 1–5: discover the VPN networks with
+     * a NetworkCallback and snapshot them. getAllNetworks() is
+     * deprecated since API 31, so the callback is the route.
+     * The NetworkRequest MUST remove NET_CAPABILITY_NOT_VPN —
+     * the builder requires it by default, so adding TRANSPORT_VPN
+     * alone would return no VPN network (CONS-061 P0-01).
+     *
+     * Rules (CONS-062/063): per-Network state; no dependence on
+     * the arrival order of onAvailable / onLinkPropertiesChanged;
+     * onLost removes the Network from the collection and marks it
+     * expired, so a delayed LinkPropertiesChanged cannot
+     * re-register it; the snapshot and the close are under the
+     * same lock; the 2000 ms wait is a cap measured on the
+     * monotonic clock, not a retrieval guarantee; unregister runs
+     * in finally, even on exception or interruption. An
+     * InterruptedException interrupts safely: no bind, unregister,
+     * restore the interrupt status. The full 2000 ms is always
+     * waited: a second VPN's onAvailable may arrive late, and
+     * fail-closed needs the complete count.
+     */
+    private List<VpnBindSelector.VpnNetwork> discoverVpnNetworks() {
+        ConnectivityManager cm = (ConnectivityManager)
+                context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) {
+            return new ArrayList<VpnBindSelector.VpnNetwork>();
+        }
+        final Object lock = new Object();
+        final Map<Network, LinkProperties> collected = new LinkedHashMap<>();
+        final Set<Network> available = new HashSet<>();
+        final Set<Network> expired = new HashSet<>();
+        NetworkRequest request = new NetworkRequest.Builder()
+                .addTransportType(NetworkCapabilities.TRANSPORT_VPN)
+                .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
+                .build();
+        ConnectivityManager.NetworkCallback cb =
+                new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network network) {
+                        synchronized (lock) {
+                            if (!expired.contains(network)) {
+                                available.add(network);
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onLinkPropertiesChanged(Network network,
+                            LinkProperties lp) {
+                        synchronized (lock) {
+                            if (expired.contains(network)) {
+                                return;
+                            }
+                            available.add(network);
+                            if (lp != null) {
+                                collected.put(network, lp);
+                            }
+                        }
+                    }
+
+                    @Override
+                    public void onLost(Network network) {
+                        synchronized (lock) {
+                            available.remove(network);
+                            collected.remove(network);
+                            expired.add(network);
+                        }
+                    }
+                };
+        boolean registered = false;
+        try {
+            cm.registerNetworkCallback(request, cb);
+            registered = true;
+        } catch (Exception e) {
+            // Registration failed: no VPN info — DEGRADED, not a crash.
+            return new ArrayList<VpnBindSelector.VpnNetwork>();
+        }
+        try {
+            long deadline = SystemClock.elapsedRealtime() + 2000;
+            synchronized (lock) {
+                while (true) {
+                    long remaining = deadline - SystemClock.elapsedRealtime();
+                    if (remaining <= 0) {
+                        break;
+                    }
+                    try {
+                        lock.wait(remaining);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+                // Snapshot under the same lock (atomicity of close
+                // and snapshot). Networks available without
+                // LinkProperties count as a VPN with no IPv4.
+                List<VpnBindSelector.VpnNetwork> out = new ArrayList<>();
+                Set<Network> all = new HashSet<>(available);
+                all.addAll(collected.keySet());
+                for (Network net : all) {
+                    LinkProperties lp = collected.get(net);
+                    List<String> v4 = new ArrayList<>();
+                    String ifName = null;
+                    if (lp != null) {
+                        ifName = lp.getInterfaceName();
+                        for (LinkAddress la : lp.getLinkAddresses()) {
+                            InetAddress ia = la.getAddress();
+                            if (ia instanceof java.net.Inet4Address) {
+                                v4.add(ia.getHostAddress());
+                            }
+                        }
+                    }
+                    out.add(new VpnBindSelector.VpnNetwork(ifName, v4));
+                }
+                return out;
+            }
+        } finally {
+            if (registered) {
+                try {
+                    cm.unregisterNetworkCallback(cb);
+                } catch (Exception ignored) {
+                }
+            }
+        }
     }
 
     private void acceptLoop(ServerSocket ss, long acceptGeneration) {
@@ -570,11 +943,16 @@ public class HttpBridgeServer {
         // loop instead of letting the old thread spin on the
         // closed socket and log "accept failed" forever.
         final ThreadPoolExecutor pool = workers;
-        while ((state == ServerState.RUNNING || state == ServerState.STARTING)
+        while ((state == ServerState.RUNNING || state == ServerState.STARTING
+                || state == ServerState.DEGRADED)
                 && acceptGeneration == serverLifecycleGeneration
                 && !ss.isClosed()) {
             try {
                 final Socket conn = ss.accept();
+                // SPEC-LOG-001 LOG-05: first connection from a new
+                // remote IP, once per run. Accept time, not HTTP
+                // success; the port is never logged.
+                logClientFirst(conn);
                 // v2.1 fix (CONS-024 P1-NEW): capture the server
                 // lifecycle generation at accept time. A worker
                 // that outlives its lifecycle (accepted before
@@ -636,7 +1014,8 @@ public class HttpBridgeServer {
                 // belongs to the current lifecycle.
                 if (acceptGeneration == serverLifecycleGeneration
                         && (state == ServerState.RUNNING
-                            || state == ServerState.STARTING)) {
+                            || state == ServerState.STARTING
+                            || state == ServerState.DEGRADED)) {
                     // P1-03 fix round (CONS-032): exception class
                     // only — the message may carry user data. (The
                     // adjacent BridgeLog call was already sanitized;
@@ -646,6 +1025,45 @@ public class HttpBridgeServer {
                             e.getClass().getSimpleName());
                 }
             }
+        }
+    }
+
+    /** SPEC-LOG-001 LOG-05: log the first connection from a remote
+     * IP, once per run. Dedup uses the real IP in memory (a masked
+     * key would conflate 100.111.10.10 and 100.111.20.20); only the
+     * masked form reaches the log. IPv4-mapped IPv6 is normalized
+     * to IPv4 first. FIFO eviction at 64 entries (pure insertion
+     * order — a re-connection does NOT refresh the order); an
+     * evicted IP re-logs on reconnect. Thread-safe for concurrent
+     * accepts. */
+    private void logClientFirst(Socket conn) {
+        try {
+            InetAddress remote = conn.getInetAddress();
+            if (remote == null) {
+                return;
+            }
+            String ip = remote.getHostAddress();
+            if (ip == null) {
+                return;
+            }
+            if (ip.startsWith("::ffff:")) {
+                ip = ip.substring(7);
+            }
+            synchronized (clientFirstSeen) {
+                if (clientFirstSeen.contains(ip)) {
+                    return;
+                }
+                if (clientFirstSeen.size() >= CLIENT_FIRST_MAX) {
+                    java.util.Iterator<String> it = clientFirstSeen.iterator();
+                    if (it.hasNext()) {
+                        it.next();
+                        it.remove();
+                    }
+                }
+                clientFirstSeen.add(ip);
+            }
+            BridgeLog.log("client-first", BridgeLog.maskIp(ip));
+        } catch (Exception ignored) {
         }
     }
 
@@ -1887,7 +2305,8 @@ public class HttpBridgeServer {
             if (lifecycleGeneration != serverLifecycleGeneration) {
                 return -1;
             }
-            if (state != ServerState.RUNNING && state != ServerState.STARTING) {
+            if (state != ServerState.RUNNING && state != ServerState.STARTING
+                    && state != ServerState.DEGRADED) {
                 return -1;
             }
             if (!operationActive) {
@@ -2272,7 +2691,10 @@ public class HttpBridgeServer {
                                     List<String> tailscaleIps,
                                     List<String> boundTailscaleIps)
             throws org.json.JSONException {
-        String http = state == ServerState.STARTING ? "RECOVERING" : "HEALTHY";
+        // SPEC-LOG-001 BIND-02: a DEGRADED server (loopback only) is
+        // not HEALTHY, even though it is listening.
+        String http = state == ServerState.STARTING ? "RECOVERING"
+                : state == ServerState.DEGRADED ? "DEGRADED" : "HEALTHY";
         String tailscale;
         if (tailscaleIps.isEmpty()) {
             tailscale = "UNAVAILABLE";
@@ -2357,6 +2779,9 @@ public class HttpBridgeServer {
      * overall status too. */
     private String overallStatus(JSONObject modules) {
         if (state == ServerState.STARTING) return "RECOVERING";
+        // SPEC-LOG-001 BIND-02: a DEGRADED server (loopback only)
+        // degrades the overall status too.
+        if (state == ServerState.DEGRADED) return "DEGRADED";
         if ("UNAVAILABLE".equals(modules.optString("tailscale"))
                 || "DEGRADED".equals(modules.optString("tailscale"))
                 || "NOT_GRANTED".equals(modules.optString("notification_access"))
