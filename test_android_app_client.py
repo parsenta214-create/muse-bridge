@@ -3173,6 +3173,14 @@ def test_ping001_prober_uses_icmp_with_tcp_fallback():
     assert "probing" in src
     assert "isProbing()" in src
     assert "elapsedRealtime" in src
+    # CONS-053 fix round: the ICMP output is drained on its own
+    # thread so the timeout can fire (PING-01); a result is kept
+    # only when its target is still current (PING-10); a target
+    # change resets the throttle (NEW-01).
+    assert "ping-reader" in src
+    assert "setDaemon(true)" in src
+    assert "target.equals(lastClientIp)" in src
+    assert "lastProbeStartedMs = 0" in src
 
 
 def test_ping001_server_records_client_ip_and_state():
@@ -3192,9 +3200,11 @@ def test_ping001_server_records_client_ip_and_state():
     assert "ping_to_client" in src
     assert "pingToClientJson" in src
     # PING-04: the recording must sit AFTER the token check, so an
-    # unauthenticated peer cannot set the ping target.
+    # unauthenticated peer cannot set the ping target. CONS-053
+    # NEW-03: anchor on the 401 rejection itself (the one place
+    # "unauthorized" appears), not just on the token fetch.
     assert src.index("PingProber.setLastClientIp") > src.index(
-        "tokens.currentToken()")
+        '"unauthorized"')
 
 
 def test_ping001_fix_round_display():

@@ -76,12 +76,16 @@ public class PingProber {
 
     private static volatile String lastClientIp = null;
     private static volatile Result lastResult = null;
+    /** CONS-053 NEW-02: the throttle uses elapsedRealtime
+     * (monotonic), not the wall clock. */
     private static volatile long lastProbeStartedMs = 0;
     private static volatile boolean probing = false;
 
     /** CONS-052 PING-10: when the target changes, the old result
      * belongs to another client — drop it so the display never
-     * shows a stale target's numbers. */
+     * shows a stale target's numbers. CONS-053 NEW-01: a new
+     * target may be probed at once — the old target's throttle
+     * must not block it. */
     public static synchronized void setLastClientIp(String ip) {
         if (ip == null) {
             return;
@@ -89,6 +93,7 @@ public class PingProber {
         if (!ip.equals(lastClientIp)) {
             lastClientIp = ip;
             lastResult = null;
+            lastProbeStartedMs = 0;
         }
     }
 
@@ -118,7 +123,7 @@ public class PingProber {
             }
             return;
         }
-        long now = System.currentTimeMillis();
+        long now = SystemClock.elapsedRealtime();
         if (probing || now - lastProbeStartedMs < MIN_INTERVAL_MS) {
             if (listener != null && lastResult != null) {
                 listener.onResult(lastResult);
@@ -128,14 +133,32 @@ public class PingProber {
         lastProbeStartedMs = now;
         probing = true;
         new Thread(() -> {
+            Result r;
             try {
-                Result r = runProbe(target);
-                lastResult = r;
+                r = runProbe(target);
+            } catch (Exception e) {
+                r = null;
+            }
+            boolean stored = false;
+            synchronized (PingProber.class) {
+                probing = false;
+                // CONS-053 PING-10: only keep the result if the
+                // target is still current; a result for an old
+                // target must not revive after a target change.
+                if (r != null && target.equals(lastClientIp)) {
+                    lastResult = r;
+                    stored = true;
+                }
+            }
+            if (stored) {
                 if (listener != null) {
                     listener.onResult(r);
                 }
-            } finally {
-                probing = false;
+            } else if (r != null) {
+                // Target changed mid-probe: start a fresh probe for
+                // the new target (the throttle was reset by
+                // setLastClientIp).
+                probe(null);
             }
         }, "ping-prober").start();
     }
@@ -151,7 +174,10 @@ public class PingProber {
     /** ICMP ping via the system binary. Returns null when the binary
      * is missing, fails, or no reply arrives (caller falls back).
      * CONS-052 PING-01: stderr is merged into stdout, the exit code
-     * is checked, and the process is killed after a timeout. */
+     * is checked, and the process is killed after a timeout.
+     * CONS-053 PING-01: the output is drained on its own thread, so
+     * a hung process cannot block the timeout — readLine() on the
+     * probe thread would never reach waitFor(). */
     private static Result runIcmpPing(String target) {
         try {
             Process p = new ProcessBuilder("/system/bin/ping",
@@ -160,18 +186,24 @@ public class PingProber {
                     .redirectErrorStream(true)
                     .start();
             StringBuilder out = new StringBuilder();
-            try (BufferedReader r = new BufferedReader(
-                    new InputStreamReader(p.getInputStream()))) {
-                String line;
-                while ((line = r.readLine()) != null) {
-                    out.append(line).append('\n');
+            Thread reader = new Thread(() -> {
+                try (BufferedReader r = new BufferedReader(
+                        new InputStreamReader(p.getInputStream()))) {
+                    String line;
+                    while ((line = r.readLine()) != null) {
+                        out.append(line).append('\n');
+                    }
+                } catch (Exception ignored) {
                 }
-            }
+            }, "ping-reader");
+            reader.setDaemon(true);
+            reader.start();
             boolean finished = p.waitFor(PING_WAIT_TIMEOUT_S, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
                 return null;
             }
+            reader.join(2000);
             if (p.exitValue() != 0) {
                 return null;
             }
