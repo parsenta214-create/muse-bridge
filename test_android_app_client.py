@@ -3181,6 +3181,11 @@ def test_ping001_prober_uses_icmp_with_tcp_fallback():
     assert "setDaemon(true)" in src
     assert "target.equals(lastClientIp)" in src
     assert "lastProbeStartedMs = 0" in src
+    # CONS-054 fix round: the re-probe is decided by the target
+    # change alone, apart from the result (NEW-04); the process
+    # and reader are reaped on the timeout path too (NEW-05).
+    assert "targetChanged" in src
+    assert "p.waitFor(2, TimeUnit.SECONDS)" in src
 
 
 def test_ping001_server_records_client_ip_and_state():

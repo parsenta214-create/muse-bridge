@@ -140,12 +140,18 @@ public class PingProber {
                 r = null;
             }
             boolean stored = false;
+            boolean targetChanged = false;
             synchronized (PingProber.class) {
                 probing = false;
                 // CONS-053 PING-10: only keep the result if the
                 // target is still current; a result for an old
                 // target must not revive after a target change.
-                if (r != null && target.equals(lastClientIp)) {
+                // CONS-054 NEW-04: whether the target changed is
+                // decided apart from the result — a failed probe
+                // for the old target must not stop the re-probe
+                // for the new one.
+                targetChanged = !target.equals(lastClientIp);
+                if (!targetChanged && r != null) {
                     lastResult = r;
                     stored = true;
                 }
@@ -154,10 +160,13 @@ public class PingProber {
                 if (listener != null) {
                     listener.onResult(r);
                 }
-            } else if (r != null) {
+            } else if (targetChanged && lastClientIp != null) {
                 // Target changed mid-probe: start a fresh probe for
                 // the new target (the throttle was reset by
-                // setLastClientIp).
+                // setLastClientIp). One re-probe per completed
+                // probe — a new target change during it starts
+                // its own single re-probe, so this cannot loop
+                // without further target changes.
                 probe(null);
             }
         }, "ping-prober").start();
@@ -201,6 +210,12 @@ public class PingProber {
             boolean finished = p.waitFor(PING_WAIT_TIMEOUT_S, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
+                // CONS-054 NEW-05: reap the process and let the
+                // reader finish before falling back, so no dying
+                // process or half-read output leaks into the TCP
+                // fallback.
+                p.waitFor(2, TimeUnit.SECONDS);
+                reader.join(2000);
                 return null;
             }
             reader.join(2000);
