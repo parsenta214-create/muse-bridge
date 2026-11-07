@@ -1,7 +1,7 @@
 # Muse Bridge — Home-Screen Widget Spec (Draft)
 
 - Status: DRAFT (not frozen)
-- Version target: v2.6.0 / code 39 (new feature = minor bump, on top of the P2 code at commit 104e1bb2)
+- Version target: v2.6.4 / code 43 (fix round, CONS-037 P1/P2; original widget v2.6.0 / code 39)
 - SHA-256: (filled at Notion build time)
 
 ## 1. Purpose
@@ -95,3 +95,11 @@ Full suite must pass; APK rebuilt (v2.6.0/code 39).
 - Version: v2.6.4 (code 43).
 - Tests: the widget guard `test_widget_provider_handles_toggle_and_a11y` was replaced — the provider must handle a11y only, the receiver must be non-exported with no intent-filter, the receiver must handle the toggle and the 2 s failure check (start path only), and the receiver must never touch the token.
 - Follow-up (not in this round, CONS-048 idea): distinguish STOPPED / RUNNING / FAILED as three states in BridgeService + MainActivity, so a start failure is visible without opening the app. Needs a spec decision first.
+
+## 9. 採用記録（2026-11-08）
+
+- 採用決定：2026-11-08 00:51 +07、サイガマンが v2.6.4 の採用を決定。
+- 根拠：GPT 再レビュー CONS-20261107-049 の判定は条件付き採用（P0 なし、新規 P1 なし）。P1・P2 の修正を確認済み。
+- 実機確認（サイガマン、2026-11-08 00:49–00:51 +07）：APK v2.6.4/code 43 をインストール（ヘルスチェックで確認）。ウィジェットから停止 → サービス停止を確認（ヘルスチェックで down、アプリ 2.6.4 のまま、a11y オン）。ウィジェットから開始 → サービス復旧を確認（ヘルスチェックで up、4層とも正常）。停止・開始のいずれでもアプリが勝手に開いたという報告はなし。
+- 採用範囲：v2.6.4（code 43）、コミット 13f31f4。テスト 266 passed + 18 subtests passed。
+- 未決のまま：P2-02（起動要求の識別子導入）は将来の改善ラウンドへ延期。CONS-048 の 3 状態表示（STOPPED / RUNNING / FAILED）も引き続き未決。
