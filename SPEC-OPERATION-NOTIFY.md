@@ -1,7 +1,7 @@
 # Muse Bridge — Operation Notifications (操作中 / 操作終了) Spec (Draft)
 
-- Status: Draft (design approved by Saardeim 2026-11-06; implemented through the CONS-024 fix round 2026-11-06 — full suite 230 tests pass, APK v2.1.0 built; awaiting GPT re-review CONS-025 and Saardeim's freeze approval; NOT frozen)
-- Source: Saardeim's proposal 2026-11-06 17:29 +07; analysis by subagent 2026-11-06 17:31–17:36 +07
+- Status: Draft (design approved by the System Development Lead 2026-11-06; implemented through the CONS-024 fix round 2026-11-06 — full suite 230 tests pass, APK v2.1.0 built; awaiting GPT re-review CONS-025 and the System Development Lead's freeze approval; NOT frozen)
+- Source: the System Development Lead's proposal 2026-11-06 17:29 +07; analysis by subagent 2026-11-06 17:31–17:36 +07
 - Version target: v2.1.0 / code 34 (minor feature bump; separate from the v2.0.0 P0 freeze, which is still pending and whose /launch_app background failure is NOT fixed by this feature)
 - Local file: `workspace/computer-use-preview/SPEC-OPERATION-NOTIFY.md`
 
@@ -217,7 +217,7 @@ The Java logic (tracker, timer, notification posting) **cannot** be covered by t
 - **`phone_watcher.py` interaction:** the watcher treats any new notification as "changed". The bridge's own operation notifications will register as new notifications. Recommend a one-line follow-up in the watcher (ignore `package == "dev.muse.bridge"` events) — flagged here, not part of this feature.
 - **Optional `/health` extension (not required for v1):** an `operation_active: true/false` field would let the VM/watcher see whether an operation is in progress. Recommend deferring; the notification itself is the user-visible signal, and the VM already knows when it operates.
 
-**Implementation status (2026-11-06): FROZEN as v2.1.0.** Implemented through the CONS-024 fix round — the generation design (§3.2/§3.3), the lifecycle generation and `stop()` invalidation (§3.4), the D6 allowlists for `/press_key` (9 keys) and `/node_action` (32 actions, validated before the hook — CONS-023), and the `start()` cancel position. Full suite 230 tests pass; APK v2.1.0 (code 34) builds, SHA-256 e71db1d57c0fe051d411e10e7d072c5f4b9bbe715e786cb3bb6068851782a213. GPT reviews: CONS-023 (conditional fail), CONS-024 (conditional fail), CONS-025 (code review passed, conditional approval). Frozen by Saardeim 2026-11-06 18:58 +07 (README decision 89). GitHub commit f520dd87. **Release conditioned on live verification of §7.3 items 14–15 plus the rest of the checklist.** After freezing, never edit a frozen file directly — make a new version.
+**Implementation status (2026-11-06): FROZEN as v2.1.0.** Implemented through the CONS-024 fix round — the generation design (§3.2/§3.3), the lifecycle generation and `stop()` invalidation (§3.4), the D6 allowlists for `/press_key` (9 keys) and `/node_action` (32 actions, validated before the hook — CONS-023), and the `start()` cancel position. Full suite 230 tests pass; APK v2.1.0 (code 34) builds, SHA-256 e71db1d57c0fe051d411e10e7d072c5f4b9bbe715e786cb3bb6068851782a213. GPT reviews: CONS-023 (conditional fail), CONS-024 (conditional fail), CONS-025 (code review passed, conditional approval). Frozen by the System Development Lead 2026-11-06 18:58 +07 (README decision 89). GitHub commit f520dd87. **Release conditioned on live verification of §7.3 items 14–15 plus the rest of the checklist.** After freezing, never edit a frozen file directly — make a new version.
 
 ## 9. Risks (Android constraints)
 
@@ -230,9 +230,9 @@ The Java logic (tracker, timer, notification posting) **cannot** be covered by t
 - **Threading.** The only new concurrency is the single-thread `ScheduledExecutorService` plus `synchronized` tracker state. No `Handler`/`Looper` dependency, no interaction with the a11y main-thread timeouts. The scheduler is shut down in `stop()`; a leaked scheduler thread across restarts is prevented by creating it in the constructor and shutting it down in `stop()`.
 - **Stale notifications across restarts.** Covered by cancelling IDs 3 and 4 in both `start()` and `stop()`.
 
-## 10. Open questions (pending Saardeim's decision)
+## 10. Open questions (pending the System Development Lead's decision)
 
-1. **`/notification_action` "open"** — DECIDED 2026-11-06 (Saardeim approved the recommendation): included as a trigger (label `通知を開いています`).
+1. **`/notification_action` "open"** — DECIDED 2026-11-06 (the System Development Lead approved the recommendation): included as a trigger (label `通知を開いています`).
 2. **`operation_active` in `/health`?** Recommend deferring (§8).
 3. **Channel importance** `DEFAULT` (alerts once per session) vs `LOW` (silent banner)? Recommend `DEFAULT`.
 4. **Grace delay for sub-second operations?** Recommend none for v1 (§6.1).
@@ -241,7 +241,7 @@ The Java logic (tracker, timer, notification posting) **cannot** be covered by t
 
 1. **Spec doc:** this file + a Notion Draft page (same Documents DB pattern as the P0 spec), rather than extending the P0 spec — keeps the P0 freeze track clean. Record the adoption decision in the README as the next numbered decision (88), anchored on the end of decision 87's body per the `AGENTS.md` lesson.
 2. **Version:** minor feature bump — `v2.1.0` / code `34` in `android-app/build.sh` (the P0 freeze is still pending and `/launch_app` is still broken; do not fold this into a v2.0.0 freeze).
-3. **Review:** GPT review round in the same form as CONS-20261106-022 (GitHub commit + Notion spec linked together, read-only access), then Saardeim's freeze approval (freeze approval is Saardeim only). Full suite must pass (221 + new tests).
+3. **Review:** GPT review round in the same form as CONS-20261106-022 (GitHub commit + Notion spec linked together, read-only access), then the System Development Lead's freeze approval (freeze approval is the System Development Lead only). Full suite must pass (221 + new tests).
 4. **Handoff to the phone:** APK via chat attachment → CX File Explorer → installer, update install (never uninstall; token is preserved). Then the §7.3 live checklist.
 
 ## 12. Files touched (complete list)

@@ -20,7 +20,7 @@ import java.util.Locale;
  * a11y on means FULL ACCESS, otherwise the persisted MINIMAL /
  * BANKING_SAFE), whether the accessibility service is enabled, and
  * when the widget last refreshed — with a Start/Stop toggle and an
- * Open-app button, so Saardeim can control the bridge without
+ * Open-app button, so the System Development Lead can control the bridge without
  * opening the app (the same one-tap convenience as the Quick
  * Settings tile, on the home screen).
  *

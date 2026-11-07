@@ -1,6 +1,6 @@
 # AGENTS.md — Muse Bridge
 
-Muse（AI）が Android スマホ（Galaxy A55 5G）を遠隔操作するための橋渡しアプリと、その VM 側クライアントのリポジトリ。最終決定者は人間のユーザー（Saardeim / サイガマン）。
+Muse（AI）が Android スマホ（Galaxy A55 5G）を遠隔操作するための橋渡しアプリと、その VM 側クライアントのリポジトリ。最終決定者は人間のユーザー（the System Development Lead / システム開発責任者）。
 
 ## このリポジトリは何か
 

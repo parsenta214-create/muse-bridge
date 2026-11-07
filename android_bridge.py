@@ -812,7 +812,7 @@ class AndroidAdapter:
         foreground_confirmed, not ok alone. 422 when the package
         is not installed or has no launcher; 503 when Android
         refuses the start; 403 when the package is on the launch
-        deny list (banking / heavy-security apps — Saardeim
+        deny list (banking / heavy-security apps — System Development Lead
         decision 2026-11-06, README decision 91). The 403 is a
         TransportError and is never retried. Gated by
         --allow-actions, never retried."""
