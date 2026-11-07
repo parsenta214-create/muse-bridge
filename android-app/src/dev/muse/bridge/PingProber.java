@@ -210,15 +210,23 @@ public class PingProber {
             boolean finished = p.waitFor(PING_WAIT_TIMEOUT_S, TimeUnit.SECONDS);
             if (!finished) {
                 p.destroyForcibly();
-                // CONS-054 NEW-05: reap the process and let the
-                // reader finish before falling back, so no dying
-                // process or half-read output leaks into the TCP
-                // fallback.
-                p.waitFor(2, TimeUnit.SECONDS);
+                // CONS-055 NEW-05: waitFor/join return even when
+                // they time out — confirm the exit explicitly
+                // instead of assuming it.
+                boolean processExited = p.waitFor(2, TimeUnit.SECONDS);
                 reader.join(2000);
+                if (!processExited) {
+                    p.destroyForcibly();
+                }
                 return null;
             }
             reader.join(2000);
+            // CONS-055 NEW-05: do not parse a possibly partial
+            // output — a reader still alive after the bounded
+            // join means the drain did not finish.
+            if (reader.isAlive()) {
+                return null;
+            }
             if (p.exitValue() != 0) {
                 return null;
             }

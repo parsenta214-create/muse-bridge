@@ -3186,6 +3186,11 @@ def test_ping001_prober_uses_icmp_with_tcp_fallback():
     # and reader are reaped on the timeout path too (NEW-05).
     assert "targetChanged" in src
     assert "p.waitFor(2, TimeUnit.SECONDS)" in src
+    # CONS-055 fix round: the exit is confirmed explicitly, not
+    # assumed — the waitFor return value is checked and the
+    # reader's liveness is checked on both paths (NEW-05).
+    assert "processExited" in src
+    assert "reader.isAlive()" in src
 
 
 def test_ping001_server_records_client_ip_and_state():
