@@ -48,6 +48,7 @@ public class MainActivity extends Activity {
     private TextView a11yStatusValue;
     private TextView notifStatusValue;
     private TextView addressText;
+    private TextView addressToggleLabel;
     private TextView tokenText;
     private TextView tokenToggleLabel;
     private TextView versionText;
@@ -62,6 +63,12 @@ public class MainActivity extends Activity {
     private int notifButtonDefaultTextColor;
     /** SPEC-UI-001: the token is masked by default; tap to reveal. */
     private boolean tokenRevealed = false;
+    /** SPEC-UI-001 v2.6.3: the address is fully masked by default; tap to reveal. */
+    private boolean addressRevealed = false;
+    /** SPEC-UI-001 v2.6.3: the computed address text (shown when revealed). */
+    private String currentAddress = "";
+    /** SPEC-UI-001 v2.6.3: fully masked — no partial characters. */
+    private static final String MASKED = "●●●●●●●●";
 
     /** CONS-029 P1-2 fix: refresh the status display when the
      * AccessibilityService connects or disconnects. refresh()
@@ -228,6 +235,18 @@ public class MainActivity extends Activity {
         tokenText.setOnClickListener(tokenToggle);
         tokenToggleLabel = findViewById(R.id.token_toggle_label);
         tokenToggleLabel.setOnClickListener(tokenToggle);
+
+        // SPEC-UI-001 v2.6.3: the address uses the same tap-to-reveal pattern.
+        View.OnClickListener addressToggle = new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                addressRevealed = !addressRevealed;
+                refreshAddress();
+            }
+        };
+        addressText.setOnClickListener(addressToggle);
+        addressToggleLabel = findViewById(R.id.address_toggle_label);
+        addressToggleLabel.setOnClickListener(addressToggle);
 
         startButton = findViewById(R.id.start_button);
         stopButton = findViewById(R.id.stop_button);
@@ -473,26 +492,26 @@ public class MainActivity extends Activity {
         }
 
         String ip = findTailscaleIp();
-        addressText.setText(ip != null
+        currentAddress = ip != null
                 ? "http://" + ip + ":" + HttpBridgeServer.PORT + "  (and http://127.0.0.1:" + HttpBridgeServer.PORT + ")"
-                : "http://127.0.0.1:" + HttpBridgeServer.PORT + "  (Tailscale address not found)");
+                : "http://127.0.0.1:" + HttpBridgeServer.PORT + "  (Tailscale address not found)";
+        refreshAddress();
 
         refreshToken();
     }
 
-    /** SPEC-UI-001: the token is masked by default (first 4 + … + last 4). */
+    /** SPEC-UI-001: the token is fully masked by default (v2.6.3). */
     private void refreshToken() {
         String token = getOrCreateToken(this);
-        tokenText.setText(tokenRevealed ? token : maskToken(token));
+        tokenText.setText(tokenRevealed ? token : MASKED);
         // v2.6.2 (GPT CONS-047 P1): the label says what a tap does.
         tokenToggleLabel.setText(tokenRevealed ? R.string.token_hide : R.string.token_show);
     }
 
-    private static String maskToken(String token) {
-        if (token == null || token.length() < 8) {
-            return "••••";
-        }
-        return token.substring(0, 4) + "…" + token.substring(token.length() - 4);
+    /** SPEC-UI-001 v2.6.3: the address is fully masked by default. */
+    private void refreshAddress() {
+        addressText.setText(addressRevealed ? currentAddress : MASKED);
+        addressToggleLabel.setText(addressRevealed ? R.string.token_hide : R.string.token_show);
     }
 
     /** SPEC-UI-001: state word in its colour, optional note in grey. */
