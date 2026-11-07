@@ -10,6 +10,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Bundle;
@@ -41,9 +42,17 @@ public class MainActivity extends Activity {
     private static final String PERMISSION_RUN_COMMAND =
             "com.termux.permission.RUN_COMMAND";
 
-    // SPEC-UI-001: status is four label+value rows, each value coloured
-    // by its state (see colors.xml).
-    private TextView bridgeStatusValue;
+    // SPEC-UI-002: the bridge state is a dial (StatusDialView), the
+    // mode / a11y / notification states live in cards (SPEC-UI-001
+    // rows, same IDs), and the connection flow shows device ->
+    // Tailscale -> server.
+    private StatusDialView statusDial;
+    private TextView flowDotDevice;
+    private TextView flowDotTailscale;
+    private TextView flowDotServer;
+    private TextView flowStatusDevice;
+    private TextView flowStatusTailscale;
+    private TextView flowStatusServer;
     private TextView modeStatusValue;
     private TextView a11yStatusValue;
     private TextView notifStatusValue;
@@ -214,7 +223,13 @@ public class MainActivity extends Activity {
                     REQUEST_RUN_COMMAND);
         }
 
-        bridgeStatusValue = findViewById(R.id.status_bridge_value);
+        statusDial = findViewById(R.id.status_dial);
+        flowDotDevice = findViewById(R.id.flow_dot_device);
+        flowDotTailscale = findViewById(R.id.flow_dot_tailscale);
+        flowDotServer = findViewById(R.id.flow_dot_server);
+        flowStatusDevice = findViewById(R.id.flow_status_device);
+        flowStatusTailscale = findViewById(R.id.flow_status_tailscale);
+        flowStatusServer = findViewById(R.id.flow_status_server);
         modeStatusValue = findViewById(R.id.status_mode_value);
         a11yStatusValue = findViewById(R.id.status_a11y_value);
         notifStatusValue = findViewById(R.id.status_notif_value);
@@ -409,9 +424,7 @@ public class MainActivity extends Activity {
         // colour for that state, with the explanation in grey after
         // it (setStatusRow). Colour never carries information alone.
         boolean running = BridgeService.isRunning();
-        setStatusRow(bridgeStatusValue,
-                getString(running ? R.string.status_running : R.string.status_stopped),
-                getColor(running ? R.color.status_ok : R.color.status_bad), null);
+        String ip = findTailscaleIp();
 
         // P0-2 (v2.0): the effective mode. a11y on means FULL
         // ACCESS; a11y off means the persisted MINIMAL /
@@ -427,6 +440,25 @@ public class MainActivity extends Activity {
         // is kept as the Settings-state check for diagnostics.)
         boolean a11yOn = BridgeAccessibilityService.getInstance() != null;
         String mode = a11yOn ? "FULL ACCESS" : getPersistedMode(this);
+
+        // SPEC-UI-002: the dial shows the server state (ring +
+        // state word + mode sub-line); the flow shows device ->
+        // Tailscale -> server.
+        String modeShort = a11yOn ? getString(R.string.mode_short_full)
+                : MODE_BANKING_SAFE.equals(mode)
+                        ? getString(R.string.status_mode_banking)
+                        : getString(R.string.status_mode_minimal);
+        statusDial.setRunning(running);
+        statusDial.setModeLabel(modeShort);
+        setFlowNode(flowDotDevice, flowStatusDevice,
+                getString(R.string.flow_connected), getColor(R.color.status_ok));
+        setFlowNode(flowDotTailscale, flowStatusTailscale,
+                getString(ip != null ? R.string.flow_connected : R.string.flow_not_found),
+                getColor(ip != null ? R.color.status_ok : R.color.status_bad));
+        setFlowNode(flowDotServer, flowStatusServer,
+                getString(running ? R.string.status_running : R.string.status_stopped),
+                getColor(running ? R.color.status_ok : R.color.status_bad));
+
         if (a11yOn) {
             setStatusRow(modeStatusValue, getString(R.string.status_mode_full),
                     getColor(R.color.status_ok), null);
@@ -491,7 +523,6 @@ public class MainActivity extends Activity {
                     ? R.string.btn_mode_banking_safe : R.string.btn_mode_minimal);
         }
 
-        String ip = findTailscaleIp();
         currentAddress = ip != null
                 ? "http://" + ip + ":" + HttpBridgeServer.PORT + "  (and http://127.0.0.1:" + HttpBridgeServer.PORT + ")"
                 : "http://127.0.0.1:" + HttpBridgeServer.PORT + "  (Tailscale address not found)";
@@ -512,6 +543,18 @@ public class MainActivity extends Activity {
     private void refreshAddress() {
         addressText.setText(addressRevealed ? currentAddress : MASKED);
         addressToggleLabel.setText(addressRevealed ? R.string.token_hide : R.string.token_show);
+    }
+
+    /** SPEC-UI-002: one flow node — a coloured dot (circle) plus a
+     * status word in the same colour. Colour never carries
+     * information alone (the word is always shown). */
+    private void setFlowNode(TextView dot, TextView status, String word, int color) {
+        GradientDrawable circle = new GradientDrawable();
+        circle.setShape(GradientDrawable.OVAL);
+        circle.setColor(color);
+        dot.setBackground(circle);
+        status.setText(word);
+        status.setTextColor(color);
     }
 
     /** SPEC-UI-001: state word in its colour, optional note in grey. */

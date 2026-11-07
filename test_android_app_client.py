@@ -3030,3 +3030,78 @@ def test_plain_actions_do_not_send_operation_end(mock_app):
     adapter.launch_app("com.twitter.android")
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert not [r for r in posts if r[1] == "/operation_end"]
+
+
+# --------------------------------------------------------------------------
+# Graphical main screen (SPEC-UI-002, v2.7.0): status dial + connection
+# flow + cards.
+# --------------------------------------------------------------------------
+#
+# HONEST LIMIT: the Python suite cannot run Java drawing code — there is
+# no Java test harness in this project (manual aapt2/javac/d8 build, no
+# Gradle, Android APIs unavailable on the JVM), same as the widget
+# guards. These guards prove structure in the source only: if someone
+# removes the dial, a flow node, a card, or the masking/mode wiring,
+# the suite fails. Actual rendering (ring colour, centre word, flow
+# dots) needs the §5 live verification on the phone; the aapt2 link
+# step validates the layout XML at build time.
+
+def test_ui002_dial_view_draws_ring_and_state_word():
+    """SPEC-UI-002 §3: StatusDialView must exist, expose setRunning /
+    setModeLabel, and draw the ring + centre state word + mode
+    sub-line on Canvas, using the status colours and strings."""
+    src = _java_source("StatusDialView.java")
+    assert "class StatusDialView extends View" in src
+    assert "public void setRunning(boolean running)" in src
+    assert "public void setModeLabel(String modeLabel)" in src
+    assert "onDraw(Canvas canvas)" in src
+    assert "R.color.status_ok" in src
+    assert "R.color.status_bad" in src
+    assert "R.string.status_running" in src
+    assert "R.string.status_stopped" in src
+    assert "drawText" in src
+
+
+def test_ui002_layout_has_dial_flow_and_cards():
+    """SPEC-UI-002 §2: activity_main.xml must carry the dial, the
+    three flow nodes (device / Tailscale / server), and the mode /
+    access / connection cards."""
+    src = _res_text("layout/activity_main.xml")
+    assert 'android:id="@+id/status_dial"' in src
+    assert "dev.muse.bridge.StatusDialView" in src
+    for node in ("device", "tailscale", "server"):
+        assert f'android:id="@+id/flow_dot_{node}"' in src
+        assert f'android:id="@+id/flow_status_{node}"' in src
+    assert src.count('android:background="@drawable/card_background"') == 3
+    assert 'android:id="@+id/status_mode_value"' in src
+    assert 'android:id="@+id/status_a11y_value"' in src
+    assert 'android:id="@+id/status_notif_value"' in src
+
+
+def test_ui002_card_background_is_rounded():
+    """SPEC-UI-002 §3: the card background must be a white rounded
+    rect (16dp corners) with a light border."""
+    src = _res_text("drawable/card_background.xml")
+    assert 'android:shape="rectangle"' in src
+    assert 'android:radius="16dp"' in src
+    assert 'android:color="#FFFFFF"' in src
+
+
+def test_ui002_main_activity_wires_dial_flow_masking_and_mode():
+    """SPEC-UI-002 §3: MainActivity must drive the dial and the flow
+    from the real state (BridgeService.isRunning, findTailscaleIp),
+    and keep the masking (refreshToken/refreshAddress) and the mode
+    toggle (mode_button) wiring."""
+    src = _java_source("MainActivity.java")
+    assert "statusDial.setRunning(running)" in src
+    assert "statusDial.setModeLabel(modeShort)" in src
+    assert "setFlowNode(flowDotDevice" in src
+    assert "setFlowNode(flowDotTailscale" in src
+    assert "setFlowNode(flowDotServer" in src
+    assert "BridgeService.isRunning()" in src
+    assert "findTailscaleIp()" in src
+    assert "refreshToken()" in src
+    assert "refreshAddress()" in src
+    assert "mode_button" in src
+    # The old bridge status row is gone — the dial replaces it.
+    assert "status_bridge_value" not in src

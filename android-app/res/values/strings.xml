@@ -48,4 +48,14 @@
     <!-- SPEC-UI-001 v2.6.2 (GPT CONS-047 P1): explicit show/hide affordance next to the token. -->
     <string name="token_show">表示</string>
     <string name="token_hide">非表示</string>
+    <!-- SPEC-UI-002: connection flow + cards. -->
+    <string name="flow_title">接続の流れ</string>
+    <string name="flow_device">この端末</string>
+    <string name="flow_tailscale">Tailscale</string>
+    <string name="flow_server">サーバー</string>
+    <string name="flow_connected">接続済み</string>
+    <string name="flow_not_found">未検出</string>
+    <string name="card_access">アクセス</string>
+    <string name="card_connection">接続情報</string>
+    <string name="mode_short_full">フルアクセス</string>
 </resources>

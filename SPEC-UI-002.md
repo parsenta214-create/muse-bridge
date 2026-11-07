@@ -1,0 +1,71 @@
+# SPEC-UI-002 — Muse Bridge メイン画面のグラフィカル化（v2.7.0）
+
+- Status: DRAFT (not frozen)
+- Version target: v2.7.0 / code 44
+- Decision: 2026-11-08、サイガマンが UI グラフィカル化の 3 方向（A ダイヤル、B フロー図、C カード）の「組み合わせで進める」を選択。組み合わせの構成は本仕様で定める。
+- 前提：SPEC-UI-001（v2.6.1〜v2.6.3）は採用済み。そのルール（マスク表示、日本語、色と文字の併記、48dp、状態に応じたボタン）は本仕様でも維持する。
+
+## 1. 目的
+
+テキストの状態行だけだったメイン画面を、ひと目で分かる図形中心の画面にする。ダイヤルでサーバーの状態、フロー図で接続のつながり、カードでモード・アクセス・接続情報を見せる。
+
+## 2. 画面構成（上から下へ、ScrollView のまま）
+
+1. バージョン行（従来通り）。
+2. **ダイヤル（A案）**：`StatusDialView`（カスタム View、Canvas で描画）。リング＋中央の状態語＋モードの小さい副行。
+   - 実行中：緑のリング、中央に「実行中」。
+   - 停止中：赤のリング、中央に「停止中」。
+   - 副行：実効モードの短い語（フルアクセス／最小／銀行安全）。
+   - 色だけでは情報を伝えない（状態語を必ず併記する）。リングは量を表すゲージではない（常に満円）。状態の色と語が一致する。
+3. **開始／停止ボタン**：ダイヤルの直下。従来通り、該当する方だけ表示する。
+4. **フロー図（B案）**：横並びの 3 ノード＋矢印。「この端末 → Tailscale → サーバー」。
+   - この端末：常に「接続済み」（緑）。
+   - Tailscale：`findTailscaleIp()` がアドレスを返せば「接続済み」（緑）、返さなければ「未検出」（赤）。
+   - サーバー：`BridgeService.isRunning()` が真なら「稼働中」（緑）、偽なら「停止中」（赤）。
+   - 各ノードは円形ドット（文字：端／T／B）＋ラベル＋状態語。矢印は「→」の TextView。
+5. **モードカード（C案）**：実効モードの行＋従来のモード切替ボタン（最小 ↔ 銀行安全）。
+   - 3 択セグメントにはしない。フルアクセスは a11y オンから導かれる実効モードであって、保存される選択肢ではない。セグメントにすると「フルアクセスを選べる」ように見えて誤解を招く。
+6. **アクセスカード（C案）**：アクセシビリティ行＋設定ボタン、通知行＋設定ボタン（従来のボタンと配線はそのまま）。
+7. **接続情報カード（C案）**：アドレス行＋トークン行（マスク表示、タップで表示／非表示。従来の配線はそのまま）。
+8. ユーティリティボタン（クイック設定追加、トークン再発行、ログを見る）とヒント（従来通り）。
+
+## 3. 実装
+
+### 新規ファイル
+
+- `android-app/src/dev/muse/bridge/StatusDialView.java` — `View` を継承。`setRunning(boolean)` と `setModeLabel(String)` を持つ。`onDraw` で外側のトラック（薄いグレー円）＋状態色のリング（満円）＋中央の状態語＋副行を描く。色は `colors.xml` の `status_ok` / `status_bad` を使う。テキストサイズは状態語 28sp、副行 13sp。サイズはレイアウトで 200dp × 200dp を指定する。
+- `android-app/res/drawable/card_background.xml` — カードの背景。白の角丸（16dp）＋薄い境界線（#E0E0E0）。
+
+### 変更ファイル
+
+- `android-app/res/layout/activity_main.xml` — 上記 2 の構成に書き換える。`status_bridge_value` の行は削除する（ダイヤルに置き換わる）。`status_mode_value` / `status_a11y_value` / `status_notif_value` はカード内に移す（ID は維持する）。`start_button` / `stop_button` / `accessibility_button` / `mode_button` / `notification_button` / `address_text` / `token_text` / `version_text` の ID は維持する。
+- `android-app/src/dev/muse/bridge/MainActivity.java` — `refresh()` を書き換える。ダイヤル（`setRunning` / `setModeLabel`）、フロー図の 3 ノード（ドットの色と状態語）、モード行・アクセス行（従来の `setStatusRow` を再利用）を更新する。モード切替、マスク切替、ボタンの配線は変更しない。`setStatusRow` は残す。
+- `android-app/res/values/strings.xml` — 新規文字列を追加する（フロー図のノード名・状態語、カード名、モードの短い語）。既存の文字列は再利用する（`status_running` / `status_stopped` / `status_mode_minimal` / `status_mode_banking`）。
+- `android-app/build.sh` — VERSION_NAME 2.7.0、VERSION_CODE 44。
+
+## 4. テスト
+
+Python スイートは Java の描画を実行できない（従来と同じ正直な制限）。ソースレベルのガードを `test_android_app_client.py` に追加する：
+
+- `StatusDialView.java` が存在し、`setRunning` と `setModeLabel` を持ち、`onDraw` でリングと中央の状態語を描くこと。
+- `activity_main.xml` にダイヤル（`status_dial`）、フロー図の 3 ノード（`flow_dot_device` / `flow_dot_tailscale` / `flow_dot_server`）、3 枚のカードが存在すること。
+- マスク切替（`refreshToken` / `refreshAddress`）とモード切替（`mode_button`）の配線が残っていること。
+- `card_background.xml` が角丸 16dp の背景であること。
+
+全スイートが通ること。APK を再ビルドする（v2.7.0/code 44）。
+
+## 5. 実機確認（サイガマン、端末で）
+
+1. APK をインストールする（更新インストール。トークンは維持される）。
+2. ダイヤルが緑で「実行中」と表示され、副行に実効モードが出ること。
+3. ウィジェットまたはアプリから停止すると、ダイヤルが赤で「停止中」になり、フロー図のサーバーが「停止中」になること。
+4. Tailscale のノードが「接続済み」であること（Tailscale が入っている端末での確認）。
+5. モード切替ボタンで最小 ↔ 銀行安全が切り替わり、実効モード行とダイヤルの副行が追従すること。
+6. アドレス・トークンが初期マスク表示で、タップで表示／非表示が切り替わること。
+7. 開始・停止・アクセシビリティ・通知のボタンが従来通り動くこと。
+
+## 6. 対象外・未決事項
+
+- 折れ線グラフや円グラフは対象外（端末内に時系列データがないため）。サーバーの稼働時間表示も今回は入れない（サービス開始時刻の記録が必要になるため、別途検討）。
+- ウィジェットの見た目は本仕様の対象外（ウィジェットは v2.6.4 で採用済み）。
+- 3 状態表示（STOPPED / RUNNING / FAILED）は本仕様の対象外（CONS-048 の未決事項のまま）。
