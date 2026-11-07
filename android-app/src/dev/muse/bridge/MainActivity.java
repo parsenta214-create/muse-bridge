@@ -619,19 +619,35 @@ public class MainActivity extends Activity {
                 + "（" + method + "）・タップで再計測";
         if (r.ok()) {
             pingText.setText(getString(R.string.ping_result, r.rttMs,
-                    r.received, r.sent, formatAge(r.measuredAtMs)));
+                    r.received, r.sent, formatAge(r.measuredAtElapsedMs)));
             pingDetail.setText(detail);
         } else {
             pingText.setText(getString(R.string.ping_failed, r.error));
+            // CONS-052 PING-02: a refused TCP connect is a failure,
+            // but the measured time is still useful — show it.
+            if (r.rttMs >= 0) {
+                detail += "・応答 " + r.rttMs + "ms";
+            }
             pingDetail.setText(detail);
+        }
+        // CONS-052 PING-06: while a fresh probe is running, say so —
+        // the numbers above are the previous result, with its age.
+        if (PingProber.isProbing()) {
+            pingDetail.setText(pingDetail.getText() + "・計測中");
         }
         pingRow.setContentDescription(
                 pingText.getText() + "。" + pingDetail.getText());
     }
 
-    /** SPEC-PING-001: "たった今" / "N 秒前" / "N 分前" / "N 時間前". */
-    private String formatAge(long measuredAtMs) {
-        long ageSec = (System.currentTimeMillis() - measuredAtMs) / 1000;
+    /** SPEC-PING-001: "たった今" / "N 秒前" / "N 分前" / "N 時間前".
+     * CONS-052 PING-07: elapsedRealtime (monotonic) for the age,
+     * so a system-clock change cannot skew it. */
+    private String formatAge(long measuredAtElapsedMs) {
+        long ageSec = (android.os.SystemClock.elapsedRealtime()
+                - measuredAtElapsedMs) / 1000;
+        if (ageSec < 0) {
+            ageSec = 0;
+        }
         if (ageSec < 5) {
             return getString(R.string.ping_just_now);
         } else if (ageSec < 60) {

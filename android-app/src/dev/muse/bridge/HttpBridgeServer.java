@@ -673,18 +673,6 @@ public class HttpBridgeServer {
     }
 
     private int handle(Socket conn, long lifecycleGeneration) {
-        // SPEC-PING-001: remember the last client IP (the Muse
-        // client's Tailscale address) as the ping target. Loopback
-        // is ignored — local dashboard / Termux connections are
-        // 127.0.0.1. Never fail a request for this.
-        try {
-            String remote = conn.getInetAddress().getHostAddress();
-            if (remote != null && !remote.startsWith("127.")
-                    && !"::1".equals(remote)) {
-                PingProber.setLastClientIp(remote);
-            }
-        } catch (Exception ignored) {
-        }
         String method = "?";
         String path = "?";
         int status = 500;
@@ -777,6 +765,22 @@ public class HttpBridgeServer {
                 status = 401;
                 sendJson(out, status, errorJson("unauthorized"));
                 return status;
+            }
+
+            // SPEC-PING-001 (CONS-052 PING-04/PING-05): remember
+            // the client IP (the Muse client's Tailscale address)
+            // as the ping target — only for authenticated requests,
+            // and only when it is a real peer address (not
+            // loopback, link-local, or multicast). Never fail a
+            // request for this.
+            try {
+                java.net.InetAddress remote = conn.getInetAddress();
+                if (remote != null && !remote.isLoopbackAddress()
+                        && !remote.isLinkLocalAddress()
+                        && !remote.isMulticastAddress()) {
+                    PingProber.setLastClientIp(remote.getHostAddress());
+                }
+            } catch (Exception ignored) {
             }
 
             // Phase 3: Content-Length validation.

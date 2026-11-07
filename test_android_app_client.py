@@ -3149,29 +3149,64 @@ def test_ui002_fix_round_honest_labels_and_accessibility():
 def test_ping001_prober_uses_icmp_with_tcp_fallback():
     """SPEC-PING-001 §2.2: PingProber must try ICMP ping first, fall
     back to a TCP connect timing, run on a background thread, and
-    throttle to at most once per 30 seconds."""
+    throttle to at most once per 30 seconds.
+    CONS-052 fix round: the ICMP process must drain stderr, check
+    the exit code, and time out (PING-01); a refused TCP connect is
+    a failure, not a success (PING-02); at most one probe runs at a
+    time (PING-03/PING-09); the age uses a monotonic clock (PING-07);
+    a changed target drops the old result (PING-10)."""
     src = _java_source("PingProber.java")
     assert "/system/bin/ping" in src
     assert '"-c"' in src
     assert "rtt min/avg/max/mdev" in src
+    assert "ProcessBuilder" in src
+    assert "redirectErrorStream(true)" in src
+    assert "waitFor(" in src
+    assert "exitValue()" in src
     assert "tcp-connect" in src
     assert "new Socket()" in src
     assert "ConnectException" in src
+    assert '"refused"' in src
     assert "new Thread(" in src
     assert "MIN_INTERVAL_MS" in src
     assert "30_000" in src
+    assert "probing" in src
+    assert "isProbing()" in src
+    assert "elapsedRealtime" in src
 
 
 def test_ping001_server_records_client_ip_and_state():
     """SPEC-PING-001 §2.1/§2.4: the server must record the last
-    client IP from the connection (loopback ignored) and /state must
-    carry the probe result as ping_to_client."""
+    client IP from the connection and /state must carry the probe
+    result as ping_to_client.
+    CONS-052 fix round: only authenticated requests set the target
+    (PING-04 — the recording sits after the token check), and the
+    exclusion uses InetAddress (loopback / link-local / multicast,
+    PING-05)."""
     src = _java_source("HttpBridgeServer.java")
     assert "getInetAddress()" in src
     assert "PingProber.setLastClientIp" in src
-    assert '"127."' in src
+    assert "isLoopbackAddress()" in src
+    assert "isLinkLocalAddress()" in src
+    assert "isMulticastAddress()" in src
     assert "ping_to_client" in src
     assert "pingToClientJson" in src
+    # PING-04: the recording must sit AFTER the token check, so an
+    # unauthenticated peer cannot set the ping target.
+    assert src.index("PingProber.setLastClientIp") > src.index(
+        "tokens.currentToken()")
+
+
+def test_ping001_fix_round_display():
+    """CONS-052 fix round: a refused TCP connect shows its measured
+    time in the detail line (PING-02), the display says when a fresh
+    probe is running (PING-06), and the age uses the monotonic
+    clock (PING-07)."""
+    src = _java_source("MainActivity.java")
+    assert "isProbing()" in src
+    assert "応答 " in src
+    assert "formatAge(r.measuredAtElapsedMs)" in src
+    assert "計測中" in src
 
 
 def test_ping001_layout_has_ping_row_and_activity_wires_it():
