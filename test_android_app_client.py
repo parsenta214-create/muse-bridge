@@ -2168,17 +2168,63 @@ def test_widget_provider_never_touches_token():
     assert "KEY_TOKEN" not in src
 
 
-def test_widget_provider_handles_toggle_and_a11y():
-    """W2/W3: onReceive must handle the toggle action (start/stop
-    the service via startForegroundService) and
-    ACTION_A11Y_STATE_CHANGED (refresh), and build its views
-    from the widget layout."""
+def test_widget_provider_handles_a11y_only():
+    """CONS-037 P1: the exported provider must handle ONLY the
+    a11y-state redraw. Handling a toggle action here would let
+    ANY app toggle the service with an explicit broadcast — the
+    toggle lives in the non-exported BridgeWidgetActionReceiver.
+    The provider still builds its views from the widget layout
+    and refreshes on system updates, and its toggle PendingIntent
+    targets the receiver (not this provider)."""
     src = _java_source("BridgeWidgetProvider.java")
-    assert "ACTION_WIDGET_TOGGLE.equals(action)" in src
+    assert "ACTION_WIDGET_TOGGLE.equals(action)" not in src
+    assert "toggleService" not in src
+    assert "startForegroundService(" not in src
+    assert "BridgeWidgetActionReceiver.class" in src
+    assert "BridgeWidgetActionReceiver.ACTION_WIDGET_TOGGLE" in src
     assert "ACTION_A11Y_STATE_CHANGED.equals(action)" in src
-    assert "startForegroundService(" in src
     assert "R.layout.widget_bridge" in src
     assert "updateAllWidgets(context)" in src
+
+
+def test_widget_action_receiver_is_not_exported():
+    """CONS-037 P1: the widget's Start/Stop control path must live
+    in a NON-exported receiver with no intent-filter, so no other
+    app can toggle the service with an explicit broadcast. The
+    exported provider keeps handling only system updates."""
+    src = _manifest_source()
+    assert 'android:name=".BridgeWidgetActionReceiver"' in src
+    start = src.index('android:name=".BridgeWidgetActionReceiver"')
+    end = src.index("/>", start)
+    region = src[start:end]
+    assert 'android:exported="false"' in region
+    assert "intent-filter" not in region
+
+
+def test_widget_action_receiver_handles_toggle_and_failure_check():
+    """CONS-037 P1/P2: the non-exported receiver handles the toggle
+    (start/stop the service via startForegroundService) and, on the
+    start path only, checks after a delay whether the service is
+    running — opening MainActivity if the server failed to start
+    (async bind failure), so the failure is visible instead of
+    showing as merely stopped."""
+    src = _java_source("BridgeWidgetActionReceiver.java")
+    assert "ACTION_WIDGET_TOGGLE.equals(intent.getAction())" in src
+    assert "startForegroundService(" in src
+    assert "stopService(" in src
+    assert "START_FAILURE_CHECK_DELAY_MS" in src
+    assert "BridgeService.isRunning()" in src
+    assert "openMainActivity" in src
+    assert "if (started)" in src
+
+
+def test_widget_action_receiver_never_touches_token():
+    """W5: the action receiver never touches the HTTP API or the
+    token — it talks to the service via Intents only."""
+    src = _java_source("BridgeWidgetActionReceiver.java")
+    assert "getOrCreateToken" not in src
+    assert "currentToken" not in src
+    assert "KEY_TOKEN" not in src
 
 
 def test_widget_updates_pushed_from_service_and_mode_toggle():

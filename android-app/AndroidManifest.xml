@@ -107,7 +107,9 @@
              The ACTION_A11Y_STATE_CHANGED entry works only because
              BridgeAccessibilityService sends that broadcast
              explicitly (setPackage); since API 26 a manifest
-             receiver cannot receive an implicit broadcast. -->
+             receiver cannot receive an implicit broadcast. The
+             Start/Stop toggle does NOT go through this receiver
+             (CONS-037 P1) — see BridgeWidgetActionReceiver below. -->
         <receiver
             android:name=".BridgeWidgetProvider"
             android:exported="true"
@@ -120,5 +122,17 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/bridge_widget_info" />
         </receiver>
+
+        <!-- v2.6.0 fix round (CONS-037 P1): the widget's Start/Stop
+             control path lives in this separate NON-exported
+             receiver. The exported provider above must never handle
+             a control action — any app could send an explicit
+             broadcast to an exported receiver and toggle the
+             service. No intent-filter: only explicit intents from
+             our own app (the widget's PendingIntent, same UID)
+             reach this receiver. -->
+        <receiver
+            android:name=".BridgeWidgetActionReceiver"
+            android:exported="false" />
     </application>
 </manifest>

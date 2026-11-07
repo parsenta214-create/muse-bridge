@@ -6,8 +6,6 @@ import android.appwidget.AppWidgetProvider;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Handler;
-import android.os.Looper;
 import android.widget.RemoteViews;
 
 import java.text.SimpleDateFormat;
@@ -35,6 +33,13 @@ import java.util.Locale;
  * toggle tap (now + ~600 ms delayed, QS-tile pattern — the
  * service flips its flag asynchronously in onCreate/onDestroy).
  *
+ * The Start/Stop control path does NOT live here (CONS-037 P1):
+ * this provider is exported, so handling a toggle action here
+ * would let ANY app toggle the service with an explicit
+ * broadcast. The toggle goes to the non-exported
+ * BridgeWidgetActionReceiver instead; this provider handles only
+ * display + system updates + the a11y-state redraw.
+ *
  * The a11y-state broadcast reaches this provider only because
  * BridgeAccessibilityService sends it explicitly (setPackage):
  * since API 26 a manifest receiver cannot receive an implicit
@@ -43,13 +48,8 @@ import java.util.Locale;
  */
 public class BridgeWidgetProvider extends AppWidgetProvider {
 
-    /** Toggle tap: broadcast back to this provider. */
-    public static final String ACTION_WIDGET_TOGGLE =
-            "dev.muse.bridge.ACTION_WIDGET_TOGGLE";
-
     private static final int REQUEST_TOGGLE = 1;
     private static final int REQUEST_OPEN = 2;
-    private static final long TOGGLE_SETTLE_DELAY_MS = 600;
 
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager,
@@ -65,45 +65,15 @@ public class BridgeWidgetProvider extends AppWidgetProvider {
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? null : intent.getAction();
-        if (ACTION_WIDGET_TOGGLE.equals(action)) {
-            toggleService(context);
-            // The service flips its flag in onCreate/onDestroy,
-            // so refresh now (best effort) and again once it
-            // has settled — same pattern as BridgeTileService.
-            updateAllWidgets(context);
-            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    updateAllWidgets(context);
-                }
-            }, TOGGLE_SETTLE_DELAY_MS);
-            return;
-        }
+        // CONS-037 P1: this exported provider handles ONLY the
+        // a11y-state redraw. The toggle action lives in the
+        // non-exported BridgeWidgetActionReceiver — handling it
+        // here would let any app toggle the service.
         if (BridgeAccessibilityService.ACTION_A11Y_STATE_CHANGED.equals(action)) {
             updateAllWidgets(context);
             return;
         }
         super.onReceive(context, intent);
-    }
-
-    /** Start/stop the foreground BridgeService only — never a11y
-     * (W2/W4: Android requires a11y to be enabled by hand in
-     * Settings). Same fallback as the QS tile (W6): if the
-     * platform refuses the foreground-service start, open the
-     * app so the user can tap Start there. */
-    private void toggleService(Context context) {
-        if (BridgeService.isRunning()) {
-            context.stopService(new Intent(context, BridgeService.class));
-        } else {
-            try {
-                context.startForegroundService(
-                        new Intent(context, BridgeService.class));
-            } catch (Exception e) {
-                Intent openApp = new Intent(context, MainActivity.class);
-                openApp.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                context.startActivity(openApp);
-            }
-        }
     }
 
     /** Refresh every placed widget. Reads only the same state the
@@ -153,9 +123,10 @@ public class BridgeWidgetProvider extends AppWidgetProvider {
                 running ? "停止" : "開始");
         views.setTextViewText(R.id.widget_open_button, "開く");
 
-        // Toggle: broadcast back to this provider.
-        Intent toggle = new Intent(context, BridgeWidgetProvider.class)
-                .setAction(ACTION_WIDGET_TOGGLE);
+        // Toggle: broadcast to the NON-exported action receiver
+        // (CONS-037 P1) — never to this exported provider.
+        Intent toggle = new Intent(context, BridgeWidgetActionReceiver.class)
+                .setAction(BridgeWidgetActionReceiver.ACTION_WIDGET_TOGGLE);
         PendingIntent togglePending = PendingIntent.getBroadcast(
                 context, REQUEST_TOGGLE, toggle,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
