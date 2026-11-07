@@ -293,3 +293,18 @@
   - 「previous STOPPED record failed」の永続化（P1-C）：BridgeLog.log() が真偽値を返すようにし、STOPPED 記録の失敗時に SharedPreferences（MainActivity.PREFS）にフラグを保存し、次回起動時に報告する。
   - T-31〜T-38 の競合試験は、リポジトリに Java 単体テスト基盤がないため、実機確認とライブ検証で代替する。VpnBindSelector は Android 非依存の純粋関数として分離済みで、将来の単体テストが可能。
 - ライブ確認（§5.5）はインストール後に実施し、結果をここに記録する。
+
+## ライブ確認 — 2026-11-08 05:05–05:06 +07（v2.8.6、サイガマンがインストール）
+
+- ヘルスチェック：status up、app 2.8.6/52、a11y true。全レイヤー ok（proxy 3 ms、tailscale 451 ms、bridge 637 ms）。/health は HEALTHY（http HEALTHY、tailscale HEALTHY、a11y ENABLED、notification_access GRANTED）。
+- ログエクスポート（サイガマンが送付した `bridge-log-20261108-050501_2_k2h8.txt`、exported 05:05:05）：
+  - LOG-01：時刻順になっている（前回 04:47–05:04 → 現行 05:04–05:05）。前回セクションの開始時刻は "unknown"（v2.8.5 には run-meta がないため、想定通りのフォールバック）。現行セクションの開始時刻は "2026-11-08 05:04:41"。
+  - LOG-02：`ifaces rmnet0:100.72.*.*, lo:127.0.*.*, tun0:100.111.*.*`、`listen tun0 100.111.*.*:8080`、`listen lo 127.0.*.*:8080`、`bind-summary bound=2 excluded=1 failed=0 (tailscale bound) (loopback bound)`。インターフェース名付き。
+  - BIND-01：CGNAT（rmnet0、100.72.*.*）は excluded=1 で除外され、Tailscale（tun0、100.111.*.*）に bind された。インターフェース名は "tun0" であり、"tailscale0" ではないことが実機で確認された（SPEC の前提通り）。これが 2026-11-08 の障害（CGNAT 100.68.*.* への誤 bind）の修正である。
+  - BIND-02：`server RUNNING`（Tailscale に bind されたため DEGRADED ではない）。
+  - LOG-04：現行のログは通知行がまばら（posted 05:04:43、removed 05:06:01 のみ）。前回の flood（約 10–20 秒間隔の updated）が現行では出ていない。スロットルが機能している。
+  - LOG-05：VM からの接続で `[11-08 05:05:46] client-first 100.84.*.*` が 1 回だけ記録された（VM の Tailscale IP 100.84.58.110、マスク済み）。
+- ping_to_client：/state では null。PingProber.probe() は MainActivity の UI から呼ばれるもので、VM からの接続では起動しない。v2.8.5 で確認済み（364 ms）のコードは v2.8.6 で変更していないため、回帰ではない。アプリを開けば表示される。
+- 未確認（再起動サイクルが必要なため、次回に持ち越し）：
+  - LOG-03：STOPPED 行に理由が付くこと（停止→再起動が必要）。
+  - BIND-02：Tailscale 切断状態での起動で DEGRADED になること（Tailscale の ON/OFF と再起動が必要）。
