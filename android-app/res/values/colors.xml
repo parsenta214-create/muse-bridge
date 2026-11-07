@@ -8,4 +8,7 @@
     <color name="status_bad">#C62828</color>
     <color name="status_warn">#EF6C00</color>
     <color name="status_neutral">#757575</color>
+    <!-- SPEC-UI-001 v2.6.2 (GPT CONS-047 P1): disabled buttons keep a
+         readable medium-grey text instead of fading away. -->
+    <color name="button_disabled_text">#616161</color>
 </resources>

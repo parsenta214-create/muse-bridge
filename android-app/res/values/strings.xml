@@ -11,9 +11,9 @@
     <string name="btn_accessibility">アクセシビリティ設定を開く</string>
     <string name="btn_mode_minimal">銀行安全モード：オフ — タップでオン</string>
     <string name="btn_mode_banking_safe">銀行安全モード：オン — タップでオフ</string>
-    <!-- SPEC-UI-001 fix: while a11y is on, the effective mode is FULL ACCESS, so the button says when the persisted mode applies. -->
-    <string name="btn_mode_minimal_a11y_on">銀行安全モード：オフ（アクセシビリティOFF時に適用）— タップでオン</string>
-    <string name="btn_mode_banking_safe_a11y_on">銀行安全モード：オン（アクセシビリティOFF時に適用）— タップでオフ</string>
+    <!-- SPEC-UI-001 fix: while a11y is on, the effective mode is FULL ACCESS, so the button says when the persisted mode applies. v2.6.2: deliberate two-line structure (GPT CONS-047 P0) so the wrap point is controlled. -->
+    <string name="btn_mode_minimal_a11y_on">銀行安全モード：オフ\nアクセシビリティOFF時に適用・タップでオン</string>
+    <string name="btn_mode_banking_safe_a11y_on">銀行安全モード：オン\nアクセシビリティOFF時に適用・タップでオフ</string>
     <string name="btn_notification">通知アクセス設定を開く</string>
     <string name="btn_add_tile">クイック設定に追加</string>
     <string name="tile_label">Muse Bridge</string>
@@ -45,4 +45,7 @@
     <string name="status_note_a11y_minimal">設定を開いてオンにしてください</string>
     <string name="status_note_notif">設定を開いてオンにしてください</string>
     <string name="token_toggle_hint">タップで表示／非表示を切り替えます</string>
+    <!-- SPEC-UI-001 v2.6.2 (GPT CONS-047 P1): explicit show/hide affordance next to the token. -->
+    <string name="token_show">表示</string>
+    <string name="token_hide">非表示</string>
 </resources>

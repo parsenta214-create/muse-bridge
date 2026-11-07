@@ -49,12 +49,17 @@ public class MainActivity extends Activity {
     private TextView notifStatusValue;
     private TextView addressText;
     private TextView tokenText;
+    private TextView tokenToggleLabel;
     private TextView versionText;
     private Button modeButton;
     private Button startButton;
     private Button stopButton;
     private Button a11yButton;
     private Button notifButton;
+    /** SPEC-UI-001 v2.6.2: enabled text colours, captured once so
+     * refresh() can restore them after setting the disabled colour. */
+    private int a11yButtonDefaultTextColor;
+    private int notifButtonDefaultTextColor;
     /** SPEC-UI-001: the token is masked by default; tap to reveal. */
     private boolean tokenRevealed = false;
 
@@ -210,14 +215,19 @@ public class MainActivity extends Activity {
         tokenText = findViewById(R.id.token_text);
         versionText = findViewById(R.id.version_text);
 
-        // SPEC-UI-001: tap the token to toggle masked / revealed.
-        tokenText.setOnClickListener(new View.OnClickListener() {
+        // SPEC-UI-001: tap the token (or the show/hide label) to
+        // toggle masked / revealed. v2.6.2: the label makes the
+        // affordance explicit (GPT CONS-047 P1).
+        View.OnClickListener tokenToggle = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
                 tokenRevealed = !tokenRevealed;
                 refreshToken();
             }
-        });
+        };
+        tokenText.setOnClickListener(tokenToggle);
+        tokenToggleLabel = findViewById(R.id.token_toggle_label);
+        tokenToggleLabel.setOnClickListener(tokenToggle);
 
         startButton = findViewById(R.id.start_button);
         stopButton = findViewById(R.id.stop_button);
@@ -293,6 +303,10 @@ public class MainActivity extends Activity {
                 refresh();
             }
         });
+        // SPEC-UI-001 v2.6.2: remember the enabled text colours so
+        // refresh() can restore them after setting the disabled colour.
+        a11yButtonDefaultTextColor = a11yButton.getCurrentTextColor();
+        notifButtonDefaultTextColor = notifButton.getCurrentTextColor();
         refresh();
     }
 
@@ -429,12 +443,18 @@ public class MainActivity extends Activity {
                 notifGranted ? null : getString(R.string.status_note_notif));
 
         // SPEC-UI-001: only the action that applies is shown/enabled.
+        // v2.6.2 (GPT CONS-047 P1): a disabled button keeps a readable
+        // medium-grey text instead of fading away (no alpha dim).
         startButton.setVisibility(running ? View.GONE : View.VISIBLE);
         stopButton.setVisibility(running ? View.VISIBLE : View.GONE);
         a11yButton.setEnabled(!a11yOn);
-        a11yButton.setAlpha(a11yOn ? 0.5f : 1.0f);
+        a11yButton.setTextColor(a11yOn
+                ? getColor(R.color.button_disabled_text)
+                : a11yButtonDefaultTextColor);
         notifButton.setEnabled(!notifGranted);
-        notifButton.setAlpha(notifGranted ? 0.5f : 1.0f);
+        notifButton.setTextColor(notifGranted
+                ? getColor(R.color.button_disabled_text)
+                : notifButtonDefaultTextColor);
 
         // P0-2 (v2.0): the mode button shows the persisted mode
         // (what applies when a11y is off) and what a tap does.
@@ -464,6 +484,8 @@ public class MainActivity extends Activity {
     private void refreshToken() {
         String token = getOrCreateToken(this);
         tokenText.setText(tokenRevealed ? token : maskToken(token));
+        // v2.6.2 (GPT CONS-047 P1): the label says what a tap does.
+        tokenToggleLabel.setText(tokenRevealed ? R.string.token_hide : R.string.token_show);
     }
 
     private static String maskToken(String token) {
