@@ -1,9 +1,13 @@
 package dev.muse.bridge;
 
 import android.content.Context;
+import android.system.ErrnoException;
+import android.system.Os;
+import android.system.OsConstants;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.FileWriter;
@@ -161,6 +165,78 @@ public class BridgeLog {
         } catch (Exception ignored) {
             // Metadata loss is acceptable; the log still works.
         }
+    }
+
+    /**
+     * SPEC-DRIVE-001: crash-resistant atomic write shared by the
+     * log-folder feature (folder URI, request-code counter, init
+     * marker, URI registry). Write to a temp file in the same
+     * directory, sync it, rename over the target with Os.rename,
+     * then sync the parent directory so the rename itself
+     * survives a crash. Returns true only when every step
+     * (including the directory sync) succeeded. A false result
+     * means the caller must assume the old file is still the
+     * stored one — or that the state is uncertain and must be
+     * re-read before deciding.
+     */
+    static boolean atomicWriteText(File dir, String fileName, String content) {
+        if (dir == null || fileName == null || content == null) {
+            return false;
+        }
+        File tmp = new File(dir, fileName + ".tmp");
+        File target = new File(dir, fileName);
+        FileOutputStream fos = null;
+        try {
+            fos = new FileOutputStream(tmp);
+            fos.write(content.getBytes(StandardCharsets.UTF_8));
+            fos.getFD().sync();
+            fos.close();
+            fos = null;
+            Os.rename(tmp.getAbsolutePath(), target.getAbsolutePath());
+            return fsyncDirectory(dir);
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (fos != null) {
+                try {
+                    fos.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    /**
+     * SPEC-DRIVE-001: sync a directory's metadata so a rename or
+     * delete in it survives a crash. Best effort: returns false
+     * when the directory cannot be opened or synced, and the
+     * caller treats the persistence as unconfirmed.
+     */
+    static boolean fsyncDirectory(File dir) {
+        if (dir == null) {
+            return false;
+        }
+        FileDescriptor fd = null;
+        try {
+            fd = Os.open(dir.getAbsolutePath(), OsConstants.O_RDONLY, 0);
+            Os.fsync(fd);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        } finally {
+            if (fd != null) {
+                try {
+                    Os.close(fd);
+                } catch (ErrnoException ignored) {
+                }
+            }
+        }
+    }
+
+    /** SPEC-DRIVE-001: the run-meta file, for the first-init
+     * "no other app-owned state" check. Package-private. */
+    static File runMetaFile(Context ctx) {
+        return new File(ctx.getFilesDir(), RUN_META_NAME);
     }
 
     /** One log line: "[MM-dd HH:mm:ss] EVENT detail". Returns

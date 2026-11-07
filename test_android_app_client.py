@@ -3058,3 +3058,981 @@ def test_plain_actions_do_not_send_operation_end(mock_app):
     adapter.launch_app("com.twitter.android")
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert not [r for r in posts if r[1] == "/operation_end"]
+
+
+# ----------------------------------------------------------------------
+# SPEC-DRIVE-001 (v2.9.0): log export to a user-chosen folder (SAF).
+# Source-level guards. Honest limit (as with the widget/ping guards):
+# these check that the code contains the specified mechanism; the
+# actual Drive behaviour (D-01..D-10) is verified live on the phone.
+# ----------------------------------------------------------------------
+
+def _drive_log():
+    return _java_source("LogActivity.java")
+
+
+def _drive_registry():
+    return _java_source("UriPermissionRegistry.java")
+
+
+def test_drive001_t01_folder_pick_uses_document_tree():
+    """T-01: the folder pick uses ACTION_OPEN_DOCUMENT_TREE and
+    takePersistableUriPermission."""
+    src = _drive_log()
+    assert "ACTION_OPEN_DOCUMENT_TREE" in src
+    assert "takePersistableUriPermission" in src
+
+
+def test_drive001_t02_auto_save_creates_document():
+    """T-02: a saved folder writes via createDocument."""
+    src = _drive_log()
+    assert "DocumentsContract.createDocument" in src
+    assert "buildDocumentUriUsingTree" in src
+
+
+def test_drive001_t03_no_folder_falls_back_to_picker():
+    """T-03: without a saved folder the export falls back to
+    ACTION_CREATE_DOCUMENT."""
+    src = _drive_log()
+    assert "ACTION_CREATE_DOCUMENT" in src
+    assert "KIND_FALLBACK_EXPORT" in src
+
+
+def test_drive001_t04_failure_classification():
+    """T-04: auto-save failures are classified (DRIVE-06) using
+    the persisted-permission check and a two-query parent check."""
+    src = _drive_log()
+    assert "classifyAutoSaveFailure" in src
+    assert "getPersistedUriPermissions" in src
+    assert src.count("COLUMN_DOCUMENT_ID") >= 1
+
+
+def test_drive001_t05_clear_releases_permission():
+    """T-05: clearing the folder releases the permission through
+    the registry (releasePersistableUriPermission)."""
+    reg = _drive_registry()
+    assert "releasePersistableUriPermission" in reg
+    assert "releaseIfUnused" in reg
+    src = _drive_log()
+    assert "releaseIfUnused" in src
+
+
+def test_drive001_t06_no_drive_api_or_oauth():
+    """T-06: no Drive API, OAuth, or Google Sign-In anywhere in
+    the folder feature."""
+    for src in (_drive_log(), _drive_registry()):
+        # The words appear in explanatory comments; the guard is
+        # that no Drive/OAuth API is actually used.
+        assert "drive.googleapis" not in src
+        assert "GoogleSignIn" not in src
+        assert "DriveService" not in src
+        assert "GoogleAccountCredential" not in src
+        assert "com.google.api" not in src
+        assert "import com.google" not in src
+
+
+def test_drive001_t07_folder_uri_in_dedicated_atomic_file():
+    """T-07: the folder URI lives in its own file, written
+    atomically; no SharedPreferences for it."""
+    src = _drive_log()
+    assert 'FOLDER_URI_NAME = "log_folder_uri"' in src
+    assert "atomicWriteText" in src
+    assert "SharedPreferences" not in src
+
+
+def test_drive001_t08_granted_flags_checked():
+    """T-08: the folder-pick result checks the granted READ,
+    WRITE and PERSISTABLE flags from the result intent."""
+    src = _drive_log()
+    assert "data.getFlags()" in src
+    assert "FLAG_GRANT_READ_URI_PERMISSION" in src
+    assert "FLAG_GRANT_WRITE_URI_PERMISSION" in src
+    assert "FLAG_GRANT_PERSISTABLE_URI_PERMISSION" in src
+
+
+def test_drive001_t09_parent_uri_built_from_tree():
+    """T-09: the parent document URI is built with
+    buildDocumentUriUsingTree(treeUri, getTreeDocumentId(treeUri))."""
+    src = _drive_log()
+    assert "getTreeDocumentId" in src
+    assert "buildDocumentUriUsingTree" in src
+
+
+def test_drive001_t10_same_uri_reselect_keeps_permission():
+    """T-10: re-picking the same folder never releases its
+    permission (same-URI guard before releaseIfUnused)."""
+    src = _drive_log()
+    assert "!oldUri.equals(uriString)" in src
+
+
+def test_drive001_t11_write_failure_keeps_old_folder():
+    """T-11: when the settings write fails, the old folder and
+    its permission stay (release happens only after a
+    successful atomic write)."""
+    src = _drive_log()
+    assert "handleFolderWriteFailed" in src
+    start = src.index("handleFolderWriteFailed")
+    region = src[start:start + 2500]
+    assert "unregister" in region
+    # The success path releases the old permission only after
+    # atomicWriteText returned true.
+    ok = src.index('atomicWriteText(getFilesDir(), FOLDER_URI_NAME,')
+    after = src[ok:ok + 800]
+    assert "releaseIfUnused" in after
+
+
+def test_drive001_t12_ioexception_keeps_folder():
+    """T-12: an IOException during the failure classification
+    keeps the folder (classify returns false on any exception)."""
+    src = _drive_log()
+    start = src.index("private boolean classifyAutoSaveFailure")
+    region = src[start:start + 2600]
+    assert "catch (Exception ignored)" in region
+    assert "return false" in region
+
+
+def test_drive001_t13_open_output_stream_null_is_failure():
+    """T-13: a null openOutputStream is a write failure."""
+    src = _drive_log()
+    assert "openOutputStream(writeTarget)" in src
+    assert "openOutputStream returned null" in src
+
+
+def test_drive001_t14_incomplete_file_deleted():
+    """T-14: a failed write deletes the half-written document
+    (deleteDocument, best-effort, never hiding the error)."""
+    src = _drive_log()
+    assert "deleteCreatedBestEffort" in src
+    assert "DocumentsContract.deleteDocument" in src
+
+
+def test_drive001_t15_permission_checked_before_release():
+    """T-15: releaseIfUnused checks the persisted permissions
+    before releasing anything."""
+    reg = _drive_registry()
+    assert "getPersistedUriPermissions" in reg
+    assert "isWritePermission" in reg
+
+
+def test_drive001_t18_persistable_flag_missing_refuses():
+    """T-18: a folder pick without the PERSISTABLE grant is
+    refused (toast, old folder kept)."""
+    src = _drive_log()
+    start = src.index("private void handleFolderPicked")
+    region = src[start:start + 1200]
+    assert "persistOk" in region
+    assert "toast_log_folder_no_write" in region
+
+
+def test_drive001_t19_folder_write_failure_keeps_old_permission():
+    """T-19: when the folder-file write fails, the old
+    permission is not released (only the new registration is
+    removed, and only when that removal succeeds)."""
+    src = _drive_log()
+    start = src.index("handleFolderWriteFailed")
+    region = src[start:start + 1800]
+    assert "releasePermissionBestEffort" in region
+    assert "unregister" in region
+
+
+def test_drive001_t20_clear_persistence_failure_keeps_permission():
+    """T-20: when the clear marker cannot be persisted, the
+    clear aborts before deleting anything (permission kept)."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 1200]
+    assert "toast_log_folder_clear_failed" in region
+    assert "atomicWriteText(getFilesDir(), CLEAR_PENDING_NAME" in region
+
+
+def test_drive001_t21_security_exception_keeps_folder():
+    """T-21: a SecurityException alone never clears the folder
+    (the classification catch returns keep)."""
+    src = _drive_log()
+    start = src.index("private boolean classifyAutoSaveFailure")
+    region = src[start:start + 2600]
+    assert "catch (Exception ignored)" in region
+    assert "return false" in region
+
+
+def test_drive001_t22_file_not_found_keeps_folder():
+    """T-22: a FileNotFoundException alone never clears the
+    folder (same classification catch as T-21)."""
+    src = _drive_log()
+    start = src.index("private boolean classifyAutoSaveFailure")
+    region = src[start:start + 2600]
+    assert "catch (Exception ignored)" in region
+    assert "return false" in region
+
+
+def test_drive001_t23_double_tap_guarded():
+    """T-23: a second tap while a save is running is ignored
+    (beginOperation returns -1 outside IDLE). Source-level
+    guard only — true JVM concurrency cannot be exercised
+    from this harness."""
+    src = _drive_log()
+    assert "beginOperation(OpState.IDLE, OpState.WRITING)" in src
+    assert "if (opId < 0)" in src
+
+
+def test_drive001_t24_save_possible_after_failure():
+    """T-24: after a failure the operation is always released
+    (endOperation in finally), so the next save can start."""
+    src = _drive_log()
+    start = src.index("private void writeLogToUriInBackground")
+    region = src[start:start + 2600]
+    assert "finally" in region
+    assert "endOperation(opId)" in region
+
+
+def test_drive001_t25_no_stale_view_ops_after_destroy():
+    """T-25: completion notifications check isFinishing /
+    isDestroyed and go through a WeakReference."""
+    src = _drive_log()
+    assert "WeakReference<LogActivity> resumedActivity" in src
+    assert "isFinishing()" in src
+    assert "isDestroyed()" in src
+
+
+def test_drive001_t26_delete_attempted_on_null_stream():
+    """T-26: when openOutputStream returns null, the created
+    document is still deleted (the outer catch runs
+    deleteCreatedBestEffort)."""
+    src = _drive_log()
+    start = src.index("private void writeLogToUriInBackground")
+    region = src[start:start + 2600]
+    assert "deleteCreatedBestEffort" in region
+    assert "openOutputStream returned null" in region
+
+
+def test_drive001_t27_parent_absence_vs_transient_failure():
+    """T-27: parent absence is confirmed by two independent
+    queries (with a pause between them); a single failure
+    keeps the folder."""
+    src = _drive_log()
+    start = src.index("private boolean classifyAutoSaveFailure")
+    region = src[start:start + 2600]
+    assert "for (int i = 0; i < 2; i++)" in region
+    assert "Thread.sleep(500)" in region
+    assert "emptyCount == 2" in region
+
+
+def test_drive001_t28_memory_and_disk_uri_agree():
+    """T-28: the saved URI is always re-read from disk
+    (readFolderUri), never trusted from a stale in-memory copy."""
+    src = _drive_log()
+    assert "readFolderUri()" in src
+    assert "private String readFolderUriString()" in src
+
+
+def test_drive001_t29_fallback_cancel_releases_state():
+    """T-29: cancelling the fallback picker releases the
+    operation (endOperation + UI sync)."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    assert "User cancelled" in region
+    assert "endOperation(req.opId)" in region
+
+
+def test_drive001_t30_state_is_static_and_shared():
+    """T-30: the operation state is static, so a recreated
+    activity sees the same state."""
+    src = _drive_log()
+    assert "private static OpState state" in src
+    assert "private static long currentOpId" in src
+    assert "private static final Map<Integer, PickerRequest>" in src
+
+
+def test_drive001_t31_change_clear_save_share_exclusion():
+    """T-31: change, clear and save all go through the same
+    beginOperation / SAVE_LOCK exclusion."""
+    src = _drive_log()
+    assert "beginOperation(OpState.IDLE, OpState.PICKER_PENDING)" in src
+    assert "beginOperation(OpState.IDLE, OpState.WRITING)" in src
+    assert src.count("beginOperation(OpState.IDLE") >= 3
+
+
+def test_drive001_t32_same_uri_save_failure_keeps_permission():
+    """T-32: when the new URI equals the old one, a write
+    failure never releases the permission."""
+    src = _drive_log()
+    start = src.index("handleFolderWriteFailed")
+    region = src[start:start + 1800]
+    assert "if (!newUri.equals(oldUri))" in region
+
+
+def test_drive001_t33_atomic_write_pattern():
+    """T-33: atomic write is temp + fsync + Os.rename + parent
+    dir fsync (BridgeLog.atomicWriteText)."""
+    src = _java_source("BridgeLog.java")
+    start = src.index("static boolean atomicWriteText")
+    region = src[start:start + 1600]
+    assert 'fileName + ".tmp"' in region
+    assert "getFD().sync()" in region
+    assert "Os.rename(" in region
+    assert "fsyncDirectory(dir)" in region
+
+
+def test_drive001_t34_three_way_folder_read():
+    """T-34: the saved-folder read distinguishes OK / MISSING /
+    ERROR (FolderKind)."""
+    src = _drive_log()
+    assert "enum FolderKind" in src
+    assert "OK, MISSING, ERROR" in src
+
+
+def test_drive001_t35_recreation_never_stuck():
+    """T-35: a recreated activity cannot stay stuck in
+    PICKER_PENDING/WRITING — the timeout and the finally
+    release bound every operation."""
+    src = _drive_log()
+    assert "checkPickerTimeout" in src
+    assert "finally" in src
+    assert "PICKER_TIMEOUT_MS" in src
+
+
+def test_drive001_t36_dir_fsync_failure_keeps_old_permission():
+    """T-36: a directory-sync failure makes the atomic write
+    fail, so the old permission is not released."""
+    src = _drive_log()
+    assert "atomicWriteText" in src
+    bridge = _java_source("BridgeLog.java")
+    start = bridge.index("static boolean atomicWriteText")
+    region = bridge[start:start + 1600]
+    assert "return fsyncDirectory(dir)" in region
+
+
+def test_drive001_t37_state_machine_with_op_id():
+    """T-37: the state machine carries an op id; a stale
+    callback cannot clear a newer operation."""
+    src = _drive_log()
+    assert "req.opId != currentOpId" in src
+    assert "private static boolean transition" in src
+
+
+def test_drive001_t38_lock_not_held_during_async_work():
+    """T-38: SAVE_LOCK is never held during the background
+    write — the write thread only calls endOperation /
+    notifySaveFinished (which take the lock briefly)."""
+    src = _drive_log()
+    start = src.index("new Thread(new Runnable()")
+    region = src[start:start + 2600]
+    assert "synchronized (SAVE_LOCK)" not in region
+    assert "synchronized(SAVE_LOCK)" not in region
+
+
+def test_drive001_t39_strict_absence_check():
+    """T-39: absence is decided by Os.stat + ENOENT, never by
+    File.exists() alone."""
+    src = _drive_log()
+    assert "Os.stat(f.getAbsolutePath())" in src
+    assert "OsConstants.ENOENT" in src
+    # No File.exists() decision for the folder/counter/marker
+    # (the phrase appears in one explanatory comment, stripped
+    # here before checking).
+    code = "\n".join(
+        line for line in src.splitlines()
+        if not line.strip().startswith(("*", "//")))
+    assert ".exists()" not in code
+    reg = _drive_registry()
+    assert "Os.stat(" in reg
+    assert "OsConstants.ENOENT" in reg
+    reg_code = "\n".join(
+        line for line in reg.splitlines()
+        if not line.strip().startswith(("*", "//")))
+    assert ".exists()" not in reg_code
+
+
+def test_drive001_t40_ui_sync_on_create_and_resume():
+    """T-40: the UI is resynced from the static state in both
+    onCreate and onResume."""
+    src = _drive_log()
+    assert "syncUiFromState()" in src
+    assert src.count("syncUiFromState();") >= 3
+
+
+def test_drive001_t41_rename_ok_dir_fsync_fail_rereads():
+    """T-41: after a rename-OK / dir-fsync-fail, the stored
+    file is re-read instead of assuming the old file."""
+    src = _drive_log()
+    start = src.index("handleFolderWriteFailed")
+    region = src[start:start + 1800]
+    assert "readFolderUriString()" in region
+    assert "stored.equals(oldUri)" in region
+
+
+def test_drive001_t42_fsync_failure_keeps_both_permissions():
+    """T-42: on a sync failure both the old and the new
+    permission are kept until the state is certain."""
+    src = _drive_log()
+    start = src.index("handleFolderWriteFailed")
+    region = src[start:start + 1800]
+    assert "keep BOTH" in region
+    assert "keep the new permission (uncertain)" in region
+
+
+def test_drive001_t43_late_result_no_effect():
+    """T-43: a late picker result cannot affect a newer
+    operation (op id + map checks first)."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    assert "req.opId != currentOpId" in region
+    assert "requestCodeToOpId.remove(requestCode)" in region
+
+
+def test_drive001_t44_mapping_survives_recreation():
+    """T-44: the requestCode -> op id map is static, so it
+    survives activity recreation."""
+    src = _drive_log()
+    assert "private static final Map<Integer, PickerRequest>" in src
+    assert "private static int currentPickerRequestCode" in src
+
+
+def test_drive001_t45_transition_under_exclusion():
+    """T-45: the PICKER_PENDING -> WRITING transition runs
+    inside the same SAVE_LOCK section as the checks."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    assert "synchronized (SAVE_LOCK)" in region
+    assert "transition(OpState.PICKER_PENDING, req.opId," in region
+    assert "OpState.WRITING" in region
+
+
+def test_drive001_t46_absence_vs_io_error():
+    """T-46: file absence (ENOENT) and I/O errors (EACCES/EIO)
+    are distinct FileState values."""
+    src = _drive_log()
+    assert "enum FileState" in src
+    assert "EXISTS, NOT_EXISTS, UNKNOWN" in src
+
+
+def test_drive001_t47_recreated_activity_syncs_on_finish():
+    """T-47: the completion notification resyncs the resumed
+    activity from the static state (not from the notification)."""
+    src = _drive_log()
+    start = src.index("private void notifySaveFinished")
+    region = src[start:start + 1200]
+    assert "syncUiFromState()" in region
+    assert "resumedActivity" in region
+
+
+def test_drive001_t48_process_death_no_stale_state():
+    """T-48: after a process death the static state is fresh,
+    so an unknown requestCode is ignored in onActivityResult."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 1200]
+    assert "req == null" in region
+    assert "unknown or already invalidated" in region
+
+
+def test_drive001_t49_clear_order_marker_then_delete_then_release():
+    """T-49: clear writes the marker, deletes the settings
+    file, syncs the dir, then releases (doClearFolder order)."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    marker = region.index("CLEAR_PENDING_NAME")
+    delete = region.index("settings.delete()")
+    release = region.index("releaseIfUnused")
+    assert marker < delete < release
+
+
+def test_drive001_t50_result_handling_one_lock_section():
+    """T-50: the whole result-handling check sequence runs in
+    one SAVE_LOCK section (map lookup, op id, state, deadline,
+    removal, transition)."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    assert region.count("synchronized (SAVE_LOCK)") == 1
+    assert "requestCodeToOpId.get(requestCode)" in region
+    assert "transition(OpState.PICKER_PENDING" in region
+
+
+def test_drive001_t51_map_entry_removed_on_all_exits():
+    """T-51: the map entry is removed on every exit path
+    (normal, cancel, launch failure, timeout, abnormal)."""
+    src = _drive_log()
+    assert src.count("requestCodeToOpId.remove(") >= 4
+    assert src.count("removePickerRequest(") >= 2
+
+
+def test_drive001_t52_begin_transition_separation():
+    """T-52: beginOperation (new op) and transition (existing
+    op) are separate methods with distinct roles."""
+    src = _drive_log()
+    assert "private static long beginOperation" in src
+    assert "private static boolean transition" in src
+    assert "private static void endOperation" in src
+
+
+def test_drive001_t53_picker_timeout_ten_minutes():
+    """T-53: PICKER_TIMEOUT_MS is 10 minutes; a timeout is
+    recovery, and a late result is ignored."""
+    src = _drive_log()
+    assert "PICKER_TIMEOUT_MS = 10 * 60 * 1000" in src
+    assert "toast_picker_timeout" in src
+
+
+def test_drive001_t54_late_result_refused_idle():
+    """T-54: a result arriving after the 10-minute deadline is
+    refused and the state returns to IDLE."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    assert "PICKER_TIMEOUT_MS" in region
+    assert "endOperation(req.opId)" in region
+
+
+def test_drive001_t55_timeout_vs_callback_single_winner():
+    """T-55: the timeout path and the result callback share one
+    SAVE_LOCK section, so only one of them wins."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    assert region.count("synchronized (SAVE_LOCK)") == 1
+    start2 = src.index("private void checkPickerTimeout")
+    region2 = src[start2:start2 + 1200]
+    assert "synchronized (SAVE_LOCK)" in region2
+
+
+def test_drive001_t56_op_id_mismatch_keeps_current_op():
+    """T-56: on an op id mismatch only that map entry is
+    removed; the current operation is untouched."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 1200]
+    assert "req.opId != currentOpId" in region
+    assert "Stale result" in region
+
+
+def test_drive001_t57_request_code_exhaustion_refuses():
+    """T-57: requestCode exhaustion (beyond 65535) refuses the
+    launch and leaves the state IDLE."""
+    src = _drive_log()
+    start = src.index("allocateRequestCode")
+    region = src[start:start + 1400]
+    assert "REQUEST_CODE_MAX" in region
+    assert "return -1" in region
+
+
+def test_drive001_t58_next_launch_releases_only_orphans():
+    """T-58: the next-launch check releases only orphaned
+    permissions (registry reconcile + clear-marker handling),
+    never a bulk release."""
+    src = _drive_log()
+    assert "startupConsistencyCheck" in src
+    assert "UriPermissionRegistry.reconcile" in src
+    assert "getPersistedUriPermissions" in src
+    reg = _drive_registry()
+    assert "public static void reconcile" in reg
+
+
+def test_drive001_t59_allowed_transition_combinations():
+    """T-59: beginOperation only from IDLE; transition only
+    PICKER_PENDING -> WRITING; endOperation only to IDLE."""
+    src = _drive_log()
+    assert "if (state != expected)" in src
+    assert "transition(OpState.PICKER_PENDING, req.opId," in src
+    start = src.index("private static void endOperation")
+    region = src[start:start + 400]
+    assert "state = OpState.IDLE" in region
+
+
+def test_drive001_t60_old_process_code_no_effect():
+    """T-60: a requestCode issued by an old process has no
+    effect after a restart (unknown code ignored; the
+    persistent counter never reuses a code)."""
+    src = _drive_log()
+    assert "req == null" in src
+    assert 'COUNTER_NAME = "request_code_counter"' in src
+
+
+def test_drive001_t61_no_reuse_after_restart():
+    """T-61: the counter is persistent and the reservation is
+    written before the map registration, so no code is reused
+    across restarts."""
+    src = _drive_log()
+    start = src.index("allocateRequestCode")
+    region = src[start:start + 1400]
+    write = region.index("atomicWriteText")
+    put = region.index("requestCodeToOpId.put")
+    assert write < put
+
+
+def test_drive001_t62_mismatch_checked_before_deadline():
+    """T-62: the op id / state check runs before the deadline
+    check, so a mismatched result cannot time out the current
+    operation."""
+    src = _drive_log()
+    start = src.index("protected void onActivityResult")
+    region = src[start:start + 2600]
+    mismatch = region.index("req.opId != currentOpId")
+    deadline = region.index("PICKER_TIMEOUT_MS")
+    assert mismatch < deadline
+
+
+def test_drive001_t63_marker_before_settings_delete():
+    """T-63: the clear marker is created (and synced) before
+    the settings file is deleted."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    marker = region.index("CLEAR_PENDING_NAME")
+    delete = region.index("settings.delete()")
+    assert marker < delete
+
+
+def test_drive001_t64_eacces_not_mistaken_for_absence():
+    """T-64: EACCES/EIO is never mistaken for absence (statFile
+    returns UNKNOWN, never NOT_EXISTS, for other errnos)."""
+    src = _drive_log()
+    start = src.index("private static FileState statFile")
+    region = src[start:start + 600]
+    assert "OsConstants.ENOENT" in region
+    assert "UNKNOWN" in region
+
+
+def test_drive001_t65_corrupt_counter_refuses_picker():
+    """T-65: a corrupt counter refuses the picker launch
+    (allocate returns -1; the init gate requires OK)."""
+    src = _drive_log()
+    assert "ReadKind.CORRUPT" in src
+    assert "c.kind != ReadKind.OK" in src
+    assert "marker.kind == ReadKind.OK && counter.kind == ReadKind.OK" in src
+
+
+def test_drive001_t66_counter_missing_with_state_refuses():
+    """T-66: a missing counter while a folder/marker exists
+    refuses the picker (abnormal state, no auto-reset)."""
+    src = _drive_log()
+    start = src.index("public static void ensureDriveInit")
+    region = src[start:start + 3600]
+    assert "never auto-resets to 1000" in region
+    assert "checkDriveInitOk" in src
+
+
+def test_drive001_t67_first_init_random_epoch():
+    """T-67: the first init starts the counter from a random
+    epoch (SecureRandom), not from a fixed 1000."""
+    src = _drive_log()
+    assert "SecureRandom" in src
+    assert "EPOCH_MAX" in src
+    assert "REQUEST_CODE_MIN + new SecureRandom()" in src
+
+
+def test_drive001_t68_persist_first_then_register_then_launch():
+    """T-68: the code is reserved persistently first, then
+    registered in the map, then the picker launches — a failed
+    launch never reuses the code."""
+    src = _drive_log()
+    start = src.index("allocateRequestCode")
+    region = src[start:start + 1400]
+    write = region.index("atomicWriteText")
+    put = region.index("requestCodeToOpId.put")
+    assert write < put
+    # Launch failures remove the map entry but the persisted
+    # counter is never rolled back.
+    assert "removePickerRequest(code)" in src
+
+
+def test_drive001_t69_marker_failure_aborts_clear():
+    """T-69: when the clear marker cannot be persisted, the
+    clear aborts before deleting anything (permission kept)."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 1200]
+    assert "toast_log_folder_clear_failed" in region
+
+
+def test_drive001_t70_release_failure_keeps_marker():
+    """T-70: when the release fails at the startup check, the
+    marker is kept and retried at the next launch."""
+    src = _drive_log()
+    start = src.index("private void startupConsistencyCheck")
+    region = src[start:start + 2400]
+    assert "if (released)" in region
+    assert "deleteClearMarker()" in region
+
+
+def test_drive001_t71_marker_present_counter_missing_refuses():
+    """T-71: marker present + counter missing is abnormal and
+    refuses the picker (the marker alone is not proof)."""
+    src = _drive_log()
+    start = src.index("public static void ensureDriveInit")
+    region = src[start:start + 3600]
+    assert "marker.kind == ReadKind.MISSING" in region
+    assert "counter.kind == ReadKind.OK" in region
+    assert "checkDriveInitOk" in src
+
+
+def test_drive001_t72_counter_lost_after_fallback_no_reuse():
+    """T-72: a counter lost after a fallback launch cannot
+    reuse the old code — the re-init starts from a fresh
+    random epoch (see T-67 / T-86)."""
+    src = _drive_log()
+    assert "SecureRandom" in src
+    assert "EPOCH_MAX" in src
+
+
+def test_drive001_t73_clear_release_failure_keeps_marker():
+    """T-73: when the release fails on the clear path, the
+    marker is kept for the next-launch reconciliation."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    assert "if (released)" in region
+    assert "keep the marker for next-launch reconciliation" in region
+
+
+def test_drive001_t74_shared_uri_keeps_other_permission():
+    """T-74: releasing a URI used by another feature is
+    refused (isUsedByOther / the other-feature check)."""
+    reg = _drive_registry()
+    assert "isUsedByOther" in reg
+    assert "!e[0].equals(feature)" in reg
+
+
+def test_drive001_t75_both_files_lost_no_fixed_restart():
+    """T-75: when both the marker and the counter are lost,
+    the re-init does NOT deterministically return to 1000 —
+    the fresh start comes from a SecureRandom epoch (see the
+    failure model in ensureDriveInit). The probabilistic bound
+    is checked in T-86; a literal 'refuse' is not what the
+    adopted design does, because a genuine fresh install must
+    still be able to initialise."""
+    src = _drive_log()
+    assert "SecureRandom" in src
+    assert "REQUEST_CODE_MIN + new SecureRandom()" in src
+
+
+def test_drive001_t76_folder_absent_history_lost_refuses():
+    """T-76: when the folder URI file is absent and the
+    counter history is lost, the picker refuses (the init
+    gate requires a readable counter)."""
+    src = _drive_log()
+    assert "checkDriveInitOk" in src
+    start = src.index("private static boolean checkDriveInitOk")
+    region = src[start:start + 800]
+    assert "counter.kind == ReadKind.OK" in region
+
+
+def test_drive001_t77_marker_absent_counter_corrupt_refuses():
+    """T-77: marker absent + counter corrupt refuses the
+    picker (both must be OK)."""
+    src = _drive_log()
+    start = src.index("private static boolean checkDriveInitOk")
+    region = src[start:start + 800]
+    assert "marker.kind == ReadKind.OK" in region
+    assert "counter.kind == ReadKind.OK" in region
+
+
+def test_drive001_t78_registry_write_failure_disables_feature():
+    """T-78: when the registry write fails after the grant,
+    the feature is not enabled for that URI (the permission
+    is kept)."""
+    src = _drive_log()
+    start = src.index("private void handleFolderPicked")
+    region = src[start:start + 2600]
+    assert "UriPermissionRegistry.register" in region
+    assert "toast_log_folder_unreadable" in region
+
+
+def test_drive001_t79_registry_read_failure_no_release():
+    """T-79: when the registry cannot be read, no permission
+    is released (isUsedByOther / releaseIfUnused fail safe)."""
+    reg = _drive_registry()
+    assert "entries == null" in reg
+    start = reg.index("public static boolean isUsedByOther")
+    region = reg[start:start + 900]
+    assert "return true" in region
+
+
+def test_drive001_t80_registry_ops_serialized_under_one_lock():
+    """T-80: register / unregister / read / release all run
+    under the one private REGISTRY_LOCK."""
+    reg = _drive_registry()
+    assert "private static final Object REGISTRY_LOCK" in reg
+    assert reg.count("synchronized (REGISTRY_LOCK)") >= 5
+
+
+def test_drive001_t81_release_registry_failure_reconciled():
+    """T-81: a registry-update failure after a release leaves
+    a stale entry that reconcile() drops at next launch."""
+    reg = _drive_registry()
+    assert "public static void reconcile" in reg
+    start = reg.index("public static void reconcile")
+    region = reg[start:start + 1200]
+    assert "getPersistedUriPermissions" in region
+    assert "writeLocked(ctx, entries)" in region
+
+
+def test_drive001_t82_kind_a_marker_deletable():
+    """T-82: Kind A (file present + old URI readable) may
+    delete the marker."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    assert "kind A" in region
+    assert "deleteClearMarker(); // kind A" in region
+
+
+def test_drive001_t83_kind_b_marker_kept():
+    """T-83: Kind B (state unconfirmable) keeps the marker."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    assert "kind B" in region
+    assert "keep the permission and the marker" in region
+
+
+def test_drive001_t84_kind_c_release_then_marker():
+    """T-84: Kind C (ENOENT confirmed) proceeds to release,
+    and the marker stays until the release succeeds."""
+    src = _drive_log()
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    assert "kind C" in region
+    assert "if (released)" in region
+
+
+def test_drive001_t85_first_init_random_start_recorded():
+    """T-85: the first init picks a random start in
+    1000..60000 and records it in the counter file."""
+    src = _drive_log()
+    assert "EPOCH_MAX = 60000" in src
+    assert "atomicWriteText(ctx.getFilesDir(), COUNTER_NAME," in src
+
+
+def test_drive001_t86_reinit_collision_bound_documented():
+    """T-86: after a data loss + re-init the collision bound
+    (at most N/59000 per new allocation) is stated in the
+    failure model comment of ensureDriveInit."""
+    src = _drive_log()
+    assert "N/59000" in src
+
+
+def test_drive001_t87_registry_rollback_before_release():
+    """T-87: on a settings-write failure the registry entry is
+    removed first (under REGISTRY_LOCK); the permission is
+    released only when that removal succeeds."""
+    src = _drive_log()
+    start = src.index("handleFolderWriteFailed")
+    region = src[start:start + 1800]
+    unreg = region.index("UriPermissionRegistry.unregister")
+    release = region.index("releasePermissionBestEffort")
+    assert unreg < release
+
+
+def test_drive001_t88_classification_is_final():
+    """T-88: the deletion classification (A/B/C) is the final
+    determination; a dir-sync failure alone never decides the
+    marker, and Kind A's condition is explicit."""
+    src = _drive_log()
+    assert "classification (A/B/C) is the FINAL determination" in src
+    start = src.index("private void doClearFolder")
+    region = src[start:start + 2400]
+    assert "stored.trim().equals(uriString)" in region
+
+
+def test_drive001_t89_registry_lock_private_and_single_entry():
+    """T-89: REGISTRY_LOCK is private to UriPermissionRegistry
+    and every operation goes through its synchronized methods."""
+    reg = _drive_registry()
+    assert "private static final Object REGISTRY_LOCK" in reg
+    assert "public static boolean register" in reg
+    assert "public static boolean unregister" in reg
+    assert "public static boolean isUsedByOther" in reg
+    assert "public static boolean releaseIfUnused" in reg
+    assert "public static void reconcile" in reg
+    # No other file reaches the lock directly.
+    assert "REGISTRY_LOCK" not in _drive_log()
+
+
+def test_drive001_t90_verification_inputs_defined():
+    """T-90: the verification inputs are defined (marker
+    content, counter content, PackageManager install times,
+    other app-owned state existence)."""
+    src = _drive_log()
+    assert "readDecimalFile(ctx, INIT_MARKER_NAME)" in src
+    assert "readDecimalFile(ctx, COUNTER_NAME)" in src
+    assert "firstInstallTimes(ctx)" in src
+
+
+def test_drive001_t91_verification_unavailable_only_on_io_error():
+    """T-91: verification info becomes unavailable only via a
+    file-read error or a PackageManager failure — absence is
+    an ENOENT-verifiable fact, not 'unavailable'."""
+    src = _drive_log()
+    assert "ReadKind.UNREADABLE" in src
+    assert "return null" in src  # firstInstallTimes: NameNotFound
+    start = src.index("public static void ensureDriveInit")
+    region = src[start:start + 400]
+    assert "verification impossible" in region
+
+
+def test_drive001_t92_corrupt_registry_refuses_and_keeps():
+    """T-92: a corrupt registry file refuses every
+    registry-dependent operation, keeps existing permissions,
+    and is never auto-deleted."""
+    reg = _drive_registry()
+    assert "return null" in reg
+    start = reg.index("private static List<String[]> readLocked")
+    region = reg[start:start + 1400]
+    assert "parts.length != 2" in region
+    assert "never auto-deleted" in reg
+
+
+def test_drive001_layout_has_folder_controls():
+    """Layout: the log screen carries the folder pick button,
+    the folder display, and the clear button."""
+    src = _res_text("layout/activity_log.xml")
+    for view_id in ("log_folder_button", "log_folder_text",
+                    "log_folder_clear_button"):
+        assert f'android:id="@+id/{view_id}"' in src
+    assert '@string/btn_log_folder' in src
+    assert '@string/btn_log_folder_clear' in src
+
+
+def test_drive001_strings_present():
+    """Strings: every DRIVE-001 label and toast exists."""
+    src = _res_text("values/strings.xml")
+    for name in ("btn_log_folder", "btn_log_folder_clear",
+                 "log_folder_unselected", "log_folder_name_unknown",
+                 "toast_log_folder_no_write",
+                 "toast_log_folder_not_creatable",
+                 "toast_log_folder_unreadable",
+                 "toast_log_folder_change_failed",
+                 "toast_log_folder_clear_failed",
+                 "toast_log_folder_no_permission",
+                 "toast_picker_timeout"):
+        assert f'name="{name}"' in src
+
+
+def test_drive001_version_2_9_0():
+    """Version: the build carries v2.9.0 / code 53."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    build = (root / "android-app" / "build.sh").read_text(
+        encoding="utf-8")
+    assert 'VERSION_NAME="2.9.0"' in build
+    assert "VERSION_CODE=53" in build
+
+
+def test_drive001_main_activity_calls_ensure_init():
+    """First-init hooks: MainActivity, BootReceiver and the
+    server constructor all run ensureDriveInit before any
+    app-owned state file is created."""
+    main = _java_source("MainActivity.java")
+    assert "LogActivity.ensureDriveInit(this);" in main
+    boot = _java_source("BootReceiver.java")
+    assert "LogActivity.ensureDriveInit(" in boot
+    assert boot.index("ensureDriveInit") < boot.index("BridgeLog.init")
+    server = _java_source("HttpBridgeServer.java")
+    assert "LogActivity.ensureDriveInit(" in server
+    assert (server.index("ensureDriveInit")
+            < server.index("BridgeLog.init(this.context)"))

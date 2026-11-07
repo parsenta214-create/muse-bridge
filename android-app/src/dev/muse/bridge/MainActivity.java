@@ -203,6 +203,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // SPEC-DRIVE-001: the first-init check must run before
+        // any app-owned state file is created, on every entry
+        // point — otherwise the run-meta file (created by
+        // BridgeLog.init) would make a fresh install look like
+        // a re-init and the picker would refuse forever.
+        LogActivity.ensureDriveInit(this);
         setContentView(R.layout.activity_main);
 
         // v1.3: update notifications need this on Android 13+.

@@ -27,6 +27,9 @@ public class BootReceiver extends BroadcastReceiver {
         if (!Intent.ACTION_BOOT_COMPLETED.equals(intent.getAction())) {
             return;
         }
+        // SPEC-DRIVE-001: first-init check before any app-owned
+        // state file is created (see MainActivity.onCreate).
+        LogActivity.ensureDriveInit(context.getApplicationContext());
         BridgeLog.init(context.getApplicationContext());
         BridgeLog.log("boot", "BOOT_COMPLETED received; starting bridge");
         Intent svc = new Intent(context, BridgeService.class);

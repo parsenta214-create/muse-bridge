@@ -405,6 +405,9 @@ public class HttpBridgeServer {
         // thread). Recreated in start() if a previous stop() shut
         // it down, mirroring the worker pool.
         ensureOperationScheduler();
+        // SPEC-DRIVE-001: first-init check before BridgeLog.init
+        // creates the run-meta file (see MainActivity.onCreate).
+        LogActivity.ensureDriveInit(this.context);
         // v1.9.3: the debug log reads the previous run's tail and
         // opens the file once, when the server is created.
         BridgeLog.init(this.context);

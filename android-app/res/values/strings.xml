@@ -26,6 +26,18 @@
     <string name="btn_log_export">TXTで保存</string>
     <string name="toast_log_saved">ログを保存したよ。</string>
     <string name="toast_log_save_failed">保存できなかったよ。もう一度試してね。</string>
+    <!-- SPEC-DRIVE-001: remembered save folder. -->
+    <string name="btn_log_folder">保存先フォルダ</string>
+    <string name="btn_log_folder_clear">保存先を解除</string>
+    <string name="log_folder_unselected">未選択</string>
+    <string name="log_folder_name_unknown">保存先フォルダ（名前取得不可）</string>
+    <string name="toast_log_folder_no_write">書き込み権限がなかったよ。別のフォルダを選んでね。</string>
+    <string name="toast_log_folder_not_creatable">このフォルダには保存できないよ。別のフォルダを選んでね。</string>
+    <string name="toast_log_folder_unreadable">保存先が読めなかったよ。設定を確認してね。</string>
+    <string name="toast_log_folder_change_failed">保存先の変更が確定できなかったよ。設定を確認してね。</string>
+    <string name="toast_log_folder_clear_failed">保存先の解除ができなかったよ。もう一度試してね。</string>
+    <string name="toast_log_folder_no_permission">保存先の権限がなくなっているよ。もう一度フォルダを選んでね。</string>
+    <string name="toast_picker_timeout">保存先の選択が中断されたよ。もう一度フォルダを選んでね。</string>
     <string name="hint">Bridgeはこの端末内でのみ待ち受けます（Tailscaleアドレスとlocalhost）。すべてのリクエストに上のトークンが必要です。使い終わったらBridgeを停止してください。</string>
     <!-- SPEC-UI-001: status rows -->
     <string name="status_bridge_label">Bridge</string>
