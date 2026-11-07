@@ -34,7 +34,7 @@ public class StatusDialView extends View {
     private final Paint statePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint modePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
-    private boolean running = false;
+    private Boolean running = null;
     private String modeLabel = "";
 
     public StatusDialView(Context context) {
@@ -63,9 +63,13 @@ public class StatusDialView extends View {
         modePaint.setColor(0xFF757575);
     }
 
-    /** Server state: true while BridgeService is running. */
+    /** Server state: true while BridgeService is running. Until this
+     * is called the dial shows an unknown state (grey ring, "—") —
+     * it never claims a state it has not been told (CONS-050 P1-2:
+     * the old false default could show "stopped" before the first
+     * refresh()). */
     public void setRunning(boolean running) {
-        if (this.running != running) {
+        if (!Boolean.valueOf(running).equals(this.running)) {
             this.running = running;
             invalidate();
         }
@@ -98,9 +102,18 @@ public class StatusDialView extends View {
         float cy = getHeight() / 2f;
         float radius = Math.min(cx, cy) - ringPaint.getStrokeWidth() / 2f - dp(4f);
 
+        canvas.drawCircle(cx, cy, radius, trackPaint);
+        if (running == null) {
+            // Unknown state (CONS-050 P1-2): grey ring only, no
+            // state claim, no mode sub-line.
+            statePaint.setColor(getResources().getColor(R.color.status_neutral, null));
+            Paint.FontMetrics fm = statePaint.getFontMetrics();
+            float y = cy - (fm.ascent + fm.descent) / 2f;
+            canvas.drawText("—", cx, y, statePaint);
+            return;
+        }
         int stateColor = getResources().getColor(
                 running ? R.color.status_ok : R.color.status_bad, null);
-        canvas.drawCircle(cx, cy, radius, trackPaint);
         ringPaint.setColor(stateColor);
         canvas.drawCircle(cx, cy, radius, ringPaint);
 
@@ -108,15 +121,23 @@ public class StatusDialView extends View {
                 running ? R.string.status_running : R.string.status_stopped);
         statePaint.setColor(stateColor);
         Paint.FontMetrics fm = statePaint.getFontMetrics();
-        float stateY = cy - (fm.ascent + fm.descent) / 2f
-                - (modeLabel.isEmpty() ? 0f : sp(MODE_TEXT_SP) * 0.7f);
-        canvas.drawText(state, cx, stateY, statePaint);
-        if (!modeLabel.isEmpty()) {
-            Paint.FontMetrics mfm = modePaint.getFontMetrics();
-            float modeY = stateY + (fm.descent - fm.ascent) * 0.5f
-                    + (mfm.descent - mfm.ascent) * 0.5f + sp(6f);
-            canvas.drawText(modeLabel, cx, modeY, modePaint);
+        if (modeLabel.isEmpty()) {
+            float y = cy - (fm.ascent + fm.descent) / 2f;
+            canvas.drawText(state, cx, y, statePaint);
+            return;
         }
+        // CONS-050 P1-4: centre the two-line block (state + gap +
+        // mode) vertically from the real font metrics, so the
+        // placement holds at enlarged font sizes too.
+        Paint.FontMetrics mfm = modePaint.getFontMetrics();
+        float stateHeight = fm.descent - fm.ascent;
+        float modeHeight = mfm.descent - mfm.ascent;
+        float gap = sp(6f);
+        float top = cy - (stateHeight + gap + modeHeight) / 2f;
+        float stateBaseline = top - fm.ascent;
+        float modeBaseline = top + stateHeight + gap - mfm.ascent;
+        canvas.drawText(state, cx, stateBaseline, statePaint);
+        canvas.drawText(modeLabel, cx, modeBaseline, modePaint);
     }
 
     private float dp(float value) {

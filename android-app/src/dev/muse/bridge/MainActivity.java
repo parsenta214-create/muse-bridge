@@ -47,6 +47,11 @@ public class MainActivity extends Activity {
     // rows, same IDs), and the connection flow shows device ->
     // Tailscale -> server.
     private StatusDialView statusDial;
+    private View flowNodeDevice;
+    private View flowNodeTailscale;
+    private View flowNodeServer;
+    private TextView flowArrowTailscale;
+    private TextView flowArrowServer;
     private TextView flowDotDevice;
     private TextView flowDotTailscale;
     private TextView flowDotServer;
@@ -224,6 +229,11 @@ public class MainActivity extends Activity {
         }
 
         statusDial = findViewById(R.id.status_dial);
+        flowNodeDevice = findViewById(R.id.flow_node_device);
+        flowNodeTailscale = findViewById(R.id.flow_node_tailscale);
+        flowNodeServer = findViewById(R.id.flow_node_server);
+        flowArrowTailscale = findViewById(R.id.flow_arrow_tailscale);
+        flowArrowServer = findViewById(R.id.flow_arrow_server);
         flowDotDevice = findViewById(R.id.flow_dot_device);
         flowDotTailscale = findViewById(R.id.flow_dot_tailscale);
         flowDotServer = findViewById(R.id.flow_dot_server);
@@ -450,14 +460,33 @@ public class MainActivity extends Activity {
                         : getString(R.string.status_mode_minimal);
         statusDial.setRunning(running);
         statusDial.setModeLabel(modeShort);
-        setFlowNode(flowDotDevice, flowStatusDevice,
-                getString(R.string.flow_connected), getColor(R.color.status_ok));
-        setFlowNode(flowDotTailscale, flowStatusTailscale,
-                getString(ip != null ? R.string.flow_connected : R.string.flow_not_found),
+        // CONS-050 P1-3: the dial's Canvas text is not announced by
+        // a screen reader, so set the spoken description here.
+        statusDial.setContentDescription("Bridge "
+                + getString(running ? R.string.status_running : R.string.status_stopped)
+                + "、" + modeShort);
+        // CONS-050 P1-1: the flow words describe what was actually
+        // checked — the app runs on this device, the Tailscale IP
+        // was obtained (not that the tunnel is proven up), the
+        // service is running. They do not claim end-to-end
+        // connectivity.
+        setFlowNode(flowNodeDevice, flowDotDevice, flowStatusDevice,
+                getString(R.string.flow_device),
+                getString(R.string.flow_app_running), getColor(R.color.status_ok));
+        setFlowNode(flowNodeTailscale, flowDotTailscale, flowStatusTailscale,
+                getString(R.string.flow_tailscale),
+                getString(ip != null ? R.string.flow_ip_found : R.string.flow_not_found),
                 getColor(ip != null ? R.color.status_ok : R.color.status_bad));
-        setFlowNode(flowDotServer, flowStatusServer,
+        setFlowNode(flowNodeServer, flowDotServer, flowStatusServer,
+                getString(R.string.flow_server),
                 getString(running ? R.string.status_running : R.string.status_stopped),
                 getColor(running ? R.color.status_ok : R.color.status_bad));
+        // CONS-050 P2-4: the arrows reflect the link state — green
+        // only when the downstream node is up, grey otherwise.
+        flowArrowTailscale.setTextColor(
+                getColor(ip != null ? R.color.status_ok : R.color.status_neutral));
+        flowArrowServer.setTextColor(
+                getColor(running ? R.color.status_ok : R.color.status_neutral));
 
         if (a11yOn) {
             setStatusRow(modeStatusValue, getString(R.string.status_mode_full),
@@ -548,13 +577,18 @@ public class MainActivity extends Activity {
     /** SPEC-UI-002: one flow node — a coloured dot (circle) plus a
      * status word in the same colour. Colour never carries
      * information alone (the word is always shown). */
-    private void setFlowNode(TextView dot, TextView status, String word, int color) {
+    private void setFlowNode(View node, TextView dot, TextView status,
+                             String label, String word, int color) {
         GradientDrawable circle = new GradientDrawable();
         circle.setShape(GradientDrawable.OVAL);
         circle.setColor(color);
         dot.setBackground(circle);
         status.setText(word);
         status.setTextColor(color);
+        // CONS-050 P1-3: the node's inner views are marked
+        // importantForAccessibility="no" in the layout, so the
+        // screen reader announces this combined description once.
+        node.setContentDescription(label + "、" + word);
     }
 
     /** SPEC-UI-001: state word in its colour, optional note in grey. */

@@ -3060,6 +3060,11 @@ def test_ui002_dial_view_draws_ring_and_state_word():
     assert "R.string.status_running" in src
     assert "R.string.status_stopped" in src
     assert "drawText" in src
+    # CONS-050 P1-2 fix round: the dial must start in an unknown
+    # state (nullable running) and never claim a state it has not
+    # been told — grey ring + "—" until setRunning is called.
+    assert "private Boolean running" in src
+    assert "running == null" in src
 
 
 def test_ui002_layout_has_dial_flow_and_cards():
@@ -3072,6 +3077,12 @@ def test_ui002_layout_has_dial_flow_and_cards():
     for node in ("device", "tailscale", "server"):
         assert f'android:id="@+id/flow_dot_{node}"' in src
         assert f'android:id="@+id/flow_status_{node}"' in src
+        assert f'android:id="@+id/flow_node_{node}"' in src
+    assert 'android:id="@+id/flow_arrow_tailscale"' in src
+    assert 'android:id="@+id/flow_arrow_server"' in src
+    # CONS-050 P1-3: the node's inner views are hidden from the
+    # screen reader (the node carries one combined description).
+    assert 'android:importantForAccessibility="no"' in src
     assert src.count('android:background="@drawable/card_background"') == 3
     assert 'android:id="@+id/status_mode_value"' in src
     assert 'android:id="@+id/status_a11y_value"' in src
@@ -3095,9 +3106,6 @@ def test_ui002_main_activity_wires_dial_flow_masking_and_mode():
     src = _java_source("MainActivity.java")
     assert "statusDial.setRunning(running)" in src
     assert "statusDial.setModeLabel(modeShort)" in src
-    assert "setFlowNode(flowDotDevice" in src
-    assert "setFlowNode(flowDotTailscale" in src
-    assert "setFlowNode(flowDotServer" in src
     assert "BridgeService.isRunning()" in src
     assert "findTailscaleIp()" in src
     assert "refreshToken()" in src
@@ -3105,3 +3113,24 @@ def test_ui002_main_activity_wires_dial_flow_masking_and_mode():
     assert "mode_button" in src
     # The old bridge status row is gone — the dial replaces it.
     assert "status_bridge_value" not in src
+
+
+def test_ui002_fix_round_honest_labels_and_accessibility():
+    """CONS-050 fix round: the flow words must describe what was
+    actually checked (P1-1 — no claim of end-to-end connectivity),
+    the nodes and the dial must carry a spoken description (P1-3),
+    and the arrows must reflect the link state (P2-4)."""
+    strings = _res_text("values/strings.xml")
+    assert "flow_app_running" in strings
+    assert "flow_ip_found" in strings
+    assert "flow_connected" not in strings
+    src = _java_source("MainActivity.java")
+    assert "R.string.flow_app_running" in src
+    assert "R.string.flow_ip_found" in src
+    assert "R.string.flow_connected" not in src
+    assert "setContentDescription" in src
+    assert "flowArrowTailscale.setTextColor" in src
+    assert "flowArrowServer.setTextColor" in src
+    assert "setFlowNode(flowNodeDevice" in src
+    assert "setFlowNode(flowNodeTailscale" in src
+    assert "setFlowNode(flowNodeServer" in src

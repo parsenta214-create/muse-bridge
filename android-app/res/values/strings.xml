@@ -53,7 +53,8 @@
     <string name="flow_device">この端末</string>
     <string name="flow_tailscale">Tailscale</string>
     <string name="flow_server">サーバー</string>
-    <string name="flow_connected">接続済み</string>
+    <string name="flow_app_running">アプリ起動中</string>
+    <string name="flow_ip_found">IP取得済み</string>
     <string name="flow_not_found">未検出</string>
     <string name="card_access">アクセス</string>
     <string name="card_connection">接続情報</string>
