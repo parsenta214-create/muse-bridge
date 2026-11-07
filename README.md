@@ -1,3 +1,17 @@
+# Muse Bridge
+
+AI（Muse）が Android スマホを遠隔操作するための橋渡しアプリです。スマホに入れた Muse Bridge が、画面を見て・触って・入力して、Tailscale 経由の HTTP で Muse からの指示を受けます。USB も ADB も要りません。
+
+- 概要（日本語・素人向け）：[MUSE_BRIDGE_OVERVIEW.md](MUSE_BRIDGE_OVERVIEW.md)
+- Muse 用の案内（地図・手順・禁則）：[AGENTS.md](AGENTS.md)
+- アプリ本体の説明：[android-app/README.md](android-app/README.md)
+- 凍結仕様書：`SPEC-*.md`（P0 / P1 / CONS-014 P1 / 操作通知 / ウィジェットほか）
+- ビルド：`android-app/build.sh`（手動 aapt2 / javac / d8、Gradle なし）。テスト：`pytest -q`。詳しくは AGENTS.md へ。
+
+この README の先頭部分は、元になった Google の computer-use-preview の説明です。その下（`Local trial setup` 以降）が Muse Bridge の作業記録で、末尾近くに番号付きの凍結決定（1〜97）があります。
+
+---
+
 # Computer Use Preview
 
 ## Quick Start
