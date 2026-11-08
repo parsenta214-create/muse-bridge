@@ -4044,16 +4044,16 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_5():
+def test_locale_tile_version_2_9_6():
     """AX-12 (superseded by SPEC-LOCALE-TILE-001): the build now
-    carries v2.9.5 / code 58 (was v2.9.4 / code 57 at
-    SPEC-LOCALE-TILE-001 v2)."""
+    carries v2.9.6 / code 59 (was v2.9.5 / code 58 at
+    SPEC-LOCALE-TILE-001 v3)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.5"' in build
-    assert "VERSION_CODE=58" in build
+    assert 'VERSION_NAME="2.9.6"' in build
+    assert "VERSION_CODE=59" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4810,114 +4810,117 @@ def test_locale_tile_manifest_declares_service_once():
 
 
 def test_locale_tile_opens_locale_settings():
-    """SPEC-LOCALE-TILE-001 v3 L3/L9: onClick resolves the language
-    settings intent and makes it explicit, then launches it with
-    startActivityAndCollapse; if that throws, the same explicit
-    intent is retried with plain startActivity. All APIs are
-    minSdk 30 compatible."""
+    """SPEC-LOCALE-TILE-001 v4 L3/L9: onClick launches the language
+    settings intent with plain startActivity, implicit (no
+    resolveActivity, no setComponent, no startActivityAndCollapse —
+    the Intent version of startActivityAndCollapse is deprecated in
+    API 34 and throws UnsupportedOperationException at targetSdk 34,
+    and the v3 explicit-ification is the suspect for the silent
+    failure). A launch that returns without throwing shows the
+    launch-confirmation toast (v4 diagnostic, temporary). All APIs
+    are minSdk 30 compatible."""
     src = _locale()
     assert "Settings.ACTION_LOCALE_SETTINGS" in src
-    assert 'resolveExplicit(Settings.ACTION_LOCALE_SETTINGS' in src
-    assert "getPackageManager().resolveActivity(intent, 0)" in src
-    assert "intent.setComponent(new ComponentName(" in src
     assert "Intent.FLAG_ACTIVITY_NEW_TASK" in src
     assert "import android.provider.Settings;" in src
-    assert "import android.content.pm.PackageManager;" in src
-    assert "import android.content.pm.ResolveInfo;" in src
-    assert "import android.content.ComponentName;" in src
-    # The same resolved component is retained for the retry: both
-    # launch calls in tryLaunch use the one explicit intent.
+    # No explicit-ification and no startActivityAndCollapse in the
+    # class body (the class Javadoc legitimately names them as things
+    # v4 dropped, so scope to the body).
+    body = src[src.index("public class LocaleTileService"):]
+    assert "resolveActivity" not in body
+    assert "setComponent" not in body
+    assert "resolveExplicit" not in body
+    assert "startActivityAndCollapse" not in body
+    assert "PackageManager" not in body
+    assert "ResolveInfo" not in body
+    assert "ComponentName" not in body
+    # tryLaunch uses plain startActivity and shows the
+    # launch-confirmation toast when it returns without throwing.
     launch = src[src.index("private boolean tryLaunch("):]
     launch = launch[:launch.index("private void refreshTile()")]
-    assert "startActivityAndCollapse(intent);" in launch
     assert "startActivity(intent);" in launch
-    assert (launch.index("startActivityAndCollapse(intent);")
-            < launch.index("startActivity(intent);"))
-    # Resolution happens before the launch.
-    assert (src.index("resolveActivity(intent, 0)")
-            < src.index("startActivityAndCollapse(intent);"))
-    assert (src.index("setComponent(new ComponentName(")
-            < src.index("startActivityAndCollapse(intent);"))
+    assert "R.string.toast_locale_opened" in launch
+    assert "Toast.makeText" in launch
+    # The confirmation toast is shown only after startActivity
+    # returns (not before the launch attempt).
+    assert (launch.index("startActivity(intent);")
+            < launch.index("R.string.toast_locale_opened"))
 
 
 def test_locale_tile_settings_fallback():
-    """SPEC-LOCALE-TILE-001 v3 L3 (CONS-106 P2-01): when the locale
-    intent cannot be resolved, the main Settings page is tried with
-    the same two stages (resolve + explicit, then
-    startActivityAndCollapse, then startActivity). The fallback runs
-    only when the locale intent is null, and never after a
-    successful locale launch (early return)."""
+    """SPEC-LOCALE-TILE-001 v4 L3: when the locale launch throws,
+    the main Settings page is tried with startActivity (implicit).
+    The fallback runs only after the locale launch fails, and never
+    after a successful locale launch (early return)."""
     src = _locale()
     assert "Settings.ACTION_SETTINGS" in src
-    assert 'resolveExplicit(Settings.ACTION_SETTINGS' in src
     click = src[src.index("public void onClick()"):]
-    click = click[:click.index("private Intent resolveExplicit(")]
+    click = click[:click.index("private boolean tryLaunch(")]
     # (1) Early return on a successful locale launch: the
-    # if (locale != null && tryLaunch(...)) branch returns before
-    # the Settings fallback is reached.
-    succ = click[click.index(
-        'if (locale != null && tryLaunch(locale, "locale")) {'):]
-    succ = succ[:succ.index("if (locale == null)")]
+    # if (tryLaunch(locale, "locale")) branch returns before the
+    # Settings fallback is reached.
+    succ = click[click.index('if (tryLaunch(locale, "locale")) {'):]
+    succ = succ[:succ.index("Intent settings = ")]
     assert "return;" in succ
-    # (3) The Settings fallback runs only when the locale intent is
-    # null: the resolve and launch calls sit inside the
-    # if (locale == null) block (brace-matched, not just ordered).
-    if_start = click.index("if (locale == null)")
-    block = _brace_block(click, click.index("{", if_start))
-    assert 'resolveExplicit(Settings.ACTION_SETTINGS' in block
-    assert 'tryLaunch(settings, "settings")' in block
-    # The locale launch returns early on success, so the Settings
-    # fallback is not attempted after a successful locale launch.
+    # (2) The Settings fallback is a fresh implicit intent launched
+    # with startActivity via tryLaunch (no resolve, no explicit
+    # component, no startActivityAndCollapse).
+    assert "Intent settings = new Intent(Settings.ACTION_SETTINGS);" \
+        in click
+    assert 'tryLaunch(settings, "settings")' in click
     assert click.index('tryLaunch(locale, "locale")') < \
-        click.index('resolveExplicit(Settings.ACTION_SETTINGS')
-    assert (click.index("if (locale == null)")
-            < click.index('resolveExplicit(Settings.ACTION_SETTINGS'))
-    assert (click.index('resolveExplicit(Settings.ACTION_SETTINGS')
+        click.index('tryLaunch(settings, "settings")')
+    assert (click.index("Intent settings = ")
             < click.index('tryLaunch(settings, "settings")'))
+    # (3) The failure toast comes after the Settings fallback.
+    assert (click.index('tryLaunch(settings, "settings")')
+            < click.index("R.string.toast_locale_open_failed"))
 
 
 def test_locale_tile_logs_failed_stages():
-    """SPEC-LOCALE-TILE-001 v3 L4 (CONS-105 P2-02): each failed stage
-    and its exception class are logged concisely via android.util.Log,
-    with no persistent state."""
+    """SPEC-LOCALE-TILE-001 v4 L4 (CONS-105 P2-02, kept): each failed
+    stage and its exception class are logged concisely via
+    android.util.Log, with no persistent state. There is no
+    resolveExplicit anymore, so no 'did not resolve' log and no
+    startActivityAndCollapse log."""
     src = _locale()
     assert "import android.util.Log;" in src
     assert 'private static final String TAG = "LocaleTile";' in src
-    assert 'Log.w(TAG, label + " intent did not resolve");' in src
     assert 'e.getClass().getSimpleName()' in src
-    assert 'Log.w(TAG, "startActivityAndCollapse " + label' in src
     assert 'Log.w(TAG, "startActivity " + label' in src
+    assert "intent did not resolve" not in src
+    # The class body only: the class Javadoc legitimately names
+    # startActivityAndCollapse (as a thing v4 dropped).
+    body = src[src.index("public class LocaleTileService"):]
+    assert "startActivityAndCollapse" not in body
     # No persistent state for the diagnostics.
     assert "SharedPreferences" not in src
     assert "getSharedPreferences" not in src
 
 
 def test_locale_tile_toast_only_after_all_fail():
-    """SPEC-LOCALE-TILE-001 v3 L4 (CONS-106 P2-01): the failure toast
-    is shown only after every launch attempt has failed. When the
-    locale intent resolved but both locale launches failed, the
-    Settings fallback is skipped and the toast is reached: the toast
-    sits outside (after) the if (locale == null) block, while the
-    Settings fallback sits inside it. There is still no MainActivity
-    fallback."""
+    """SPEC-LOCALE-TILE-001 v4 L4: the failure toast is shown only
+    after every launch attempt has failed (locale startActivity,
+    then Settings startActivity). The launch-confirmation toast
+    (toast_locale_opened) is a different toast: it is shown inside
+    tryLaunch when a launch returns without throwing, never on the
+    failure path. There is still no MainActivity fallback."""
     src = _locale()
     click = src[src.index("public void onClick()"):]
-    click = click[:click.index("private Intent resolveExplicit(")]
+    click = click[:click.index("private boolean tryLaunch(")]
     assert "R.string.toast_locale_open_failed" in click
     assert "Toast.makeText" in click
-    # (2) The toast is outside the if (locale == null) block, so it
-    # is reached when the locale intent resolved but both launches
-    # failed (the if-block, and with it the Settings fallback, is
-    # skipped). The Settings fallback is inside that block.
-    if_start = click.index("if (locale == null)")
-    block = _brace_block(click, click.index("{", if_start))
-    assert 'resolveExplicit(Settings.ACTION_SETTINGS' in block
-    assert "R.string.toast_locale_open_failed" not in block
-    assert click.index("R.string.toast_locale_open_failed") > \
-        click.index("if (locale == null)")
-    # The toast is the last step in onClick, after the fallback.
+    # The failure toast is the last step in onClick, after both
+    # launch attempts.
     assert (click.index('tryLaunch(settings, "settings")')
             < click.index("R.string.toast_locale_open_failed"))
+    # The launch-confirmation toast is NOT on the failure path: it
+    # lives in tryLaunch (success), not in onClick after the
+    # fallbacks.
+    assert "R.string.toast_locale_opened" not in click
+    launch = src[src.index("private boolean tryLaunch("):]
+    launch = launch[:launch.index("private void refreshTile()")]
+    assert "R.string.toast_locale_opened" in launch
     # The class body only: the header comment legitimately names
     # MainActivity (as a thing the tile must NOT fall back to).
     body = src[src.index("public class LocaleTileService"):]
@@ -4954,7 +4957,7 @@ def test_locale_tile_state_inactive_and_subtitle():
 
 
 def test_locale_tile_no_mainline_reference():
-    """SPEC-LOCALE-TILE-001 v3 L4/L5/L10: no MainActivity, token,
+    """SPEC-LOCALE-TILE-001 v4 L4/L5/L10: no MainActivity, token,
     executor, server, or settings write anywhere in the tile
     class. (The failure toast's placement — only after every
     launch attempt has failed — is covered by
@@ -4967,19 +4970,24 @@ def test_locale_tile_no_mainline_reference():
                 "executor", "BridgeService", "stopService",
                 "disableSelf", "Settings.Secure", "putString"):
         assert bad not in src
-    # The launch failures are caught (not silently swallowed):
-    # tryLaunch catches each launch attempt's exception.
-    assert src.count("catch (Exception e)") == 2
+    # The launch failure is caught (not silently swallowed):
+    # tryLaunch catches the single startActivity attempt. (v3 had
+    # two catches, one per launch method; v4 has one.)
+    assert src.count("catch (Exception e)") == 1
 
 
 def test_locale_tile_strings_and_icon():
-    """SPEC-LOCALE-TILE-001 L1/L6/L7: the three strings exist with the
-    frozen wording, and ic_locale.xml exists as a stroke-drawn vector
-    that is not a copy of ic_tile."""
+    """SPEC-LOCALE-TILE-001 L1/L6/L7 (v4 L4/L10): the strings exist
+    with the frozen wording, including the v4 diagnostic
+    launch-confirmation toast (toast_locale_opened, removed in v5),
+    and ic_locale.xml exists as a stroke-drawn vector that is not
+    a copy of ic_tile."""
     strings = _res_text("values/strings.xml")
     assert 'name="locale_tile_label">言語設定</string>' in strings
     assert ('name="toast_locale_open_failed">言語設定を開けませんで'
             'した</string>') in strings
+    assert 'name="toast_locale_opened">言語設定を開きました</string>' \
+        in strings
     assert 'name="locale_unknown">不明</string>' in strings
     import pathlib
     root = pathlib.Path(__file__).resolve().parent

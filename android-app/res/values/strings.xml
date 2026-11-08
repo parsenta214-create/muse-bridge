@@ -20,6 +20,8 @@
     <!-- SPEC-LOCALE-TILE-001 (v2.9.4): language-settings tile. -->
     <string name="locale_tile_label">言語設定</string>
     <string name="toast_locale_open_failed">言語設定を開けませんでした</string>
+    <!-- SPEC-LOCALE-TILE-001 v4 diagnostic only: removed in v5 (see L10). -->
+    <string name="toast_locale_opened">言語設定を開きました</string>
     <string name="locale_unknown">不明</string>
     <string name="toast_tile_added">クイック設定に追加したよ。タイルをタップするとオンオフできるよ。</string>
     <string name="toast_tile_already_added">もう追加済みだよ。</string>
