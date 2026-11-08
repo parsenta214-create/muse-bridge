@@ -410,6 +410,19 @@ public class LogActivity extends Activity {
         }
         if (marker.kind == ReadKind.MISSING
                 && counter.kind == ReadKind.MISSING) {
+            // v2.9.1 fix (DRIVE-001 live defect, 2026-11-08): the
+            // first init must also run on an UPDATE install. Two
+            // v2.9.0 conditions blocked every update: (a) the
+            // run-meta file — a LOG-001 artifact present on any
+            // install that ran v2.8.6+ — is not DRIVE-001 state,
+            // so it must not block init; (b) firstInstallTime ==
+            // lastUpdateTime is false on any updated install, yet
+            // init is safe there because no DRIVE-001 requestCode
+            // was ever issued before v2.9.0, so no in-flight
+            // picker result can collide with the fresh epoch.
+            // What still guards init: no DRIVE-001 state at all
+            // (no folder file, no clear marker, no registry,
+            // no persisted URI permission).
             boolean noOtherState =
                     statFile(new File(ctx.getFilesDir(), FOLDER_URI_NAME))
                             == FileState.NOT_EXISTS
@@ -417,12 +430,9 @@ public class LogActivity extends Activity {
                             CLEAR_PENDING_NAME)) == FileState.NOT_EXISTS
                     && statFile(UriPermissionRegistry.registryFile(ctx))
                             == FileState.NOT_EXISTS
-                    && statFile(BridgeLog.runMetaFile(ctx))
-                            == FileState.NOT_EXISTS
                     && ctx.getContentResolver()
                             .getPersistedUriPermissions().isEmpty();
-            boolean neverUpdated = times[0] == times[1];
-            if (noOtherState && neverUpdated) {
+            if (noOtherState) {
                 BridgeLog.atomicWriteText(ctx.getFilesDir(),
                         INIT_MARKER_NAME, String.valueOf(times[0]));
                 int start = REQUEST_CODE_MIN + new SecureRandom()

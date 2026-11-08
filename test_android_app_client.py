@@ -3987,6 +3987,37 @@ def test_drive001_t92_corrupt_registry_refuses_and_keeps():
     assert "never auto-deleted" in reg
 
 
+def test_drive001_t93_update_install_can_initialise():
+    """T-93 (v2.9.1): an UPDATE install can initialise. The
+    v2.9.0 first init required firstInstallTime ==
+    lastUpdateTime, which is false on every updated install,
+    so the picker could never open after an update (live
+    defect 2026-11-08). The init must not compare the two
+    install times."""
+    src = _drive_log()
+    start = src.index("public static void ensureDriveInit")
+    region = src[start:start + 3200]
+    assert "neverUpdated" not in region
+    assert "times[0] == times[1]" not in region
+
+
+def test_drive001_t94_run_meta_does_not_block_init():
+    """T-94 (v2.9.1): the LOG-001 run-meta file does not block
+    the first init. Run-meta exists on any install that ran
+    v2.8.6+, so requiring its absence blocked every update
+    install (live defect 2026-11-08). Only genuine DRIVE-001
+    state (folder file, clear marker, registry, persisted
+    URI permission) may block init."""
+    src = _drive_log()
+    start = src.index("public static void ensureDriveInit")
+    region = src[start:start + 3200]
+    assert "runMetaFile" not in region
+    assert "FOLDER_URI_NAME" in region
+    assert "CLEAR_PENDING_NAME" in region
+    assert "registryFile" in region
+    assert "getPersistedUriPermissions" in region
+
+
 def test_drive001_layout_has_folder_controls():
     """Layout: the log screen carries the folder pick button,
     the folder display, and the clear button."""
@@ -4013,14 +4044,14 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_drive001_version_2_9_0():
-    """Version: the build carries v2.9.0 / code 53."""
+def test_drive001_version_2_9_1():
+    """Version: the build carries v2.9.1 / code 54."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.0"' in build
-    assert "VERSION_CODE=53" in build
+    assert 'VERSION_NAME="2.9.1"' in build
+    assert "VERSION_CODE=54" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
