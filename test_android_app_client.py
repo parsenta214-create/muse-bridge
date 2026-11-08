@@ -4771,6 +4771,23 @@ def _locale_service_block():
     return man[start:end]
 
 
+def _brace_block(src, start):
+    """The {...} block starting at the '{' at src[start], by brace
+    counting. Used to prove that a statement sits inside (or
+    outside) a particular if-block, not merely before or after it
+    in the file."""
+    assert src[start] == "{"
+    depth = 0
+    for i in range(start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start:i + 1]
+    raise AssertionError("unbalanced braces")
+
+
 def test_locale_tile_manifest_declares_service_once():
     """SPEC-LOCALE-TILE-001 L1/L10: the manifest declares the new tile
     service (BIND_QUICK_SETTINGS_TILE, QS_TILE, ic_locale,
@@ -4824,23 +4841,35 @@ def test_locale_tile_opens_locale_settings():
 
 
 def test_locale_tile_settings_fallback():
-    """SPEC-LOCALE-TILE-001 v3 L3: when the locale intent cannot be
-    resolved, the main Settings page is tried with the same two
-    stages (resolve + explicit, then startActivityAndCollapse, then
-    startActivity). The fallback is only reached when the locale
-    intent is unresolvable, and never after a successful locale
-    launch."""
+    """SPEC-LOCALE-TILE-001 v3 L3 (CONS-106 P2-01): when the locale
+    intent cannot be resolved, the main Settings page is tried with
+    the same two stages (resolve + explicit, then
+    startActivityAndCollapse, then startActivity). The fallback runs
+    only when the locale intent is null, and never after a
+    successful locale launch (early return)."""
     src = _locale()
     assert "Settings.ACTION_SETTINGS" in src
     assert 'resolveExplicit(Settings.ACTION_SETTINGS' in src
     click = src[src.index("public void onClick()"):]
     click = click[:click.index("private Intent resolveExplicit(")]
+    # (1) Early return on a successful locale launch: the
+    # if (locale != null && tryLaunch(...)) branch returns before
+    # the Settings fallback is reached.
+    succ = click[click.index(
+        'if (locale != null && tryLaunch(locale, "locale")) {'):]
+    succ = succ[:succ.index("if (locale == null)")]
+    assert "return;" in succ
+    # (3) The Settings fallback runs only when the locale intent is
+    # null: the resolve and launch calls sit inside the
+    # if (locale == null) block (brace-matched, not just ordered).
+    if_start = click.index("if (locale == null)")
+    block = _brace_block(click, click.index("{", if_start))
+    assert 'resolveExplicit(Settings.ACTION_SETTINGS' in block
+    assert 'tryLaunch(settings, "settings")' in block
     # The locale launch returns early on success, so the Settings
     # fallback is not attempted after a successful locale launch.
     assert click.index('tryLaunch(locale, "locale")') < \
         click.index('resolveExplicit(Settings.ACTION_SETTINGS')
-    # The fallback is gated on the locale intent being unresolvable.
-    assert "if (locale == null)" in click
     assert (click.index("if (locale == null)")
             < click.index('resolveExplicit(Settings.ACTION_SETTINGS'))
     assert (click.index('resolveExplicit(Settings.ACTION_SETTINGS')
@@ -4864,14 +4893,28 @@ def test_locale_tile_logs_failed_stages():
 
 
 def test_locale_tile_toast_only_after_all_fail():
-    """SPEC-LOCALE-TILE-001 v3 L4: the failure toast is shown only
-    after every launch attempt has failed; the Settings fallback
-    comes before it, and there is still no MainActivity fallback."""
+    """SPEC-LOCALE-TILE-001 v3 L4 (CONS-106 P2-01): the failure toast
+    is shown only after every launch attempt has failed. When the
+    locale intent resolved but both locale launches failed, the
+    Settings fallback is skipped and the toast is reached: the toast
+    sits outside (after) the if (locale == null) block, while the
+    Settings fallback sits inside it. There is still no MainActivity
+    fallback."""
     src = _locale()
     click = src[src.index("public void onClick()"):]
     click = click[:click.index("private Intent resolveExplicit(")]
     assert "R.string.toast_locale_open_failed" in click
     assert "Toast.makeText" in click
+    # (2) The toast is outside the if (locale == null) block, so it
+    # is reached when the locale intent resolved but both launches
+    # failed (the if-block, and with it the Settings fallback, is
+    # skipped). The Settings fallback is inside that block.
+    if_start = click.index("if (locale == null)")
+    block = _brace_block(click, click.index("{", if_start))
+    assert 'resolveExplicit(Settings.ACTION_SETTINGS' in block
+    assert "R.string.toast_locale_open_failed" not in block
+    assert click.index("R.string.toast_locale_open_failed") > \
+        click.index("if (locale == null)")
     # The toast is the last step in onClick, after the fallback.
     assert (click.index('tryLaunch(settings, "settings")')
             < click.index("R.string.toast_locale_open_failed"))
