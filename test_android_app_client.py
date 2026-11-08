@@ -4044,14 +4044,16 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_a11yoff_version_2_9_3():
-    """AX-12: the build carries v2.9.3 / code 56 (SPEC-A11Y-OFF-001)."""
+def test_locale_tile_version_2_9_4():
+    """AX-12 (superseded by SPEC-LOCALE-TILE-001): the build now
+    carries v2.9.4 / code 57 (was v2.9.3 / code 56 at
+    SPEC-A11Y-OFF-001)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.3"' in build
-    assert "VERSION_CODE=56" in build
+    assert 'VERSION_NAME="2.9.4"' in build
+    assert "VERSION_CODE=57" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4400,6 +4402,7 @@ def test_a11yoff_ax09_ax10_manifest_no_new_perm_or_component():
         ".MainActivity", ".LogActivity", ".BootReceiver",
         ".BridgeAccessibilityService", ".BridgeService",
         ".BridgeNotificationListener", ".BridgeTileService",
+        ".LocaleTileService",
         ".BridgeWidgetProvider", ".BridgeWidgetActionReceiver"])
     main_region = man[man.index('android:name=".MainActivity"'):]
     assert 'android:exported="true"' in main_region[:80]
@@ -4416,13 +4419,15 @@ def test_a11yoff_ax09_ax10_manifest_no_new_perm_or_component():
 
 
 def test_a11yoff_ax11_no_new_drawable():
-    """AX-08/D6: ic_tile reused, no new drawable file."""
+    """AX-08/D6: ic_tile reused, no new drawable file. (Updated for
+    SPEC-LOCALE-TILE-001 v2.9.4: ic_locale.xml is the one new drawable
+    the locale tile adds; nothing else was added.)"""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     names = sorted(p.name for p in
                    (root / "android-app" / "res" / "drawable").iterdir())
-    assert names == ["card_background.xml", "ic_override.xml",
-                     "ic_tile.xml"]
+    assert names == ["card_background.xml", "ic_locale.xml",
+                     "ic_override.xml", "ic_tile.xml"]
 
 
 def test_a11yoff_ax13_ax20_ax21_ax70_token():
@@ -4750,3 +4755,123 @@ def test_a11yoff_attribution_first_line():
     first = _pin().splitlines()[0]
     assert first == ("// Implemented by claude-sonnet-5-5 (medium) "
                      "\u2014 SPEC-A11Y-OFF-001, 2026-11-08")
+
+
+def _locale():
+    return _java_source("LocaleTileService.java")
+
+
+def _locale_service_block():
+    """The LocaleTileService <service> block of the manifest."""
+    man = _manifest_source()
+    start = man.index('android:name=".LocaleTileService"')
+    # Back up to the opening <service> tag.
+    start = man.rindex("<service", 0, start)
+    end = man.index("</service>", start) + len("</service>")
+    return man[start:end]
+
+
+def test_locale_tile_manifest_declares_service_once():
+    """SPEC-LOCALE-TILE-001 L1/L10: the manifest declares the new tile
+    service (BIND_QUICK_SETTINGS_TILE, QS_TILE, ic_locale,
+    locale_tile_label), exactly once; the BridgeTileService
+    declaration is unchanged."""
+    man = _manifest_source()
+    assert man.count('android:name=".LocaleTileService"') == 1
+    assert man.count('android:name=".BridgeTileService"') == 1
+    block = _locale_service_block()
+    assert ('android:permission="android.permission.'
+            'BIND_QUICK_SETTINGS_TILE"') in block
+    assert ('android:name="android.service.quicksettings.action'
+            '.QS_TILE"') in block
+    assert 'android:icon="@drawable/ic_locale"' in block
+    assert 'android:label="@string/locale_tile_label"' in block
+    bridge = man[man.index('android:name=".BridgeTileService"'):]
+    bridge = bridge[:bridge.index("</service>")]
+    assert 'android:icon="@drawable/ic_tile"' in bridge
+    assert 'android:label="@string/tile_label"' in bridge
+
+
+def test_locale_tile_opens_locale_settings():
+    """SPEC-LOCALE-TILE-001 L3/L9: onClick opens the language settings
+    via startActivityAndCollapse with FLAG_ACTIVITY_NEW_TASK."""
+    src = _locale()
+    assert "Settings.ACTION_LOCALE_SETTINGS" in src
+    assert "startActivityAndCollapse(intent)" in src
+    assert "Intent.FLAG_ACTIVITY_NEW_TASK" in src
+    assert "new Intent(Settings.ACTION_LOCALE_SETTINGS)" in src
+    # The intent is built before it is launched.
+    assert src.index("new Intent(Settings.ACTION_LOCALE_SETTINGS)") < \
+        src.index("startActivityAndCollapse(intent)")
+    assert "import android.provider.Settings;" in src
+
+
+def test_locale_tile_state_inactive_and_subtitle():
+    """SPEC-LOCALE-TILE-001 L2/L6: always INACTIVE; onStartListening
+    refreshes the subtitle from the current language and calls
+    updateTile(); an empty language name shows locale_unknown."""
+    src = _locale()
+    assert "Tile.STATE_INACTIVE" in src
+    assert "Tile.STATE_ACTIVE" not in src
+    on = src[src.index("public void onStartListening()"):]
+    on = on[:on.index("public void onClick()")]
+    assert "refreshTile();" in on
+    ref = src[src.index("private void refreshTile()"):]
+    assert "tile.setState(Tile.STATE_INACTIVE);" in ref
+    assert "Locale.getDefault().getDisplayLanguage()" in ref
+    assert "tile.setSubtitle(language);" in ref
+    assert "tile.updateTile();" in ref
+    assert ref.index("tile.setSubtitle(language);") < ref.index(
+        "tile.updateTile();")
+    assert "R.string.locale_unknown" in ref
+    assert "language.isEmpty()" in ref
+
+
+def test_locale_tile_no_mainline_reference():
+    """SPEC-LOCALE-TILE-001 L4/L5/L10: no MainActivity, token,
+    executor, server, or settings write; a failure shows a toast
+    instead of silently swallowing the exception, with no
+    MainActivity fallback."""
+    src = _locale()
+    # The class body only: the header comment legitimately names
+    # MainActivity (as a thing the tile must NOT fall back to).
+    src = src[src.index("public class LocaleTileService"):]
+    for bad in ("MainActivity", "token", "Token", "Executor",
+                "executor", "BridgeService", "stopService",
+                "disableSelf", "Settings.Secure", "putString"):
+        assert bad not in src
+    assert "catch (Exception e)" in src
+    catch = src[src.index("catch (Exception e)"):]
+    catch = catch[:catch.index("private void refreshTile()")]
+    assert "R.string.toast_locale_open_failed" in catch
+    assert "Toast.makeText" in catch
+
+
+def test_locale_tile_strings_and_icon():
+    """SPEC-LOCALE-TILE-001 L1/L6/L7: the three strings exist with the
+    frozen wording, and ic_locale.xml exists as a stroke-drawn vector
+    that is not a copy of ic_tile."""
+    strings = _res_text("values/strings.xml")
+    assert 'name="locale_tile_label">言語設定</string>' in strings
+    assert ('name="toast_locale_open_failed">言語設定を開けませんで'
+            'した</string>') in strings
+    assert 'name="locale_unknown">不明</string>' in strings
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    icon = (root / "android-app" / "res" / "drawable"
+            / "ic_locale.xml").read_text(encoding="utf-8")
+    assert "<vector" in icon
+    assert 'strokeColor="#FFFFFF"' in icon
+    assert "pathData" in icon
+    tile = (root / "android-app" / "res" / "drawable"
+            / "ic_tile.xml").read_text(encoding="utf-8")
+    import re
+    assert (sorted(re.findall(r'pathData="([^"]+)"', icon))
+            != sorted(re.findall(r'pathData="([^"]+)"', tile)))
+
+
+def test_locale_tile_attribution_first_line():
+    """New Java file carries the required attribution as line 1."""
+    first = _locale().splitlines()[0]
+    assert first == ("// Implemented by MUSE-Koyuki (Muse Spark) "
+                     "\u2014 SPEC-LOCALE-TILE-001, 2026-11-09")
