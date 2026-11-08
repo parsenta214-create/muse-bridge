@@ -3,7 +3,7 @@
 - Status: Draft (GPT review CONS-095 conditionally adoptable, P0=0, P1x1, P2x1. v13 created, re-review CONS-096. Adoption/freezing is the System Development Lead's decision).
 - Source: the System Development Lead's proposal, 2026-11-08 09:04 +07: "What about a feature that turns accessibility off when Muse Bridge is turned off, or a separate shortcut that turns off Muse Bridge's own accessibility?" → 2026-11-08 09:09 +07, the System Development Lead chose the shortcut option.
 - Version target: v2.9.3 / code 56
-- Local file: `~/workspace/muse-bridge-repo/SPEC-A11Y-OFF-001-v12-en-DRAFT.md` (English draft of v12. The canonical file is `~/workspace/muse-bridge-repo/SPEC-A11Y-OFF-001.md`, Japanese v11; `~/workspace/muse-bridge/SPEC-A11Y-OFF-001.md` is a synced copy of the canonical file.)
+- Local file: `~/workspace/muse-bridge-repo/SPEC-A11Y-OFF-001.md` (English, v13. `~/workspace/muse-bridge/SPEC-A11Y-OFF-001.md` and `~/workspace/computer-use-preview/SPEC-A11Y-OFF-001.md` are synced copies of the canonical file.)
 
 ## 0. Goal
 
