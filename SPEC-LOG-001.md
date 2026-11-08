@@ -305,6 +305,11 @@
   - LOG-04：現行のログは通知行がまばら（posted 05:04:43、removed 05:06:01 のみ）。前回の flood（約 10–20 秒間隔の updated）が現行では出ていない。スロットルが機能している。
   - LOG-05：VM からの接続で `[11-08 05:05:46] client-first 100.84.*.*` が 1 回だけ記録された（VM の Tailscale IP 100.84.58.110、マスク済み）。
 - ping_to_client：/state では null。PingProber.probe() は MainActivity の UI から呼ばれるもので、VM からの接続では起動しない。v2.8.5 で確認済み（364 ms）のコードは v2.8.6 で変更していないため、回帰ではない。アプリを開けば表示される。
-- 未確認（再起動サイクルが必要なため、次回に持ち越し）：
-  - LOG-03：STOPPED 行に理由が付くこと（停止→再起動が必要）。
-  - BIND-02：Tailscale 切断状態での起動で DEGRADED になること（Tailscale の ON/OFF と再起動が必要）。
+- 未確認だった 2 件（LOG-03、BIND-02）は、2026-11-08 06:55 +07 のログ画面読取で確認済みとなった（下の「ライブ確認（追記）」を参照）。
+
+## ライブ確認（追記）— 2026-11-08 06:55 +07（v2.9.0、ログ画面を VM から読取）
+
+- 2026-11-08 06:17 のトンネル障害と Tailscale 入れ直し（06:54）のあと、ログ画面（exported 2026-11-08 06:55:32、app 2.9.0/53）を VM から読み取った。LOG-001 のコードは v2.9.0／v2.9.1 で変更していないため、以下の確認は v2.8.6 実装の検証として有効。
+- LOG-03：確認済み。`[11-08 06:46:41] server STOPPED: MANUAL`、`[11-08 06:46:55] server STOPPED: MANUAL`、`[11-08 06:54:11] server STOPPED: MANUAL` — STOPPED 行に理由（MANUAL）が付いている。
+- BIND-02：確認済み。06:17:23 の BOOT_COMPLETED 起動時、Tailscale が未接続で `ifaces rmnet0:100.69.*.*, lo:127.0.*.*`（tun0 なし）、`bind-summary bound=1 excluded=1 failed=0 (loopback bound)`、`server DEGRADED: tailscale-interface-unavailable`。06:54:15 の Tailscale 復旧後の再起動では `listen tun0 100.111.*.*:8080`、`bind-summary bound=2 excluded=1 failed=0 (tailscale bound) (loopback bound)`、`server RUNNING`。
+- これで §5.5 の未確認 2 件はすべて確認済みとなった。
