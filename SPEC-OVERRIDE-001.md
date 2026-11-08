@@ -174,4 +174,21 @@ VM 側が端末の画面を操作している間、Bridge アプリの「操作�
 - `/click_node` の座標表示。ノードの bounds 中心をサービス側から返す配管が必要になるため、v2 ではやらない。
 - Now Bar のピル表示、Android 16 Live Updates。D5 の通り、この端末では対象外。
 - 通知アイコンのアニメーション、通知の常駐表示（ロック画面での優先表示など）。
-- CONS-078 P2-02 の堅牢化（`getPersistedUriPermissions()` の try/catch）は本仕様の範囲外。v2.9.2 の同梱候補として残し、実装時に判断する。
+
+## 8. 実装記録（v2.9.2 / code 55、2026-11-08）
+
+- 実装者：MUSE-Koyuki。コミット 4f3e12e（ローカルのみ。プッシュは別途承認が必要）。
+- 変更ファイル：
+  - `HttpBridgeServer.java`：スロットル＋遅延投稿のフィールド・メソッド（`postOperationRunningThrottledLocked`、`runDeferredPost`、`invalidatePendingPostLocked`）、`noteOperation` での「Override - 」中央付与、/click・/swipe の座標ラベル、`postOperationRunning` のアイコンを `R.drawable.ic_override` に変更、`endOperationLocked`・`stop()` での保留破棄。
+  - `res/drawable/ic_override.xml`（新規）：白シルエットのターゲット型アイコン（外側リング＋中心ドット）、24dp。`postOperationRunning` でのみ使用。「操作終了」は `ic_dialog_info` のまま。
+  - `LogActivity.java`：CONS-078 P2-02 の堅牢化を同梱（`getPersistedUriPermissions()` の 3 箇所に try/catch。失敗は「不在」ではなく「不明」として扱う：ensureDriveInit は初期化を拒否、isWritePermissionHeld は未保持を返す、classifyAutoSaveFailure はフォルダを保持する）。
+  - `build.sh`：VERSION_NAME 2.9.2 / VERSION_CODE 55。
+  - `test_android_app_client.py`：`test_override_*`（OV-01〜OV-15）＋ `test_override_p202_*`（2 件）＋バージョン試験を `test_override_version_2_9_2` に更新。
+- 仕様からの実装上の選択（動作は仕様通り）：
+  - 「Override - 」の付与は `noteOperation` で中央集約した（各呼び出し元で付けるのではない）。どのエンドポイントも付け忘れないため。遅延投稿は付与済みのラベルをそのまま投稿する。
+  - `stop()` でも保留を破棄する。仕様 §3.3 手順 5 はセッション終了を扱うが、stop/start をまたぐと古い `pendingPostFuture`（非 null）が次のセッションの初回遅延予約を妨げるため。セッション終了と同一の破棄処理（`invalidatePendingPostLocked`）を使う。
+- ビルド：`Muse_Bridge_v2.9.2.apk`、119,799 バイト、SHA-256 2e277517de5678120aa36182f51d4609b0bbefb792d4c625fc778cbc2c45f636。aapt2 badging：code 55 / 2.9.2。
+- テスト：412 passed、18 subtests passed（2026-11-08 08:33 +07）。旧バージョン試験の残存アサーション（VERSION_CODE=54）を除去した上で全数通過。
+- ビルド時の不具合と対処：computer-use-preview 側の res/ が古く（`card_background.xml`・`colors.xml` 欠落、`activity_main.xml` 旧版）、初回ビルドが R 参照エラーで失敗した。原因は res/ の同期漏れ。repo から test tree へ res/ を同期して解決した。両 tree の debug.keystore は Drive バックアップと同一（SHA-256 8d144b54…）であることを確認済み。
+- 配信：push_apk.sh は Termux SSH が落ちているため失敗（tunnel proxy empty reply）。Drive 書斎/設備管理にアップロード済み（`Muse_Bridge_v2.9.2.apk`、file id `1YYHMbirWA8xCNJHXKyY5UM18GX1hKJr1`）。実機確認 OV-L1〜OV-L7 はインストール後に実施する。
+- CONS-078 P2-02 の堅牢化（`getPersistedUriPermissions()` の try/catch）は v2.9.2 に同梱した（§8 参照）。
