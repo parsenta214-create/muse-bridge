@@ -69,4 +69,5 @@ cd ~/workspace/computer-use-preview/android-app
 
 - GitHub HEAD は v2.8.5/code 51。電話は v2.8.6/code 52（メインの部屋の作業、push 待ち）。
 - GitHub Actions は登録済みだが未実行（手動のみ）。走らせるのはユーザーの合図があったときだけ。
+- Kotlin 移行の方針（2026-11-08 決定）：Android 側（`android-app/`）だけ Kotlin にする。VM 側 Python と上流の Python 樹は対象外。時期は v2.9.0 の後で、GitHub Actions のビルド証明が先。移行の細則（試すファイル、巨大小ファイルの扱い、Kotlin 標準ライブラリの依存ゼロ例外）は移行 SPEC で決める。
 - ライセンス Apache-2.0。トピック：`android`、`accessibility-service`、`tailscale`、`termux`。
