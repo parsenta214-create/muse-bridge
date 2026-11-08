@@ -14,6 +14,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.Icon;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
@@ -26,6 +28,8 @@ import android.widget.Toast;
 import java.net.Inet4Address;
 import java.net.InetAddress;
 import java.net.NetworkInterface;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Collections;
 import java.util.UUID;
 
@@ -103,10 +107,70 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver a11yStateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
+            onA11yBroadcastForDisable();
             refresh();
         }
     };
     private boolean a11yReceiverRegistered = false;
+
+    // ---- SPEC-A11Y-OFF-001 (v2.9.3) ----
+    public static final String ACTION_DISABLE_A11Y =
+            "dev.muse.bridge.ACTION_DISABLE_A11Y";
+    public static final String EXTRA_DISABLE_TOKEN =
+            "dev.muse.bridge.EXTRA_DISABLE_TOKEN";
+    /** D7: dedicated prefs file (real file a11y_off_token_prefs.xml),
+     * excluded from backup / device transfer (D5). */
+    static final String A11Y_OFF_TOKEN_PREFS = "a11y_off_token_prefs";
+    private static final String KEY_A11Y_OFF_TOKEN = "token";
+
+    /** Three-valued Android-side accessibility state. */
+    public enum A11yState { ENABLED, DISABLED, UNKNOWN }
+
+    private static final long DISABLE_CHECK_INTERVAL_MS = 2000L;
+    private static final int DISABLE_CHECK_MAX = 3;
+    private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+    /** Static (shared within the process); main thread only. */
+    private static boolean disableInProgress = false;
+    /** Operation generation; main thread only. */
+    private static int disableGeneration = 0;
+
+    private Button pinButton;
+    private final PinRequestManager.Listener pinListener = new PinRequestManager.Listener() {
+        @Override
+        public void onPinStateChanged() {
+            refreshPinButton();
+        }
+    };
+
+    /** D7: returns the stored disable token, generating it once and saving
+     * with commit(). Returns null when the save failed (no creation). The
+     * token is never logged. */
+    static String getOrCreateA11yOffToken(Context ctx) {
+        try {
+            SharedPreferences prefs = ctx.getSharedPreferences(
+                    A11Y_OFF_TOKEN_PREFS, Context.MODE_PRIVATE);
+            String token = prefs.getString(KEY_A11Y_OFF_TOKEN, null);
+            if (token != null && !token.isEmpty()) {
+                return token;
+            }
+            token = UUID.randomUUID().toString();
+            boolean saved = prefs.edit().putString(KEY_A11Y_OFF_TOKEN, token).commit();
+            return saved ? token : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** D7: null / empty on either side is never a match. */
+    static boolean isA11yOffTokenMatch(String stored, String received) {
+        if (stored == null || stored.isEmpty()
+                || received == null || received.isEmpty()) {
+            return false;
+        }
+        return MessageDigest.isEqual(
+                stored.getBytes(StandardCharsets.UTF_8),
+                received.getBytes(StandardCharsets.UTF_8));
+    }
 
     /** Returns the runtime token, generating and storing one on first use. */
     public static String getOrCreateToken(Context ctx) {
@@ -198,6 +262,26 @@ public class MainActivity extends Activity {
         ComponentName cn = new ComponentName(ctx, BridgeAccessibilityService.class);
         return enabled.contains(cn.flattenToString())
                 || enabled.contains(cn.flattenToShortString());
+    }
+
+    /** SPEC-A11Y-OFF-001: three-valued read of the Android-side state.
+     * getString() null means DISABLED; an exception means UNKNOWN.
+     * isAccessibilityEnabled() stays for state display only. */
+    public static A11yState getAccessibilityState(Context ctx) {
+        try {
+            String enabled = Settings.Secure.getString(
+                    ctx.getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            if (enabled == null) {
+                return A11yState.DISABLED;
+            }
+            ComponentName cn = new ComponentName(ctx, BridgeAccessibilityService.class);
+            return (enabled.contains(cn.flattenToString())
+                    || enabled.contains(cn.flattenToShortString()))
+                    ? A11yState.ENABLED : A11yState.DISABLED;
+        } catch (Exception e) {
+            return A11yState.UNKNOWN;
+        }
     }
 
     @Override
@@ -365,12 +449,142 @@ public class MainActivity extends Activity {
         // refresh() can restore them after setting the disabled colour.
         a11yButtonDefaultTextColor = a11yButton.getCurrentTextColor();
         notifButtonDefaultTextColor = notifButton.getCurrentTextColor();
+        pinButton = findViewById(R.id.a11y_off_shortcut_button);
+        pinButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                PinRequestManager.requestPin(MainActivity.this);
+            }
+        });
         refresh();
+        // Handle the shortcut intent once on a fresh launch; a recreated
+        // Activity (savedInstanceState != null) re-receives the old intent
+        // and must not execute it again.
+        if (savedInstanceState == null) {
+            handleDisableIntent(getIntent());
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleDisableIntent(intent);
+    }
+
+    /** SPEC-A11Y-OFF-001 3.2: dispatch ACTION_DISABLE_A11Y. */
+    private void handleDisableIntent(Intent intent) {
+        if (intent == null || !ACTION_DISABLE_A11Y.equals(intent.getAction())) {
+            return;
+        }
+        handleDisableA11y(intent);
+    }
+
+    /** SPEC-A11Y-OFF-001 3.2 step 3. Executes only with a matching D7
+     * token; anything else is ignored silently. Does not stop the server. */
+    private void handleDisableA11y(Intent intent) {
+        final Context app = getApplicationContext();
+        String received = null;
+        try {
+            received = intent.getStringExtra(EXTRA_DISABLE_TOKEN);
+        } catch (Exception e) {
+            received = null;
+        }
+        String stored = readA11yOffToken(app);
+        if (!isA11yOffTokenMatch(stored, received)) {
+            return;
+        }
+        if (disableInProgress) {
+            return;
+        }
+        disableInProgress = true;
+        disableGeneration++;
+        final int opGen = disableGeneration;
+
+        BridgeAccessibilityService service = BridgeAccessibilityService.getInstance();
+        if (service != null) {
+            try {
+                service.disableSelf();
+            } catch (Exception ignored) {
+                // The completion check below reports unconfirmed.
+            }
+            scheduleDisableCheck(app, opGen, 1);
+            return;
+        }
+        disableInProgress = false;
+        switch (getAccessibilityState(app)) {
+            case DISABLED:
+                Toast.makeText(app, R.string.toast_a11y_already_off, Toast.LENGTH_LONG).show();
+                break;
+            case ENABLED:
+                Toast.makeText(app, R.string.toast_a11y_not_connected, Toast.LENGTH_LONG).show();
+                break;
+            default:
+                Toast.makeText(app, R.string.toast_a11y_status_unknown, Toast.LENGTH_LONG).show();
+                break;
+        }
+    }
+
+    /** Reads the stored token without ever creating one: an intent must
+     * not cause token generation. */
+    private static String readA11yOffToken(Context ctx) {
+        try {
+            return ctx.getSharedPreferences(A11Y_OFF_TOKEN_PREFS, Context.MODE_PRIVATE)
+                    .getString(KEY_A11Y_OFF_TOKEN, null);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Completion check on the 2s timer: re-check the Android-side state,
+     * up to 3 times (6s). Never asserts success without DISABLED. */
+    private static void scheduleDisableCheck(final Context app, final int opGen, final int attempt) {
+        MAIN_HANDLER.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!disableInProgress || opGen != disableGeneration) {
+                    return;
+                }
+                A11yState state = getAccessibilityState(app);
+                if (state == A11yState.DISABLED) {
+                    finishDisable(app, R.string.toast_a11y_off_done);
+                } else if (state == A11yState.ENABLED && attempt < DISABLE_CHECK_MAX) {
+                    scheduleDisableCheck(app, opGen, attempt + 1);
+                } else {
+                    finishDisable(app, R.string.toast_a11y_off_unconfirmed);
+                }
+            }
+        }, DISABLE_CHECK_INTERVAL_MS);
+    }
+
+    private static void finishDisable(Context app, int toastRes) {
+        disableInProgress = false;
+        Toast.makeText(app, toastRes, Toast.LENGTH_LONG).show();
+    }
+
+    /** ACTION_A11Y_STATE_CHANGED received: with no operation in progress
+     * it is ignored; otherwise re-check and clear only when DISABLED. */
+    private void onA11yBroadcastForDisable() {
+        if (!disableInProgress) {
+            return;
+        }
+        Context app = getApplicationContext();
+        if (getAccessibilityState(app) == A11yState.DISABLED) {
+            finishDisable(app, R.string.toast_a11y_off_done);
+        }
+    }
+
+    private void refreshPinButton() {
+        if (pinButton != null) {
+            pinButton.setEnabled(PinRequestManager.isButtonEnabled());
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        PinRequestManager.setListener(pinListener);
+        PinRequestManager.onActivityResumed();
         // CONS-029 P1-2: listen for service connect/disconnect
         // while visible (registered before refresh so no event
         // between the two is missed).
@@ -390,6 +604,8 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onPause() {
+        PinRequestManager.onActivityPaused();
+        PinRequestManager.clearListener(pinListener);
         if (a11yReceiverRegistered) {
             try {
                 unregisterReceiver(a11yStateReceiver);
@@ -551,6 +767,7 @@ public class MainActivity extends Activity {
                 ? getColor(R.color.button_disabled_text)
                 : a11yButtonDefaultTextColor);
         notifButton.setEnabled(!notifGranted);
+        refreshPinButton();
         notifButton.setTextColor(notifGranted
                 ? getColor(R.color.button_disabled_text)
                 : notifButtonDefaultTextColor);

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Implemented by claude-sonnet-5-5 (medium) — SPEC-A11Y-OFF-001, 2026-11-08 -->
+<!-- SPEC-A11Y-OFF-001 D5/D7: the disable token is device-specific
+     credentials; exclude it from backup (Android 11 and earlier). The
+     path is the real file name of the a11y_off_token_prefs prefs file. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="a11y_off_token_prefs.xml" />
+</full-backup-content>

@@ -82,4 +82,15 @@
     <string name="ping_seconds_ago">%1$d 秒前</string>
     <string name="ping_minutes_ago">%1$d 分前</string>
     <string name="ping_hours_ago">%1$d 時間前</string>
+    <!-- SPEC-A11Y-OFF-001 (v2.9.3): accessibility-off shortcut. -->
+    <string name="btn_a11y_off_shortcut">補助機能オフのショートカットを作る</string>
+    <string name="a11y_off_short_label">補助機能オフ</string>
+    <string name="a11y_off_long_label">Muse Bridge の補助機能をオフにする</string>
+    <string name="toast_pin_failed">ショートカットを作れませんでした</string>
+    <string name="toast_pin_unresolved">前の作成要求が未解決です。しばらく待ってからもう一度押してください</string>
+    <string name="toast_a11y_off_done">補助機能をオフにしました</string>
+    <string name="toast_a11y_already_off">補助機能はすでにオフです</string>
+    <string name="toast_a11y_not_connected">サービスに接続されていません。状態を確認してください</string>
+    <string name="toast_a11y_off_unconfirmed">無効化の状態を確認できませんでした</string>
+    <string name="toast_a11y_status_unknown">状態を確認できませんでした</string>
 </resources>

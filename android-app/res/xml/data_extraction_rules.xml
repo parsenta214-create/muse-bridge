@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Implemented by claude-sonnet-5-5 (medium) — SPEC-A11Y-OFF-001, 2026-11-08 -->
+<!-- SPEC-A11Y-OFF-001 D5/D7: Android 12+ (targetSdk 34, primary
+     mechanism). The disable token is excluded from both cloud backup
+     and device-to-device transfer. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="a11y_off_token_prefs.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="a11y_off_token_prefs.xml" />
+    </device-transfer>
+</data-extraction-rules>

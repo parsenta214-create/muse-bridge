@@ -4044,14 +4044,14 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_override_version_2_9_2():
-    """Version: the build carries v2.9.2 / code 55."""
+def test_a11yoff_version_2_9_3():
+    """AX-12: the build carries v2.9.3 / code 56 (SPEC-A11Y-OFF-001)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.2"' in build
-    assert "VERSION_CODE=55" in build
+    assert 'VERSION_NAME="2.9.3"' in build
+    assert "VERSION_CODE=56" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4253,3 +4253,395 @@ def test_override_p202_classify_failure_keeps_folder():
     assert "getPersistedUriPermissions" in seg
     assert "catch (Exception ignored)" in seg
     assert "return false;" in seg
+
+
+
+# ----------------------------------------------------------------------
+# SPEC-A11Y-OFF-001 (v2.9.3): source-structure guards (section 4).
+# Runtime behaviour (pin dialog, shortcut launch, actual disable,
+# toasts) is covered by live verification AX-L1..L7, not here.
+# ----------------------------------------------------------------------
+
+def _pin():
+    return _java_source("PinRequestManager.java")
+
+
+def _a11y_main():
+    return _java_source("MainActivity.java")
+
+
+def test_a11yoff_ax01_shortcut_definition():
+    """AX-01/AX-08: ID, action, extra, explicit intent, labels, icon."""
+    pin = _pin()
+    main = _a11y_main()
+    assert 'SHORTCUT_ID = "a11y_off"' in pin
+    assert '"dev.muse.bridge.ACTION_DISABLE_A11Y"' in main
+    assert '"dev.muse.bridge.EXTRA_DISABLE_TOKEN"' in main
+    assert "intent.setClass(app, MainActivity.class)" in pin
+    assert "putExtra(MainActivity.EXTRA_DISABLE_TOKEN" in pin
+    assert "R.drawable.ic_tile" in pin
+    assert "a11y_off_short_label" in pin and "a11y_off_long_label" in pin
+    strings = _res_text("values/strings.xml")
+    for name in ("a11y_off_short_label", "a11y_off_long_label",
+                 "btn_a11y_off_shortcut", "toast_pin_failed",
+                 "toast_pin_unresolved", "toast_a11y_off_done",
+                 "toast_a11y_already_off", "toast_a11y_not_connected",
+                 "toast_a11y_off_unconfirmed", "toast_a11y_status_unknown"):
+        assert f'name="{name}"' in strings
+
+
+def test_a11yoff_ax02_worker_thread_and_return_meaning():
+    """AX-02/AX-18: requestPinShortcut on a worker, pre-check, no
+    success toast on true, callback null."""
+    pin = _pin()
+    assert "isRequestPinShortcutSupported()" in pin
+    assert "sm.requestPinShortcut(info, null)" in pin
+    assert "EXECUTOR.execute(new PinWorker(" in pin
+    assert pin.index("isRequestPinShortcutSupported()") < pin.index(
+        "EXECUTOR.execute(")
+    # requestPinShortcut is only called inside the worker's run().
+    assert pin.index("requestPinShortcut(info, null)") > pin.index(
+        "class PinWorker")
+    assert "catch (Exception e)" in pin
+    # KNOWN_TRUE path shows no toast.
+    seg = pin[pin.index("case KNOWN_TRUE:"):pin.index("case UNKNOWN:")]
+    assert "toast(" not in seg
+
+
+def test_a11yoff_ax03_flags_and_new_intent():
+    """AX-03/AX-15: D8 flags, onCreate + onNewIntent, setIntent."""
+    pin = _pin()
+    main = _a11y_main()
+    assert "Intent.FLAG_ACTIVITY_NEW_TASK" in pin
+    assert "Intent.FLAG_ACTIVITY_CLEAR_TOP" in pin
+    assert "Intent.FLAG_ACTIVITY_SINGLE_TOP" in pin
+    assert "protected void onNewIntent(Intent intent)" in main
+    assert "setIntent(intent);" in main
+    assert main.count("handleDisableIntent(") >= 3  # def + 2 callers
+    assert "private static boolean disableInProgress" in main
+
+
+def test_a11yoff_ax04_null_branch_three_valued():
+    """AX-04/AX-14/AX-19: getInstance()==null uses the three-valued
+    state; none of the branches disables."""
+    main = _a11y_main()
+    assert "enum A11yState { ENABLED, DISABLED, UNKNOWN }" in main
+    st = main[main.index("public static A11yState getAccessibilityState"):]
+    st = st[:st.index("protected void onCreate")]
+    assert "return A11yState.DISABLED;" in st  # null string
+    assert "catch (Exception e)" in st and "return A11yState.UNKNOWN;" in st
+    h = main[main.index("private void handleDisableA11y"):]
+    h = h[:h.index("private static String readA11yOffToken")]
+    nul = h[h.index("disableInProgress = false;"):]
+    assert "disableSelf" not in nul
+    assert "toast_a11y_already_off" in nul
+    assert "toast_a11y_not_connected" in nul
+    assert "toast_a11y_status_unknown" in nul
+    # existing boolean helper stays for display only
+    assert "public static boolean isAccessibilityEnabled(" in main
+
+
+def test_a11yoff_ax05_disable_self_and_completion_check():
+    """AX-05/AX-29/AX-37/AX-39: disableSelf, success toast only after
+    DISABLED is confirmed, 2s x3 re-checks, 6s unconfirmed toast."""
+    main = _a11y_main()
+    h = main[main.index("private void handleDisableA11y"):]
+    h = h[:h.index("private static String readA11yOffToken")]
+    assert h.count("service.disableSelf()") == 1
+    # no success toast inside the handler itself
+    assert "toast_a11y_off_done" not in h
+    assert "DISABLE_CHECK_INTERVAL_MS = 2000L" in main
+    assert "DISABLE_CHECK_MAX = 3" in main
+    chk = main[main.index("private static void scheduleDisableCheck"):]
+    chk = chk[:chk.index("private static void finishDisable")]
+    assert "A11yState.DISABLED" in chk
+    assert "toast_a11y_off_done" in chk
+    assert "toast_a11y_off_unconfirmed" in chk
+    assert "opGen != disableGeneration" in chk
+    bc = main[main.index("private void onA11yBroadcastForDisable"):]
+    bc = bc[:bc.index("private void refreshPinButton")]
+    assert "if (!disableInProgress)" in bc
+    assert "A11yState.DISABLED" in bc
+
+
+def test_a11yoff_ax06_ax07_only_disable_self_no_server_stop():
+    """AX-06/AX-07/AX-17: no settings put/adb/device admin, no server
+    stop in the shortcut execution path."""
+    main = _a11y_main()
+    h = main[main.index("private void handleDisableIntent"):]
+    h = h[:h.index("private void refreshPinButton")]
+    for bad in ("settings put", "adb", "DevicePolicyManager",
+                "stopService", "server.stop", "BridgeService"):
+        assert bad not in h
+    pin = _pin()
+    for bad in ("disableSelf", "stopService", "server.stop"):
+        assert bad not in pin
+
+
+def test_a11yoff_ax09_ax10_manifest_no_new_perm_or_component():
+    """AX-09/AX-10/AX-58/AX-65: only the two backup attributes are
+    added; MainActivity stays exported; exclusion paths match."""
+    import re
+    man = _manifest_source()
+    assert 'android:fullBackupContent="@xml/backup_rules"' in man
+    assert 'android:dataExtractionRules="@xml/data_extraction_rules"' in man
+    perms = re.findall(r'<uses-permission android:name="([^"]+)"', man)
+    assert sorted(perms) == sorted([
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.REQUEST_INSTALL_PACKAGES",
+        "com.termux.permission.RUN_COMMAND"])
+    comps = re.findall(r"<(?:activity|receiver|service)\s+android:name=\"([^\"]+)\"", man)
+    assert sorted(comps) == sorted([
+        ".MainActivity", ".LogActivity", ".BootReceiver",
+        ".BridgeAccessibilityService", ".BridgeService",
+        ".BridgeNotificationListener", ".BridgeTileService",
+        ".BridgeWidgetProvider", ".BridgeWidgetActionReceiver"])
+    main_region = man[man.index('android:name=".MainActivity"'):]
+    assert 'android:exported="true"' in main_region[:80]
+    # prefs file name vs exclusion XML paths
+    main = _a11y_main()
+    assert 'A11Y_OFF_TOKEN_PREFS = "a11y_off_token_prefs"' in main
+    full = _res_text("xml/backup_rules.xml")
+    assert 'domain="sharedpref" path="a11y_off_token_prefs.xml"' in full
+    ext = _res_text("xml/data_extraction_rules.xml")
+    cloud = ext[ext.index("<cloud-backup>"):ext.index("</cloud-backup>")]
+    xfer = ext[ext.index("<device-transfer>"):ext.index("</device-transfer>")]
+    for seg in (cloud, xfer):
+        assert 'domain="sharedpref" path="a11y_off_token_prefs.xml"' in seg
+
+
+def test_a11yoff_ax11_no_new_drawable():
+    """AX-08/D6: ic_tile reused, no new drawable file."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    names = sorted(p.name for p in
+                   (root / "android-app" / "res" / "drawable").iterdir())
+    assert names == ["card_background.xml", "ic_override.xml",
+                     "ic_tile.xml"]
+
+
+def test_a11yoff_ax13_ax20_ax21_ax70_token():
+    """AX-13/AX-20/AX-21/AX-70: UUID once, dedicated prefs, commit(),
+    null/empty never match, creation aborted on save failure, token
+    not logged."""
+    main = _a11y_main()
+    t = main[main.index("static String getOrCreateA11yOffToken"):]
+    t = t[:t.index("static boolean isA11yOffTokenMatch")]
+    assert "UUID.randomUUID().toString()" in t
+    assert ".commit()" in t and ".apply()" not in t
+    assert "return saved ? token : null;" in t
+    m = main[main.index("static boolean isA11yOffTokenMatch"):]
+    m = m[:m.index("/** Returns the runtime token")]
+    assert "stored == null || stored.isEmpty()" in m
+    assert "received == null || received.isEmpty()" in m
+    assert "MessageDigest.isEqual" in m
+    pin = _pin()
+    assert "if (token == null)" in pin
+    assert pin.index("if (token == null)") < pin.index("EXECUTOR.execute(")
+    # the intent path reads the stored token but never creates one
+    assert "readA11yOffToken(app)" in main
+    # token handling code never reaches a log / exception message
+    for src in (t, m, pin):
+        assert "Log." not in src and "BridgeLog" not in src
+    # mismatch is silent: token check precedes flag, no toast on mismatch
+    h = main[main.index("private void handleDisableA11y"):]
+    assert h.index("isA11yOffTokenMatch(stored, received)") < h.index(
+        "if (disableInProgress)")
+    mism = h[h.index("isA11yOffTokenMatch(stored, received)"):
+             h.index("if (disableInProgress)")]
+    assert "Toast" not in mism and "return;" in mism
+
+
+def test_a11yoff_ax18_pin_manager_states():
+    """AX-18/AX-56: four separate states, application-scoped static,
+    workerRunning atomic, main-thread Handler."""
+    pin = _pin()
+    assert "enum UiState { IDLE, REQUESTING, WAITING_CONFIRMATION }" in pin
+    assert ("enum UnresolvedState { NONE, REQUESTING_UNRESOLVED, "
+            "CONFIRMATION_UNRESOLVED }") in pin
+    assert "COMPLETED" not in pin
+    assert "AtomicBoolean workerRunning" in pin
+    assert "private static boolean pauseObserved" in pin
+    assert "private static boolean resumeObserved" in pin
+    assert "new Handler(Looper.getMainLooper())" in pin
+    assert "public final class PinRequestManager" in pin
+    assert "REQUESTING_TIMEOUT_MS = 30_000L" in pin
+    assert "WAITING_TIMEOUT_MS = 30_000L" in pin
+    assert "RELEASE_TIMEOUT_MS = 60_000L" in pin
+
+
+def test_a11yoff_press_handler_branches():
+    """Step 1: not IDLE -> nothing; IDLE with worker/unresolved ->
+    unresolved toast; button mirrors uiState == IDLE."""
+    pin = _pin()
+    r = pin[pin.index("public static void requestPin"):]
+    r = r[:r.index("private static ShortcutInfo buildShortcutInfo")]
+    a = r.index("if (uiState != UiState.IDLE)")
+    b = r.index("workerRunning.get() || unresolvedState != UnresolvedState.NONE")
+    assert a < b
+    assert "toast_pin_unresolved" in r[b:b + 200]
+    assert "return uiState == UiState.IDLE;" in pin
+    main = _a11y_main()
+    assert "pinButton.setEnabled(PinRequestManager.isButtonEnabled())" in main
+    assert "PinRequestManager.requestPin(MainActivity.this)" in main
+    # start sets the documented state
+    for line in ("requestGeneration++;", "uiState = UiState.REQUESTING;",
+                 "workerRunning.set(true);",
+                 "unresolvedState = UnresolvedState.NONE;",
+                 "armRequestingTimer(gen);"):
+        assert line in r
+
+
+def test_a11yoff_ax55_ax64_executor_rejection_restores():
+    """AX-55/AX-64: rejection / startup exception restores IDLE/false/NONE."""
+    pin = _pin()
+    r = pin[pin.index("EXECUTOR.execute(new PinWorker("):]
+    r = r[:r.index("private static ShortcutInfo buildShortcutInfo")]
+    assert "catch (Exception e)" in r
+    assert "workerRunning.set(false);" in r
+    assert "uiState = UiState.IDLE;" in r
+    assert "unresolvedState = UnresolvedState.NONE;" in r
+    assert "toast_pin_failed" in r
+    assert "cancelRequestingTimer();" in r
+
+
+def test_a11yoff_ax67_ax76_ax77_worker_events():
+    """AX-67/76/77/78/90: resultEventPosted, outcome recorded before
+    post, Error not caught, recovery only when no result was posted."""
+    pin = _pin()
+    w = pin[pin.index("private static final class PinWorker"):
+            pin.index("// ---- events (main thread) ----")]
+    assert "boolean resultEventPosted = false;" in w
+    assert "Outcome known = Outcome.UNKNOWN;" in w
+    assert "catch (Error" not in w and "catch (Throwable" not in w
+    assert "catch (Exception e)" in w
+    api = w.index("sm.requestPinShortcut(info, null)")
+    assert w.index("known = ok ? Outcome.KNOWN_TRUE : Outcome.KNOWN_FALSE;") > api
+    first_post = w.index("HANDLER.post(")
+    assert w.index("known = ok ?") < first_post
+    assert w.index("known = Outcome.KNOWN_EXCEPTION;") < first_post
+    fin = w[w.index("} finally {"):]
+    assert "if (!resultEventPosted)" in fin
+    assert "onRecoveryEvent(gen, carried)" in fin
+    # direct workerRunning reset only when the recovery post failed
+    assert fin.count("workerRunning.set(false)") == 1
+    assert "if (!posted)" in fin
+    # post failure never rewrites the recorded outcome
+    posts = w[first_post:w.index("} finally {")]
+    assert "known =" not in posts
+
+
+def test_a11yoff_ax68_ax71_ax72_recovery_paths():
+    """AX-68/71/72/81/91: outcome application on the main thread."""
+    pin = _pin()
+    ap = pin[pin.index("private static void applyOutcome"):
+             pin.index("// ---- timers")]
+    f = ap[ap.index("case KNOWN_FALSE:"):ap.index("case KNOWN_TRUE:")]
+    assert "case KNOWN_EXCEPTION:" in f
+    assert "uiState = UiState.IDLE;" in f
+    assert "unresolvedState = UnresolvedState.NONE;" in f
+    assert "toast(R.string.toast_pin_failed)" in f
+    assert "startReleaseTimerOnce" not in f
+    t = ap[ap.index("case KNOWN_TRUE:"):ap.index("case UNKNOWN:")]
+    assert "CONFIRMATION_UNRESOLVED" in t
+    assert "UiState.WAITING_CONFIRMATION" in t
+    assert "armWaitingTimer(gen)" in t
+    assert "pauseObserved = false;" in t and "resumeObserved = false;" in t
+    u = ap[ap.index("case UNKNOWN:"):]
+    assert "if (uiState == UiState.REQUESTING)" in u
+    assert "unresolvedState = UnresolvedState.CONFIRMATION_UNRESOLVED;" in u
+    assert "startReleaseTimerOnce(gen)" in u
+
+
+def test_a11yoff_ax74_ax79_ax80_ax88_ax95_recovery_generation():
+    """AX-74/79/80/88/95: recovery events are generation-checked and
+    processed once; the 60s timer starts only once (AX-93)."""
+    pin = _pin()
+    r = pin[pin.index("private static void onRecoveryEvent"):]
+    r = r[:r.index("private static void applyOutcome")]
+    assert "gen != requestGeneration" in r
+    assert "processedGeneration == gen" in r
+    s = pin[pin.index("private static void startReleaseTimerOnce"):]
+    s = s[:s.index("private static void cancelReleaseTimer")]
+    assert "if (releaseTimerRunning)" in s
+    assert "RELEASE_TIMEOUT_MS" in s
+    assert "gen != requestGeneration" in s
+
+
+def test_a11yoff_ax53_ax54_ax34_late_results_not_discarded():
+    """AX-26/34/53/54/59/60: late results are applied, not discarded;
+    result events carry no generation drop."""
+    pin = _pin()
+    r = pin[pin.index("private static void onResultEvent"):
+            pin.index("/** Error-specific recovery event")]
+    assert "gen" not in r.replace("requestGeneration", "")
+    assert "applyOutcome(outcome)" in r
+    ap = pin[pin.index("case KNOWN_TRUE:"):pin.index("case UNKNOWN:")]
+    assert "else {" in ap and "startReleaseTimerOnce(gen)" in ap
+
+
+def test_a11yoff_ax61_ax62_ax89_ax94_timeouts_and_guard():
+    """AX-61/62/63/85/89/92: REQUESTING timeout with guard re-arming,
+    Error-recovery terminal state, generation-checked old timers."""
+    pin = _pin()
+    t = pin[pin.index("private static void onRequestingTimeout"):
+            pin.index("private static void armWaitingTimer")]
+    assert "gen != requestGeneration" in t
+    assert "if (workerRunning.get())" in t
+    run = t[t.index("if (workerRunning.get())"):t.index("} else {")]
+    assert "UnresolvedState.REQUESTING_UNRESOLVED" in run
+    assert "armRequestingTimer(gen)" in run  # guard re-arm
+    conv = t[t.index("} else {"):]
+    assert "UnresolvedState.CONFIRMATION_UNRESOLVED" in conv
+    assert "startReleaseTimerOnce(gen)" in conv
+    assert "armRequestingTimer" not in conv  # stops re-arming
+    # events cancel the guard
+    assert "cancelRequestingTimer();" in pin[
+        pin.index("private static void applyOutcome"):
+        pin.index("case KNOWN_FALSE:")]
+    # WAITING_CONFIRMATION timeout: UI back to IDLE, unresolved kept
+    w = pin[pin.index("private static void armWaitingTimer"):
+            pin.index("private static void cancelWaitingTimer")]
+    assert "gen != requestGeneration" in w
+    assert "uiState = UiState.IDLE;" in w
+    assert "startReleaseTimerOnce(gen)" in w
+    rel = pin[pin.index("private static void startReleaseTimerOnce"):
+              pin.index("private static void cancelReleaseTimer")]
+    assert "unresolvedState = UnresolvedState.NONE;" in rel
+
+
+def test_a11yoff_ax46_ax51_ax52_lifecycle_reference_only():
+    """AX-46/51/52: pause/resume recorded for reference only; never a
+    release condition."""
+    pin = _pin()
+    lc = pin[pin.index("public static void onActivityPaused"):
+             pin.index("// ---- press handler")]
+    assert "pauseObserved = true;" in lc
+    assert "resumeObserved = true;" in lc
+    assert "unresolvedState = " not in lc and "uiState = " not in lc
+    # no other code branches on the observed flags
+    body = pin.replace(lc, "")
+    for flag in ("pauseObserved", "resumeObserved"):
+        for line in body.splitlines():
+            if line.lstrip().startswith(("*", "//", "/*")):
+                continue
+            if flag in line:
+                assert ("= false;" in line or "private static boolean" in line
+                        or "return " in line), line
+    main = _a11y_main()
+    assert "PinRequestManager.onActivityPaused();" in main
+    assert "PinRequestManager.onActivityResumed();" in main
+    assert "PinRequestManager.setListener(pinListener);" in main
+    assert "PinRequestManager.clearListener(pinListener);" in main
+
+
+def test_a11yoff_attribution_first_line():
+    """New Java file carries the required attribution as line 1."""
+    first = _pin().splitlines()[0]
+    assert first == ("// Implemented by claude-sonnet-5-5 (medium) "
+                     "\u2014 SPEC-A11Y-OFF-001, 2026-11-08")
