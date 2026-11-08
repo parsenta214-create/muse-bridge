@@ -4825,6 +4825,14 @@ def test_locale_tile_state_inactive_and_subtitle():
         "tile.updateTile();")
     assert "R.string.locale_unknown" in ref
     assert "language.isEmpty()" in ref
+    # L-104-01 (CONS-104 P2): negative guards — no cached locale, no
+    # background polling, no scheduled updates, no persistent state.
+    for bad in ("private Locale", "static Locale", "cachedLanguage",
+                "cachedLocale", "Handler", "postDelayed",
+                "ScheduledExecutor", "AlarmManager", "WorkManager",
+                "Timer", "Thread", "SharedPreferences",
+                "getSharedPreferences"):
+        assert bad not in src
 
 
 def test_locale_tile_no_mainline_reference():
