@@ -226,11 +226,12 @@ public final class PinRequestManager {
                 // A fatal VM Error is not caught: it skips this post and
                 // is rethrown after finally.
                 final Outcome carried = known;
+                final int postedGen = gen;
                 try {
                     resultEventPosted = HANDLER.post(new Runnable() {
                         @Override
                         public void run() {
-                            onResultEvent(carried);
+                            onResultEvent(postedGen, carried);
                         }
                     });
                 } catch (Exception ignored) {
@@ -262,9 +263,18 @@ public final class PinRequestManager {
 
     // ---- events (main thread) ----
 
-    /** Normal result event: late results are NOT discarded. */
-    private static void onResultEvent(Outcome outcome) {
-        processedGeneration = requestGeneration;
+    /**
+     * Normal result event: generation captured at post time. A late result
+     * of the CURRENT generation is still applied; a result of an older
+     * generation is discarded. Applied once per generation, consistent
+     * with the recovery event (a generation already resolved by either
+     * event is never applied again).
+     */
+    private static void onResultEvent(int gen, Outcome outcome) {
+        if (gen != requestGeneration || processedGeneration == gen) {
+            return;
+        }
+        processedGeneration = gen;
         applyOutcome(outcome);
     }
 
@@ -321,15 +331,35 @@ public final class PinRequestManager {
 
     // ---- timers (main thread, generation-checked) ----
 
-    private static void armRequestingTimer(final int gen) {
+    /** postDelayed with the return value checked; exceptions count as failure. */
+    private static boolean postDelayedChecked(Runnable r, long delayMs) {
+        try {
+            return HANDLER.postDelayed(r, delayMs);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Arms the requesting guard. On post failure no timer is recorded as
+     * armed (requestingTimer == null) and false is returned; the request
+     * then stays unresolved until the worker's event arrives (never
+     * released early).
+     */
+    private static boolean armRequestingTimer(final int gen) {
         cancelRequestingTimer();
-        requestingTimer = new Runnable() {
+        Runnable r = new Runnable() {
             @Override
             public void run() {
                 onRequestingTimeout(gen);
             }
         };
-        HANDLER.postDelayed(requestingTimer, REQUESTING_TIMEOUT_MS);
+        if (!postDelayedChecked(r, REQUESTING_TIMEOUT_MS)) {
+            requestingTimer = null;
+            return false;
+        }
+        requestingTimer = r;
+        return true;
     }
 
     private static void cancelRequestingTimer() {
@@ -366,7 +396,7 @@ public final class PinRequestManager {
 
     private static void armWaitingTimer(final int gen) {
         cancelWaitingTimer();
-        waitingTimer = new Runnable() {
+        Runnable r = new Runnable() {
             @Override
             public void run() {
                 waitingTimer = null;
@@ -380,7 +410,17 @@ public final class PinRequestManager {
                 notifyListener();
             }
         };
-        HANDLER.postDelayed(waitingTimer, WAITING_TIMEOUT_MS);
+        if (!postDelayedChecked(r, WAITING_TIMEOUT_MS)) {
+            // No waiting timer registered: restore the UI now but keep
+            // CONFIRMATION_UNRESOLVED (never released early).
+            waitingTimer = null;
+            if (uiState == UiState.WAITING_CONFIRMATION) {
+                uiState = UiState.IDLE;
+            }
+            startReleaseTimerOnce(gen);
+            return;
+        }
+        waitingTimer = r;
     }
 
     private static void cancelWaitingTimer() {
@@ -395,8 +435,7 @@ public final class PinRequestManager {
         if (releaseTimerRunning) {
             return;
         }
-        releaseTimerRunning = true;
-        releaseTimer = new Runnable() {
+        Runnable r = new Runnable() {
             @Override
             public void run() {
                 if (gen != requestGeneration) {
@@ -408,7 +447,15 @@ public final class PinRequestManager {
                 notifyListener();
             }
         };
-        HANDLER.postDelayed(releaseTimer, RELEASE_TIMEOUT_MS);
+        if (!postDelayedChecked(r, RELEASE_TIMEOUT_MS)) {
+            // Not registered: the running flag stays false and the
+            // unresolved state is kept (no false auto-release).
+            releaseTimerRunning = false;
+            releaseTimer = null;
+            return;
+        }
+        releaseTimer = r;
+        releaseTimerRunning = true;
     }
 
     private static void cancelReleaseTimer() {

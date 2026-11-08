@@ -4574,12 +4574,12 @@ def test_a11yoff_ax74_ax79_ax80_ax88_ax95_recovery_generation():
 
 
 def test_a11yoff_ax53_ax54_ax34_late_results_not_discarded():
-    """AX-26/34/53/54/59/60: late results are applied, not discarded;
-    result events carry no generation drop."""
+    """AX-26/34/53/54/59/60: late results of the CURRENT generation are
+    applied, not discarded (stale generations are covered by AX-96)."""
     pin = _pin()
     r = pin[pin.index("private static void onResultEvent"):
             pin.index("/** Error-specific recovery event")]
-    assert "gen" not in r.replace("requestGeneration", "")
+    assert "gen != requestGeneration" in r
     assert "applyOutcome(outcome)" in r
     ap = pin[pin.index("case KNOWN_TRUE:"):pin.index("case UNKNOWN:")]
     assert "else {" in ap and "startReleaseTimerOnce(gen)" in ap
@@ -4638,6 +4638,111 @@ def test_a11yoff_ax46_ax51_ax52_lifecycle_reference_only():
     assert "PinRequestManager.onActivityResumed();" in main
     assert "PinRequestManager.setListener(pinListener);" in main
     assert "PinRequestManager.clearListener(pinListener);" in main
+
+
+def test_a11yoff_ax96_stale_result_discarded_after_new_generation():
+    """AX-96 (CONS-097 P1-01): the worker captures its generation at post
+    time; a stale normal result A arriving after B started is discarded
+    and cannot touch B's four state dimensions or timers."""
+    pin = _pin()
+    w = pin[pin.index("private static final class PinWorker"):
+            pin.index("// ---- events (main thread) ----")]
+    assert "final int postedGen = gen;" in w
+    assert "onResultEvent(postedGen, carried)" in w
+    assert "onResultEvent(carried)" not in pin
+    r = pin[pin.index("private static void onResultEvent"):
+            pin.index("/** Error-specific recovery event")]
+    # discard check precedes any state mutation / applyOutcome
+    guard = r.index("gen != requestGeneration")
+    assert guard < r.index("processedGeneration = gen;")
+    assert guard < r.index("applyOutcome(outcome)")
+    assert "return;" in r[guard:r.index("processedGeneration = gen;")]
+    # applyOutcome is the only place state is applied
+    assert "processedGeneration = requestGeneration" not in pin
+
+
+def test_a11yoff_ax97_same_generation_result_and_recovery_once():
+    """AX-97: result and recovery events of one generation share the same
+    apply-once guard, so exactly one transition happens."""
+    pin = _pin()
+    res = pin[pin.index("private static void onResultEvent"):
+              pin.index("/** Error-specific recovery event")]
+    rec = pin[pin.index("private static void onRecoveryEvent"):
+              pin.index("private static void applyOutcome")]
+    for seg in (res, rec):
+        assert "gen != requestGeneration || processedGeneration == gen" in seg
+        assert seg.index("processedGeneration = gen;") < seg.index(
+            "applyOutcome(outcome)")
+        assert seg.count("applyOutcome(outcome)") == 1
+    # only these two events record a processed generation
+    assert pin.count("processedGeneration = gen;") == 2
+
+
+def test_a11yoff_ax98_requesting_guard_post_failure():
+    """AX-98: a failed requesting-guard post never leaves a timer claimed
+    as armed, and does not release the unresolved request."""
+    pin = _pin()
+    assert "private static boolean postDelayedChecked" in pin
+    a = pin[pin.index("private static boolean armRequestingTimer"):
+            pin.index("private static void cancelRequestingTimer")]
+    assert "postDelayedChecked(r, REQUESTING_TIMEOUT_MS)" in a
+    fail = a[a.index("if (!postDelayedChecked"):a.index("requestingTimer = r;")]
+    assert "requestingTimer = null;" in fail
+    assert "return false;" in fail
+    assert "unresolvedState" not in a and "NONE" not in a
+    # the timer field is assigned only after a successful post
+    assert a.index("requestingTimer = r;") > a.index("if (!postDelayedChecked")
+    # no unchecked postDelayed remains anywhere
+    assert "HANDLER.postDelayed(" not in pin.replace(
+        "return HANDLER.postDelayed(r, delayMs);", "")
+
+
+def test_a11yoff_ax99_release_timer_post_failure():
+    """AX-99: a failed release-timer post leaves the running flag false
+    and the unresolved state intact (no false auto-release display)."""
+    pin = _pin()
+    s = pin[pin.index("private static void startReleaseTimerOnce"):
+            pin.index("private static void cancelReleaseTimer")]
+    assert "postDelayedChecked(r, RELEASE_TIMEOUT_MS)" in s
+    fail = s[s.index("if (!postDelayedChecked"):s.index("releaseTimer = r;")]
+    assert "releaseTimerRunning = false;" in fail
+    assert "releaseTimer = null;" in fail
+    assert "return;" in fail
+    assert "unresolvedState = UnresolvedState.NONE;" not in fail
+    # running flag set only after the successful post
+    assert s.index("releaseTimerRunning = true;") > s.index("releaseTimer = r;")
+    # waiting timer failure also keeps the unresolved state
+    wt = pin[pin.index("private static void armWaitingTimer"):
+             pin.index("private static void cancelWaitingTimer")]
+    wfail = wt[wt.index("if (!postDelayedChecked"):wt.index("waitingTimer = r;")]
+    assert "waitingTimer = null;" in wfail
+    assert "unresolvedState" not in wfail
+
+
+def test_a11yoff_ax100_concurrent_completion_timeout_recreation():
+    """AX-100: worker completion, timeout and Activity recreation are all
+    serialized on the main thread and generation-guarded, so they
+    converge on one consistent final state."""
+    pin = _pin()
+    # every event / timer callback is generation-checked
+    for name in ("onResultEvent", "onRecoveryEvent", "onRequestingTimeout"):
+        seg = pin[pin.index("private static void " + name):]
+        seg = seg[:seg.index("\n    }\n")]
+        assert "gen != requestGeneration" in seg, name
+        assert "processedGeneration == gen" in seg, name
+    # Activity recreation only swaps the listener; it never mutates state
+    lst = pin[pin.index("public static void setListener"):
+              pin.index("// ---- lifecycle record")]
+    assert "uiState" not in lst and "unresolvedState" not in lst
+    assert "workerRunning" not in lst
+    # the timeout never overrides an already-processed generation
+    t = pin[pin.index("private static void onRequestingTimeout"):
+            pin.index("private static void armWaitingTimer")]
+    assert t.index("processedGeneration == gen") < t.index("uiState =")
+    # results are applied only through the main Handler
+    w = pin[pin.index("private static final class PinWorker"):
+            pin.index("// ---- events (main thread) ----")]
+    assert "applyOutcome" not in w
 
 
 def test_a11yoff_attribution_first_line():
