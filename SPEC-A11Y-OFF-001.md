@@ -1,6 +1,6 @@
 # Muse Bridge — 補助機能オフのショートカット Spec (Draft)
 
-- Status: Draft（GPT レビュー CONS-090 は条件付き採用（P0=0、P1×1、P2×2）。v8 を作成し、再レビュー CONS-091 に回す。採用・凍結はサイガマンの決定による）
+- Status: Draft（GPT レビュー CONS-091 は条件付き採用（P0=0、P1×0、P2×1）。v9 を作成し、再レビュー CONS-092 に回す。採用・凍結はサイガマンの決定による）
 - Source: サイガマンの提案 2026-11-08 09:04 +07「Muse Bridgeをオフにしたらアクセシビリティをオフにする機能、またはMuse_Bridge単体のアクセシビリティをオフにするショートカットを別個で作るのは？」→ 2026-11-08 09:09 +07、サイガマンがショートカットの方を選択
 - Version target: v2.9.3 / code 56
 - Local file: `~/workspace/muse-bridge-repo/SPEC-A11Y-OFF-001.md`（正本。`~/workspace/muse-bridge/SPEC-A11Y-OFF-001.md` は同期コピー）
@@ -15,7 +15,7 @@ Muse Bridge のアクセシビリティサービスだけを、ホーム画面�
 - D2：オフの仕組みは **`AccessibilityService.disableSelf()`** とする。サービスは自分自身をオフにできる（API 24+、minSdk 30 で利用可）。呼び出し元は `BridgeAccessibilityService.getInstance()`（`onServiceConnected` で設定され、`onDestroy` で null に戻る）。
 - D3：**オフ専用**とする。オンに戻すショートカットは作らない。アプリ側から自分のアクセシビリティをオンにはできない（Android の制限）。オンに戻すのは設定 → ユーザー補助 → インストール済みアプリ → Muse Bridge での手動操作。
 - D4：ショートカットは**サーバを止めない**。補助機能だけをオフにする。サーバは動き続けるが、画面操作は `ACCESSIBILITY_DISABLED` で失敗する（既存の挙動）。サーバを止めるのは従来の停止ボタン（アプリ・ウィジェット・タイル）で行う。
-- D5：ショートカットの作成は**アプリ内のボタン**から行う。`ShortcutManager.requestPinShortcut()` を**ワーカースレッド**で呼び、システムのピン留め確認ダイアログでユーザが確認してからホーム画面に置く。作成の確認はシステムのダイアログに任せる。`PinRequestManager`（Application スコープの static シングルトン）は、4つの独立した状態を保持する。① UI 状態 `uiState`（IDLE／REQUESTING／WAITING_CONFIRMATION。ボタンの有効・無効は `uiState == IDLE` を映す。旧仕様の COMPLETED は廃止し IDLE に統合する）、② ワーカー状態 `workerRunning`（true／false）、③ 未解決要求状態 `unresolvedState`（NONE／REQUESTING_UNRESOLVED／CONFIRMATION_UNRESOLVED）、④ ライフサイクル記録 `pauseObserved`／`resumeObserved`（参考情報として記録するのみ）。すべての状態の読み書きと遷移処理はメインスレッドに直列化する。`onPause → onResume` は復帰の参考情報として記録するのみとし、未解決要求の解除はタイムアウトで行う。Activity 再生成時は既存要求の状態を引き継ぐ。
+- D5：ショートカットの作成は**アプリ内のボタン**から行う。`ShortcutManager.requestPinShortcut()` を**ワーカースレッド**で呼び、システムのピン留め確認ダイアログでユーザが確認してからホーム画面に置く。作成の確認はシステムのダイアログに任せる。`PinRequestManager`（Application スコープの static シングルトン）は、4つの独立した状態を保持する。① UI 状態 `uiState`（IDLE／REQUESTING／WAITING_CONFIRMATION。ボタンの有効・無効は `uiState == IDLE` を映す。旧仕様の COMPLETED は廃止し IDLE に統合する）、② ワーカー状態 `workerRunning`（true／false）、③ 未解決要求状態 `unresolvedState`（NONE／REQUESTING_UNRESOLVED／CONFIRMATION_UNRESOLVED）、④ ライフサイクル記録 `pauseObserved`／`resumeObserved`（参考情報として記録するのみ）。すべての状態の読み書きと遷移処理はメインスレッドに直列化する。ワーカーで VM の致命的な Error が発生した場合は、ワーカー側の finally が復旧イベントをメインスレッドへ通知し、`PinRequestManager` がメインスレッドで状態を戻す。Error は捕捉せず再スローする。プロセス終了時にはメモリ上の状態復旧を保証しない。`onPause → onResume` は復帰の参考情報として記録するのみとし、未解決要求の解除はタイムアウトで行う。Activity 再生成時は既存要求の状態を引き継ぐ。
 - D6：**新規権限なし、新規 drawable なし、新規コンポーネントなし**。`ShortcutManager` に権限は不要。アイコンは既存の `R.drawable.ic_tile` を流用する。ショートカットの intent は MainActivity への明示 intent で、新しい exported コンポーネントは作らない。マニフェストの変更は、トークンのバックアップ除外のための `fullBackupContent` 属性と `dataExtractionRules` 属性の追加のみ認める（P2-02 の決定による。v5 で D6 を改定し、v6 で dataExtractionRules を追加）。
 - D7：**無効化 intent はアプリ内トークンを運ぶ**。トークンは UUID を初回に一度だけ生成し、アプリ内の専用 SharedPreferences ファイル `a11y_off_token_prefs` に保存する（他アプリからは読めない）。ショートカット作成時に intent の extra として埋め込む。MainActivity は、アクション一致かつ extra のトークンが保存値と一致するときだけ無効化を実行する。保存値または extra が null・空文字の場合は一致とみなさず、無効化を実行しない。トークンを例外メッセージやデバッグログに出力しない。一致しない intent（他アプリからの送信を含む）は無言で無視する（トーストも出さない、無効化もしない）。アクション名だけでは認証にならないため、このトークンが外部起動の防波堤になる。トークンは作り直しでも変わらない（保存値を再利用する）ため、古いショートカットも動き続ける。保存は `commit()`（同期・成否が返る）で行い、保存の成功を確認してからショートカット作成要求を送る。保存に失敗した場合は作成しない。トークンは認証情報として扱い、ログに出力しない。これは呼び出し元アプリの身元を確認する仕組みではなく、秘密情報を持つ intent だけを受け付ける Bearer Token 方式である。トークンを取得した第三者による再送は防げない。ルート化端末やランチャー侵害など、アプリ外の信頼境界の侵害は対象外とする。デフォルトランチャーはトークンを含む intent を取り扱う信頼主体であり、信頼境界の内側に置く。信頼できないランチャーの利用は保証対象外とする。トークンは端末固有の認証情報とし、バックアップ・端末移行の復元対象から除外する（専用の SharedPreferences ファイル `a11y_off_token_prefs`（実ファイル `a11y_off_token_prefs.xml`）に保存し、バックアップ除外ルールで対象外にする）。除外は fullBackupContent（Android 11 以前）と dataExtractionRules（Android 12 以降）の両方で行い、dataExtractionRules では cloud-backup と device-transfer の両方から除外する。targetSdk 34 のため、dataExtractionRules が主の仕組みになる。復元後はトークンが存在しないため、古いショートカットは動かなくなる（アプリ内のボタンから作り直す）。実際のバックアップ挙動は Android のバージョンで異なるため、実装時にビルド設定と照合して確認する。トークン漏洩後の失効・再発行機構は現仕様には存在しない。
 - D8：**ショートカット intent の flags を固定する**。`FLAG_ACTIVITY_NEW_TASK | FLAG_ACTIVITY_CLEAR_TOP | FLAG_ACTIVITY_SINGLE_TOP`。MainActivity に launchMode の指定はなく（標準）、flags なしでは毎回新しいインスタンスが作られるため。
@@ -83,6 +83,11 @@ Muse Bridge のアクセシビリティサービスだけを、ホーム画面�
 - セキュリティレビュー対応（CONS-090）：ワーカーの例外処理を `catch (Exception)` にし、VM の致命的な `Error` は通常の API 例外として扱わず、finally で状態を戻したうえで再スローする。トークン比較時は null・空文字を一致とみなさず、トークンを例外メッセージやデバッグログに出力しない。
 - テスト追加：AX-59〜AX-66。
 
+## v8 → v9 の変更点（CONS-091 対応、2026-11-08）
+
+- P2-01：致命的 Error 発生時の状態復旧とスレッド直列化の明確化。ワーカー側の finally は復旧イベントをメインスレッドへ通知し、`PinRequestManager` がメインスレッドで状態を戻す。ワーカー側の finally から直接 `workerRunning` を変更しない。Error は捕捉せず再スローする。プロセス終了時にはメモリ上の状態復旧を保証しないことを明文化する。
+- テスト追加：AX-67〜AX-70。AX-55 と AX-64 を Executor 拒否と例外発生の独立した試験に分離する。
+
 ## 2. 文言と識別子
 
 - ショートカット ID：`a11y_off`（固定。作り直しても同じ ID）
@@ -107,7 +112,7 @@ Muse Bridge のアクセシビリティサービスだけを、ホーム画面�
 
 1. MainActivity のボタン「補助機能オフのショートカットを作る」を押す。要求の状態は `PinRequestManager`（Application スコープの static シングルトン）で保持する。`PinRequestManager` のすべての状態の読み書きと遷移処理はメインスレッドに直列化する。ボタンの有効・無効は `uiState == IDLE` を映す（IDLE のときだけ有効）。押下ハンドラでもマネージャの状態を再確認する（再生成直後の Activity が一時的に有効なボタンを表示している場合に備える）。押下時の分岐は次の通り。`uiState != IDLE` の場合は何もしない。`uiState == IDLE` だが `workerRunning == true` または `unresolvedState != NONE` の場合は、新しい要求を開始せず、トースト「前の作成要求が未解決です。しばらく待ってからもう一度押してください」を出して終わる。`uiState == IDLE && !workerRunning && unresolvedState == NONE` のときだけ新しい要求を開始する。まず `isRequestPinShortcutSupported()` で確認し、非対応の場合はトースト「ショートカットを作れませんでした」を出して終わる（要求は送らない。状態は `IDLE / false / NONE` のまま）。
 2. まず D7 のトークンを用意する（保存済みのものがあれば再利用し、なければ UUID を生成して専用 SharedPreferences ファイル `a11y_off_token_prefs` に `commit()` で保存する。実ファイルは `a11y_off_token_prefs.xml` であり、`fullBackupContent` および `dataExtractionRules`（`cloud-backup`／`device-transfer`）の `<exclude domain="sharedpref" path="..."/>` の指定パスと完全に一致させる）。保存に失敗した場合はトースト「ショートカットを作れませんでした」を出し、状態は `uiState = IDLE`、`workerRunning = false`、`unresolvedState = NONE` のまま終了する。作成要求は送らない。
-3. `ShortcutManager.requestPinShortcut()` を**ワーカースレッド**で呼び、`ShortcutInfo`（ID `a11y_off`、短いラベル・長いラベル・アイコン・MainActivity への明示 intent＋D7 のトークン extra＋D8 の flags）を渡す。コールバックは null（新規コンポーネントを作らないため、承認・拒否の結果は受け取らない。IntentSender コールバックは承認時には通知されるが拒否時には通知されないため、両方を処理できない）。ワーカー起動時にメインスレッドで `requestGeneration` を 1 増やし、`uiState = REQUESTING`、`workerRunning = true`、`unresolvedState = NONE`、`pauseObserved = false`、`resumeObserved = false` に設定し、30秒の `REQUESTING` タイムアウトタイマを開始する。ワーカーは `try / catch (Exception)` で `requestPinShortcut()` を呼び、結果（戻り値・例外）をメインスレッドの `Handler` 経由で `PinRequestManager` に返す。VM の致命的な `Error`（`OutOfMemoryError` 等）は通常の API 例外として扱わず、finally で状態を戻したうえで再スローする。`PinRequestManager` は必ず `workerRunning = false` に戻す。`workerRunning` は `volatile` または `AtomicBoolean` とする。**異常終了経路**：`Executor` がワーカーの実行を拒否した場合（`RejectedExecutionException` 等）や開始直後に例外が発生した場合は、即座に `workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に戻し、タイマを解除してトースト「ショートカットを作れませんでした」を出す。**ワーカー結果の扱い**：古い Activity インスタンスへの直接 UI 更新は行わないが、`PinRequestManager` 側では `REQUESTING` タイムアウト後であってもワーカーの結果（`true`／`false`／例外）を破棄せずに処理し、未解決要求状態を遷移させる（手順 8 の2）。世代番号の役割は、古いタイマコールバックの無効化と、破棄された古い Activity への直接 UI 更新の抑止に限定する。フォアグラウンド Activity が存在する状態での呼び出しであり、ワーカースレッド経由でもその要件は満たされる。
+3. `ShortcutManager.requestPinShortcut()` を**ワーカースレッド**で呼び、`ShortcutInfo`（ID `a11y_off`、短いラベル・長いラベル・アイコン・MainActivity への明示 intent＋D7 のトークン extra＋D8 の flags）を渡す。コールバックは null（新規コンポーネントを作らないため、承認・拒否の結果は受け取らない。IntentSender コールバックは承認時には通知されるが拒否時には通知されないため、両方を処理できない）。ワーカー起動時にメインスレッドで `requestGeneration` を 1 増やし、`uiState = REQUESTING`、`workerRunning = true`、`unresolvedState = NONE`、`pauseObserved = false`、`resumeObserved = false` に設定し、30秒の `REQUESTING` タイムアウトタイマを開始する。ワーカーは `try / catch (Exception)` で `requestPinShortcut()` を呼び、結果（戻り値・例外）をメインスレッドの `Handler` 経由で `PinRequestManager` に返す。VM の致命的な `Error`（`OutOfMemoryError` 等）は捕捉せず再スローする。ワーカー側の finally は復旧イベントをメインスレッドの `Handler` へ通知し、`PinRequestManager` がメインスレッドで `workerRunning = false` に戻す。ワーカー側の finally から直接 `workerRunning` を変更しない（メインスレッド直列化を守るため）。プロセス終了時にはメモリ上の状態復旧を保証しない（プロセス再生成後は `IDLE`／`NONE` で初期化される）。`workerRunning` は `volatile` または `AtomicBoolean` とする。**異常終了経路**：`Executor` がワーカーの実行を拒否した場合（`RejectedExecutionException` 等）や開始直後に例外が発生した場合は、即座に `workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に戻し、タイマを解除してトースト「ショートカットを作れませんでした」を出す。**ワーカー結果の扱い**：古い Activity インスタンスへの直接 UI 更新は行わないが、`PinRequestManager` 側では `REQUESTING` タイムアウト後であってもワーカーの結果（`true`／`false`／例外）を破棄せずに処理し、未解決要求状態を遷移させる（手順 8 の2）。世代番号の役割は、古いタイマコールバックの無効化と、破棄された古い Activity への直接 UI 更新の抑止に限定する。フォアグラウンド Activity が存在する状態での呼び出しであり、ワーカースレッド経由でもその要件は満たされる。
 4. 戻り値の意味：false は「ショートカット作成要求を利用できなかった」（ランチャー非対応のほか、制限されたユーザープロファイルや App Lock なども含む）、true は「API が true を返した（ランチャーがこの機能をサポートしている）。ショートカットの設置成功は未確定」。例外は「API 呼び出しが正常終了しなかった」。**true は設置成功を保証しない**（ユーザがダイアログで拒否しても、コールバックなしでは分からない）。true のときは成功トーストを出さない（システムのダイアログとホーム画面の表示がフィードバックになる）。
 5. **30秒以内**にワーカーが `false` を返したとき、または例外が発生したときは、`REQUESTING` タイマを解除し、`workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に戻してボタンを再有効化し、トースト「ショートカットを作れませんでした」を出す。
 6. **30秒以内**にワーカーが `true` を返したときは、`REQUESTING` タイマを解除し、`workerRunning = false`、`uiState = WAITING_CONFIRMATION`、`unresolvedState = CONFIRMATION_UNRESOLVED` にし、`pauseObserved = false`、`resumeObserved = false` にリセットする。ボタンは無効のままにし、30秒の `WAITING_CONFIRMATION` タイマを開始する。
@@ -203,7 +208,7 @@ Muse Bridge のアクセシビリティサービスだけを、ホーム画面�
 - AX-52：無関係なアプリへの切り替えや通知等による `onPause → onResume` で未解決要求が解除されない。
 - AX-53：`REQUESTING` タイムアウト（30秒）後、ワーカーが `true` を返した場合、結果を捨てずに `unresolvedState` が `REQUESTING_UNRESOLVED` から `CONFIRMATION_UNRESOLVED` に遷移し、60秒の確認未解決タイマが開始される。
 - AX-54：`REQUESTING` タイムアウト（30秒）後、ワーカーが `false` または例外で終了した場合、`workerRunning` が `false` になるとともに `REQUESTING_UNRESOLVED` が即座に `NONE` に解除される。
-- AX-55：Executor がワーカーの実行を拒否した場合や開始直後に例外が発生した場合に、`workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に復旧する。
+- AX-55：Executor がワーカーの実行を拒否した場合に、`workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に復旧する。
 - AX-56：`workerRunning` および `PinRequestManager` の状態変更がメインスレッド直列化（および適切な同期）によりスレッド間で安全に可視・整合する。
 - AX-57：プロセス再生成後の未対応状態（永続化なしによる IDLE 初期化）とランチャーへの重複要求リスクが仕様上明記されている。
 - AX-58：専用 SharedPreferences の実ファイル名とバックアップ除外 XML（`fullBackupContent` および `dataExtractionRules` の `cloud-backup`／`device-transfer`）の `sharedpref` 除外パスが一致している。
@@ -212,9 +217,13 @@ Muse Bridge のアクセシビリティサービスだけを、ホーム画面�
 - AX-61：タイムアウトとワーカー完了の競合（30秒タイマ発火とワーカー完了が同時に起きた場合でも、状態遷移が単一メインスレッド上で原子的に処理され、`uiState`／`workerRunning`／`unresolvedState` が整合する）。
 - AX-62：古いタイマの遅延実行（世代が変わった古いタイマコールバックが遅れて実行されても、無効化されて状態を変更しない）。
 - AX-63：ワーカーが90秒以上終了しない（REQUESTING タイムアウト後、ワーカーが長時間終了しない場合でも、`unresolvedState` が `REQUESTING_UNRESOLVED` のまま新しい要求を制限し続け、ワーカー終了時に正しく遷移する）。
-- AX-64：Executor 拒否と例外の同時発生（Executor の拒否と開始直後の例外が重なった場合でも、`workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に復旧する）。
+- AX-64：ワーカー開始直後に例外が発生した場合に、`workerRunning = false`、`uiState = IDLE`、`unresolvedState = NONE` に復旧する。
 - AX-65：バックアップ除外のビルド成果物検査（ビルド済み APK／マニフェストで、`fullBackupContent` と `dataExtractionRules` の `sharedpref` 除外パスが実ファイル名 `a11y_off_token_prefs.xml` と一致している）。
 - AX-66：不正 intent の実機検証（トークンなし・不一致・null・空文字の intent では無効化が実行されず、無言で無視される）。
+- AX-67：ワーカー内で VM の致命的な Error が発生した場合、finally が実行されて復旧イベントがメインスレッドへ通知され、Error が再スローされる。
+- AX-68：Error 時の復旧イベントがメインスレッドで処理され、`workerRunning` が `false` に戻る。プロセス終了時にはメモリ上の状態復旧を保証しないことが仕様上明記されている。
+- AX-69：ワーカー完了と REQUESTING タイムアウトの競合時（両方が同時に起きた場合）に、二重の状態遷移や二重のトーストが発生しない。
+- AX-70：トークン保存値・受信値の全組み合わせの境界値試験（保存値 null／空文字／UUID × 受信値 null／空文字／不一致／一致）。保存値または受信値が null・空文字の場合は一致とみなさず、無効化を実行しない。
 
 ### 責任分担
 
