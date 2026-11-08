@@ -4044,14 +4044,14 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_drive001_version_2_9_1():
-    """Version: the build carries v2.9.1 / code 54."""
+def test_override_version_2_9_2():
+    """Version: the build carries v2.9.2 / code 55."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.1"' in build
-    assert "VERSION_CODE=54" in build
+    assert 'VERSION_NAME="2.9.2"' in build
+    assert "VERSION_CODE=55" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4067,3 +4067,189 @@ def test_drive001_main_activity_calls_ensure_init():
     assert "LogActivity.ensureDriveInit(" in server
     assert (server.index("ensureDriveInit")
             < server.index("BridgeLog.init(this.context)"))
+
+# ----------------------------------------------------------------------
+# SPEC-OVERRIDE-001 (v2.9.2): live "Override - x/y" operation
+# notification. Source-level guards (OV-01..OV-15); the actual
+# notification behaviour (OV-L1..OV-L7) is verified live on the phone.
+# ----------------------------------------------------------------------
+
+def _override_server():
+    return _java_source("HttpBridgeServer.java")
+
+
+def test_override_01_click_label_carries_coordinates():
+    """OV-01: /click posts "Override - タップ x/y" (coordinates are
+    the operation's own metadata)."""
+    src = _override_server()
+    assert '"タップ " + x + "/" + y' in src
+    assert '"Override - " + label' in src
+
+
+def test_override_02_swipe_label_carries_coordinates():
+    """OV-02: /swipe posts "Override - スワイプ x1/y1 → x2/y2"."""
+    src = _override_server()
+    assert '"スワイプ " + x1 + "/" + y1 + " → " + x2 + "/" + y2' in src
+
+
+def test_override_03_type_text_label_has_no_typed_text():
+    """OV-03: /type_text keeps its fixed label (typed text never
+    goes into the notification); the "Override - " prefix is added
+    centrally in noteOperation."""
+    src = _override_server()
+    assert 'noteOperation(lifecycleGeneration, "文字を入力中")' in src
+    assert '"Override - " + label' in src
+
+
+def test_override_04_other_endpoints_keep_labels_with_prefix():
+    """OV-04: every other endpoint keeps its label; the prefix is
+    added centrally, so no call site can forget it."""
+    src = _override_server()
+    assert '"Override - " + label' in src
+    for label in ('"通知を開いています"', '"スクロール中"',
+                  '"アプリを起動中："', '"リンクを開いています"',
+                  '"複数の操作を実行中"'):
+        assert label in src
+
+
+def test_override_05_dedicated_icon_in_running_only():
+    """OV-05: the dedicated ic_override drawable is used in
+    postOperationRunning only; "操作終了" keeps ic_dialog_info."""
+    src = _override_server()
+    assert src.count("R.drawable.ic_override") == 1
+    assert src.count("android.R.drawable.ic_dialog_info") == 1
+    icon = _res_text("drawable/ic_override.xml")
+    assert 'android:viewportWidth="24"' in icon
+    assert 'android:viewportHeight="24"' in icon
+    assert "@android:color/white" in icon
+
+
+def test_override_06_throttle_first_post_never_throttled():
+    """OV-06: (a) 500 ms throttle with a first-post exemption.
+    (b) The live timing is verified on the phone (OV-L3)."""
+    src = _override_server()
+    assert "OPERATION_NOTIFY_THROTTLE_MS = 500" in src
+    assert "if (!hasPostedInSession)" in src
+    assert src.count("hasPostedInSession = false") == 2
+    assert "now - operationLastNotifyMs >= OPERATION_NOTIFY_THROTTLE_MS" in src
+    assert "operationLastNotifyMs + OPERATION_NOTIFY_THROTTLE_MS - now" in src
+
+
+def test_override_07_coordinates_are_operation_metadata():
+    """OV-07: coordinates come from getInt() (integer type, not a
+    range check) and are posted as-is; no typed text or URI ever
+    enters a label."""
+    src = _override_server()
+    assert '"タップ " + x + "/" + y' in src
+    assert 'noteOperation(lifecycleGeneration, "リンクを開いています")' in src
+    assert "j.getInt(\"x\")" in src
+    assert "j.getInt(\"y\")" in src
+
+
+def test_override_08_title_stays_operation_in_progress():
+    """OV-08: the notification title stays "操作中"; only the
+    content text changes."""
+    src = _override_server()
+    assert '.setContentTitle("操作中")' in src
+
+
+def test_override_09_batch_stays_generic():
+    """OV-09: /batch notes once with a generic label; no per-step
+    coordinates."""
+    src = _override_server()
+    assert 'noteOperation(lifecycleGeneration, "複数の操作を実行中")' in src
+    assert src.count('"複数の操作を実行中"') == 1
+
+
+def test_override_10_node_and_key_labels_covered():
+    """OV-10: /type_node, /scroll_node, /click_node,
+    /notification_action and /press_key labels all flow through
+    the central prefix."""
+    src = _override_server()
+    assert '"Override - " + label' in src
+    for label in ('"タップ中"', '"文字を入力中"', '"スクロール中"',
+                  '"通知を開いています"', '"キー操作中（" + key + "）"',
+                  '"操作を実行中（" + actionName + "）"'):
+        assert label in src
+
+
+def test_override_11_deferred_post_exists_with_guards():
+    """OV-11: (a) a deferred post is scheduled and re-checks
+    session-active + generation + token + pending label before
+    posting. (b) The live timing is verified on the phone (OV-L3)."""
+    src = _override_server()
+    assert "runDeferredPost(capturedGeneration, capturedToken)" in src
+    assert "final long capturedGeneration = operationGeneration" in src
+    assert "final long capturedToken = pendingToken" in src
+    assert "capturedGeneration != operationGeneration" in src
+    assert "capturedToken != pendingToken" in src
+    assert "operationScheduler.schedule" in src
+
+
+def test_override_12_new_session_posts_immediately():
+    """OV-12: (a) a new session resets hasPostedInSession, so its
+    first post is immediate regardless of the previous post time."""
+    src = _override_server()
+    assert src.count("hasPostedInSession = false") == 2
+    assert "hasPostedInSession = true" in src
+
+
+def test_override_13_session_end_discards_pending_label():
+    """OV-13: (a) endOperationLocked fully invalidates the pending
+    reservation, so no deferred post runs after the session ends.
+    (b) Verified live as OV-L4."""
+    src = _override_server()
+    start = src.index("private boolean endOperationLocked()")
+    seg = src[start:start + 1500]
+    assert "invalidatePendingPostLocked();" in seg
+
+
+def test_override_14_old_task_never_touches_new_reservation():
+    """OV-14: (a) an old deferred task checks generation + token
+    and touches none of the pending fields on mismatch; an
+    immediate post fully invalidates the old reservation
+    (future/label/token/generation), and a later operation creates
+    a fresh reservation with a new token. (b) The A/B and B/C/D
+    races are confirmed by code review (live reproduction is not
+    required)."""
+    src = _override_server()
+    assert "pendingToken = ++pendingTokenCounter" in src
+    assert "pendingPostFuture = null" in src
+    assert "pendingToken = -1" in src
+    assert "pendingGeneration = -1" in src
+    assert src.count("invalidatePendingPostLocked()") >= 4
+    start = src.index("private void runDeferredPost(")
+    seg = src[start:start + 1500]
+    assert "touch none of the pending fields" in seg
+    assert "pendingLabel = null" in seg
+    assert "pendingPostFuture = null" in seg
+
+
+def test_override_15_throttle_boundary_constants():
+    """OV-15: (a) the 500 ms boundary is a single named constant
+    with a >= comparison. (b) The 499/500/501 ms switching is
+    verified live (OV-L3)."""
+    src = _override_server()
+    assert "OPERATION_NOTIFY_THROTTLE_MS = 500" in src
+    assert src.count("OPERATION_NOTIFY_THROTTLE_MS") >= 3
+    assert "now - operationLastNotifyMs >= OPERATION_NOTIFY_THROTTLE_MS" in src
+
+
+def test_override_p202_drive_init_check_failure_fails_closed():
+    """CONS-078 P2-02: a failed persisted-URI-permission check in
+    ensureDriveInit is NOT "absent" — init is refused."""
+    log = _drive_log()
+    assert "noPersistedPermissions = false;" in log
+    assert "noPersistedPermissions" in log
+
+
+def test_override_p202_classify_failure_keeps_folder():
+    """CONS-078 P2-02: a failed persisted-URI-permission check in
+    classifyAutoSaveFailure keeps the folder (failure is not
+    "permission absent")."""
+    log = _drive_log()
+    start = log.index("private boolean classifyAutoSaveFailure")
+    seg = log[start:start + 2000]
+    assert "getPersistedUriPermissions" in seg
+    assert "catch (Exception ignored)" in seg
+    assert "return false;" in seg

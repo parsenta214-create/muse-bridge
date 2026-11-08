@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPEC-OVERRIDE-001 (v2.9.2): dedicated icon for the ongoing
+     "操作中" notification. White silhouette (a target ring with a
+     centre dot = "Muse is pointing here"), 24dp. Used only in
+     HttpBridgeServer.postOperationRunning(); "操作終了" keeps
+     android.R.drawable.ic_dialog_info. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="@android:color/white"
+        android:strokeWidth="2"
+        android:pathData="M12,3a9,9 0 1,0 0,18a9,9 0 1,0 0,-18z" />
+    <path
+        android:fillColor="@android:color/white"
+        android:pathData="M12,9.5a2.5,2.5 0 1,0 0,5a2.5,2.5 0 1,0 0,-5z" />
+</vector>

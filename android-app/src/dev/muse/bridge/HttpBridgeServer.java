@@ -140,6 +140,8 @@ public class HttpBridgeServer {
     private static final int OPERATION_NOTIFICATION_ID = 3;
     private static final int OPERATION_END_NOTIFICATION_ID = 4;
     private static final long OPERATION_AUTO_END_TIMEOUT_MS = 10_000;
+    // SPEC-OVERRIDE-001 §3.3: notification throttle window.
+    private static final long OPERATION_NOTIFY_THROTTLE_MS = 500;
 
     // v2.1 fix (CONS-023 P2, D6): the one-shot node actions the
     // service accepts. Canonical list is
@@ -359,6 +361,18 @@ public class HttpBridgeServer {
     // began) is stale and must not touch the new session's
     // counter — operationFinished() ignores it by generation.
     private long operationGeneration = 0;
+    // SPEC-OVERRIDE-001 §3.3: notification throttle + deferred
+    // post. All guarded by operationLock. pendingToken identifies
+    // one deferred-post reservation; -1 means "no reservation".
+    // pendingGeneration is the session generation the pending
+    // label belongs to; -1 means "no reservation".
+    private long operationLastNotifyMs = 0;
+    private boolean hasPostedInSession = false;
+    private String pendingLabel = null;
+    private long pendingGeneration = -1;
+    private ScheduledFuture<?> pendingPostFuture = null;
+    private long pendingToken = -1;
+    private long pendingTokenCounter = 0;
     // v2.1 fix (CONS-024 P1-NEW): server-lifecycle generation.
     // Distinct from the operation-session generation above: the
     // session generation changes when a session ends, the
@@ -636,6 +650,11 @@ public class HttpBridgeServer {
             // ignored -> B finishes, inFlight 0.
             operationInFlight = 0;
             operationGeneration++;
+            // SPEC-OVERRIDE-001: a pending deferred reservation
+            // must not survive the stop — a stale non-null
+            // pendingPostFuture would block the next session's
+            // first deferred reservation.
+            invalidatePendingPostLocked();
         }
         if (operationScheduler != null) {
             operationScheduler.shutdownNow();
@@ -2047,7 +2066,11 @@ public class HttpBridgeServer {
                 int x = j.getInt("x");
                 int y = j.getInt("y");
                 // v2.1: the operation is accepted — show "操作中".
-                opGeneration = noteOperation(lifecycleGeneration, "タップ中");
+                // SPEC-OVERRIDE-001 §2: coordinates are the
+                // operation's own metadata (getInt() guarantees an
+                // integer, not an in-screen range — out-of-range
+                // values are posted as-is).
+                opGeneration = noteOperation(lifecycleGeneration, "タップ " + x + "/" + y);
                 boolean ok = svc.tap(x, y);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
@@ -2060,7 +2083,10 @@ public class HttpBridgeServer {
                 int y2 = j.getInt("y2");
                 long durationMs = j.optLong("duration_ms", 300);
                 // v2.1: the operation is accepted — show "操作中".
-                opGeneration = noteOperation(lifecycleGeneration, "スワイプ中");
+                // SPEC-OVERRIDE-001 §2: coordinates are the
+                // operation's own metadata (see /click).
+                opGeneration = noteOperation(lifecycleGeneration,
+                        "スワイプ " + x1 + "/" + y1 + " → " + x2 + "/" + y2);
                 boolean ok = svc.swipe(x1, y1, x2, y2, durationMs);
                 status = 200;
                 sendJson(out, status, new JSONObject().put("ok", ok));
@@ -2315,6 +2341,9 @@ public class HttpBridgeServer {
             if (!operationActive) {
                 operationGeneration++;
                 operationActive = true;
+                // SPEC-OVERRIDE-001 §3.3 step 1: the first post
+                // of a new session is never throttled.
+                hasPostedInSession = false;
                 // A stale "操作終了" from the previous session must
                 // not sit next to the new "操作中".
                 NotificationManager nm = (NotificationManager)
@@ -2325,7 +2354,12 @@ public class HttpBridgeServer {
             }
             operationLastActivityMs = android.os.SystemClock.elapsedRealtime();
             operationInFlight++;
-            if (!postOperationRunning(label)) {
+            // SPEC-OVERRIDE-001 §2/§3.3: the content text carries
+            // "Override - " plus the action label; /click and
+            // /swipe build their coordinate labels at the call
+            // sites. Throttle + deferred post live in
+            // postOperationRunningThrottledLocked.
+            if (!postOperationRunningThrottledLocked("Override - " + label)) {
                 BridgeLog.logThrottled("op-notify-disabled", "op-notify-disabled",
                         "operation notifications disabled");
             }
@@ -2386,6 +2420,9 @@ public class HttpBridgeServer {
         // (generation mismatch) and ignored. Reset the counter
         // here so it cannot leak into the next session.
         operationInFlight = 0;
+        // SPEC-OVERRIDE-001 §3.3 step 5: discard any pending
+        // label; no deferred post after the session ends.
+        invalidatePendingPostLocked();
         if (operationAutoEndFuture != null) {
             operationAutoEndFuture.cancel(false);
             operationAutoEndFuture = null;
@@ -2439,13 +2476,111 @@ public class HttpBridgeServer {
         Notification notification = new Notification.Builder(context, OPERATION_CHANNEL_ID)
                 .setContentTitle("操作中")
                 .setContentText(label)
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setSmallIcon(R.drawable.ic_override)
                 .setContentIntent(operationTapIntent(OPERATION_NOTIFICATION_ID))
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
                 .build();
         nm.notify(OPERATION_NOTIFICATION_ID, notification);
         return true;
+    }
+
+    // SPEC-OVERRIDE-001 §3.3: throttled post of the ongoing
+    // "操作中" notification. Caller must hold operationLock.
+    // Returns true when the label was posted immediately or
+    // deferred (it will be shown); false only when the immediate
+    // post was attempted and notifications are disabled. A
+    // throttled skip is not a failure: no false, no log.
+    private boolean postOperationRunningThrottledLocked(String fullLabel) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (!hasPostedInSession) {
+            // Step 1: the first post of a session is never
+            // throttled.
+            hasPostedInSession = true;
+            operationLastNotifyMs = now;
+            return postOperationRunning(fullLabel);
+        }
+        if (now - operationLastNotifyMs >= OPERATION_NOTIFY_THROTTLE_MS) {
+            // Step 2: immediate post; cancel any pending deferred
+            // reservation and fully invalidate it (CONS-081 P1-01:
+            // a stale pendingPostFuture would block the next
+            // reservation).
+            invalidatePendingPostLocked();
+            operationLastNotifyMs = now;
+            return postOperationRunning(fullLabel);
+        }
+        // Step 3: inside the throttle window — hold the latest
+        // label; schedule a deferred post (or update the label
+        // only when one is already scheduled).
+        pendingLabel = fullLabel;
+        pendingGeneration = operationGeneration;
+        if (pendingPostFuture == null) {
+            pendingToken = ++pendingTokenCounter;
+            final long capturedGeneration = operationGeneration;
+            final long capturedToken = pendingToken;
+            long delay = operationLastNotifyMs + OPERATION_NOTIFY_THROTTLE_MS - now;
+            if (delay < 0) {
+                delay = 0;
+            }
+            try {
+                pendingPostFuture = operationScheduler.schedule(new Runnable() {
+                    @Override
+                    public void run() {
+                        runDeferredPost(capturedGeneration, capturedToken);
+                    }
+                }, delay, TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException ignored) {
+                // Scheduler shut down concurrently with stop();
+                // the label simply stays unposted — the operation
+                // itself is unaffected.
+                pendingPostFuture = null;
+                pendingLabel = null;
+                pendingToken = -1;
+                pendingGeneration = -1;
+            }
+        }
+        return true;
+    }
+
+    // SPEC-OVERRIDE-001 §3.3 step 4: the deferred post. Runs on
+    // the scheduler thread; re-checks session-active + generation
+    // + token before posting. An old task must never touch a newer
+    // reservation's state (CONS-080 P1-02, CONS-081 P1-01).
+    private void runDeferredPost(long capturedGeneration, long capturedToken) {
+        synchronized (operationLock) {
+            if (!operationActive
+                    || capturedGeneration != operationGeneration
+                    || capturedToken != pendingToken
+                    || pendingLabel == null) {
+                // Stale or cancelled reservation: do nothing, and
+                // touch none of the pending fields.
+                return;
+            }
+            String labelToPost = pendingLabel;
+            if (postOperationRunning(labelToPost)) {
+                operationLastNotifyMs = android.os.SystemClock.elapsedRealtime();
+            } else {
+                BridgeLog.logThrottled("op-notify-disabled", "op-notify-disabled",
+                        "operation notifications disabled");
+            }
+            pendingLabel = null;
+            pendingPostFuture = null;
+            pendingToken = -1;
+            pendingGeneration = -1;
+        }
+    }
+
+    // SPEC-OVERRIDE-001 §3.3: fully invalidate a pending deferred
+    // reservation (cancel + clear all four fields). Caller must
+    // hold operationLock.
+    private void invalidatePendingPostLocked() {
+        if (pendingPostFuture != null) {
+            pendingPostFuture.cancel(false);
+            pendingPostFuture = null;
+        }
+        pendingLabel = null;
+        pendingToken = -1;
+        pendingGeneration = -1;
     }
 
     /** Posts the one-shot "操作終了" notification. It stays in

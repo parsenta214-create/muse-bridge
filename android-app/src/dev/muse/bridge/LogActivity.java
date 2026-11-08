@@ -423,6 +423,16 @@ public class LogActivity extends Activity {
             // What still guards init: no DRIVE-001 state at all
             // (no folder file, no clear marker, no registry,
             // no persisted URI permission).
+            // CONS-078 P2-02: a failed persisted-permission check
+            // is NOT "absent". If the check itself throws, refuse
+            // init rather than proceeding on unknown state.
+            boolean noPersistedPermissions;
+            try {
+                noPersistedPermissions = ctx.getContentResolver()
+                        .getPersistedUriPermissions().isEmpty();
+            } catch (Exception e) {
+                noPersistedPermissions = false;
+            }
             boolean noOtherState =
                     statFile(new File(ctx.getFilesDir(), FOLDER_URI_NAME))
                             == FileState.NOT_EXISTS
@@ -430,8 +440,7 @@ public class LogActivity extends Activity {
                             CLEAR_PENDING_NAME)) == FileState.NOT_EXISTS
                     && statFile(UriPermissionRegistry.registryFile(ctx))
                             == FileState.NOT_EXISTS
-                    && ctx.getContentResolver()
-                            .getPersistedUriPermissions().isEmpty();
+                    && noPersistedPermissions;
             if (noOtherState) {
                 BridgeLog.atomicWriteText(ctx.getFilesDir(),
                         INIT_MARKER_NAME, String.valueOf(times[0]));
@@ -941,12 +950,18 @@ public class LogActivity extends Activity {
     }
 
     private boolean isWritePermissionHeld(String uriString) {
-        for (UriPermission p : getContentResolver()
-                .getPersistedUriPermissions()) {
-            if (p.getUri().toString().equals(uriString)
-                    && p.isWritePermission()) {
-                return true;
+        // CONS-078 P2-02: a failed check means "not confirmed
+        // held" — never a crash, never treated as held.
+        try {
+            for (UriPermission p : getContentResolver()
+                    .getPersistedUriPermissions()) {
+                if (p.getUri().toString().equals(uriString)
+                        && p.isWritePermission()) {
+                    return true;
+                }
             }
+        } catch (Exception ignored) {
+            return false;
         }
         return false;
     }
@@ -1042,12 +1057,18 @@ public class LogActivity extends Activity {
         ContentResolver resolver = getApplicationContext()
                 .getContentResolver();
         boolean writeHeld = false;
-        for (UriPermission p : resolver.getPersistedUriPermissions()) {
-            if (p.getUri().toString().equals(treeUri.toString())
-                    && p.isWritePermission()) {
-                writeHeld = true;
-                break;
+        // CONS-078 P2-02: a failed check must NOT clear the
+        // folder — failure is not "permission absent". Keep it.
+        try {
+            for (UriPermission p : resolver.getPersistedUriPermissions()) {
+                if (p.getUri().toString().equals(treeUri.toString())
+                        && p.isWritePermission()) {
+                    writeHeld = true;
+                    break;
+                }
             }
+        } catch (Exception ignored) {
+            return false;
         }
         if (!writeHeld) {
             return true;
