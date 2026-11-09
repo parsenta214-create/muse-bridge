@@ -4513,6 +4513,61 @@ def test_ui003_three_tile_semantics_table():
     assert "Locale.getDefault().getDisplayLanguage()" in lref
 
 
+def test_ui004_longpress_manifest_mainactivity():
+    """UI-004 D1: MainActivity declares exactly one
+    QS_TILE_PREFERENCES intent-filter (with DEFAULT), separate
+    from the MAIN/LAUNCHER filter. MainActivity stays exported
+    and carries no BIND_QUICK_SETTINGS_TILE permission."""
+    man = _manifest_source()
+    start = man.index('android:name=".MainActivity"')
+    block = man[start:man.index("</activity>", start)]
+    assert 'android:exported="true"' in block
+    assert "android.permission.BIND_QUICK_SETTINGS_TILE" not in block
+    assert block.count(
+        "android.service.quicksettings.action.QS_TILE_PREFERENCES") == 1
+    # two <intent-filter> elements: MAIN/LAUNCHER, then the QS one
+    filters = block.split("<intent-filter>")
+    assert len(filters) == 3
+    main_f, qs_f = filters[1], filters[2]
+    assert "android.intent.action.MAIN" in main_f
+    assert "android.intent.category.LAUNCHER" in main_f
+    assert "android.service.quicksettings.action.QS_TILE_PREFERENCES" in qs_f
+    assert "android.intent.category.DEFAULT" in qs_f
+    assert "android.intent.action.MAIN" not in qs_f
+    assert "android.intent.category.LAUNCHER" not in qs_f
+
+
+def test_ui004_longpress_manifest_only():
+    """UI-004 D1/D3: QS_TILE_PREFERENCES is declared only in
+    AndroidManifest.xml, only on MainActivity. No Java/Kotlin
+    source mentions it; the three TileServices keep their
+    QS_TILE-only declarations."""
+    man = _manifest_source()
+    assert man.count(
+        "android.service.quicksettings.action.QS_TILE_PREFERENCES") == 1
+    # no Java/Kotlin source mentions it
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    hits = []
+    for path in (root / "android-app" / "src").rglob("*"):
+        if path.is_file() and "QS_TILE_PREFERENCES" in path.read_text(
+                encoding="utf-8", errors="ignore"):
+            hits.append(str(path))
+    assert hits == []
+    # each TileService still declares only the QS_TILE filter
+    for name in ("BridgeTileService", "LocaleTileService",
+                 "A11yOffTileService"):
+        start = man.index(f'android:name=".{name}"')
+        seg = man[start:man.index("</service>", start)]
+        assert seg.count("android.service.quicksettings.action.QS_TILE") == 1
+        assert "QS_TILE_PREFERENCES" not in seg
+    # LogActivity (the only other activity; self-closing element)
+    # declares nothing of it
+    start = man.index('android:name=".LogActivity"')
+    seg = man[start:man.index("/>", start)]
+    assert "QS_TILE_PREFERENCES" not in seg
+
+
 def test_a11yoff002_d6_tile_refresh_helper_three_sites():
     """D6 (Argon P1-01): refreshTile() updates the tile directly
     (getQsTile().setState + updateTile) and is called from all three
