@@ -5167,6 +5167,30 @@ def test_kotlin_batch_a_vpnbindselector_is_kotlin():
     assert "            @JvmStatic\n            fun degraded(" in src
 
 
+def test_kotlin_batch_a_p2_regex_precompiled():
+    """Batch A P2-1 (Argon review): the dot Regex is precompiled
+    once in the companion object, not built on every
+    isTailscaleRange call. Behaviour is the Java original's:
+    trailing empty strings are dropped (Kotlin's split keeps
+    them, unlike Java's String.split), so "100.64.1.2."
+    still parses as a four-part quad."""
+    src = _kotlin_source("VpnBindSelector.kt")
+    assert 'private val DOT_REGEX = "\\\\.".toRegex()' in src
+    assert "ip.split(DOT_REGEX).dropLastWhile { it.isEmpty() }" in src
+    assert src.count(".toRegex()") == 1
+
+
+def test_kotlin_batch_a_p2_ipv4addresses_drops_nulls():
+    """Batch A P2-2 (Argon review): a null element smuggled in
+    by the Java caller is dropped in the VpnNetwork
+    constructor instead of NPE-ing at the for-loop
+    assignment in select(). The field stays List<String>,
+    so the Java callers are unchanged."""
+    src = _kotlin_source("VpnBindSelector.kt")
+    assert "ipv4Addresses?.filterNotNull() ?: emptyList()" in src
+    assert "        @JvmField\n        val ipv4Addresses: List<String>" in src
+
+
 def test_kotlin_batch_a_java_callers_unchanged():
     """Batch A: the Java callers were NOT modified — they still
     call VpnBindSelector.select(...) and isTailscaleRange(...)

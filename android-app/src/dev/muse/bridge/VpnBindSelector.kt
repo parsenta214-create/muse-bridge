@@ -38,16 +38,21 @@ class VpnBindSelector private constructor() {
         /** More than one VPN network, or more than one 100.64/10 address. */
         const val DEGRADED_AMBIGUOUS = "tailscale-network-ambiguous"
 
+        /** Precompiled dot regex (Argon Batch A P2-1): building a
+        fresh Regex on every isTailscaleRange call allocates per
+        call. Note Kotlin's split keeps trailing empty strings
+        (unlike Java's String.split), so dropLastWhile below
+        restores the Java original's semantics: "100.64.1.2."
+        still parses as a four-part quad. */
+        private val DOT_REGEX = "\\.".toRegex()
+
         /** 100.64.0.0/10 (Tailscale range; also carrier CGNAT). */
         @JvmStatic
         fun isTailscaleRange(ip: String?): Boolean {
             if (ip == null) {
                 return false
             }
-            // Regex split, like Java's String.split: trailing empty
-            // strings are dropped, so "100.64.1.2." still parses as
-            // a four-part quad (the Java original accepted it).
-            val parts = ip.split("\\.".toRegex())
+            val parts = ip.split(DOT_REGEX).dropLastWhile { it.isEmpty() }
             if (parts.size != 4) {
                 return false
             }
@@ -97,9 +102,14 @@ class VpnBindSelector private constructor() {
         @JvmField val interfaceName: String?,
         ipv4Addresses: List<String>?
     ) {
-        /** IPv4 addresses (dotted quads) from LinkProperties. */
+        /** IPv4 addresses (dotted quads) from LinkProperties.
+        Null elements from the Java caller are dropped here
+        (Argon Batch A P2-2): a null inside the list would
+        otherwise NPE at the for-loop assignment in select(),
+        before isTailscaleRange ever sees it. The field stays
+        List<String>, so the Java callers are unchanged. */
         @JvmField
-        val ipv4Addresses: List<String> = ipv4Addresses ?: emptyList()
+        val ipv4Addresses: List<String> = ipv4Addresses?.filterNotNull() ?: emptyList()
     }
 
     /** The decision: bind to one address, or DEGRADED with a reason. */

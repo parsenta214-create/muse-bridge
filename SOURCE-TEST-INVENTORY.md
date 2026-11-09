@@ -4,9 +4,9 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-09、バッチA（BootReceiver＋VpnBindSelector）
-完了時。フルスイート: **458 passed、18 subtests**
-（パイロット時の 454 件 ＋ バッチA新規 4 件）。
+最終確認: 2026-11-09、バッチA P2対応（Argonレビュー）
+完了時。フルスイート: **460 passed、18 subtests**
+（バッチA時の 458 件 ＋ P2対応新規 2 件）。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
@@ -39,7 +39,7 @@ res の対応を記す。バッチごとに更新する。
 | `LocaleTileService.java` | 1 | ロケールタイル起動・帰属行 |
 | `BridgeService.java` | 1 | サービス起動 |
 | `BootReceiver.kt`（バッチAで Java から移行） | 2 | Drive 初期化フック、Kotlin 化確認・帰属行 |
-| `VpnBindSelector.kt`（新規・バッチA） | 3 | Kotlin 化確認・相互運用注釈（`@JvmStatic` / `@JvmField` / `const val`）、Java 呼び出し元不変、帰属行（※移行前はソース検査ゼロだった） |
+| `VpnBindSelector.kt`（新規・バッチA） | 5 | Kotlin 化確認・相互運用注釈（`@JvmStatic` / `@JvmField` / `const val`）、Java 呼び出し元不変、帰属行、P2対応（Regex定数化・null要素防御）（※移行前はソース検査ゼロだった） |
 | `A11yOffTileService.java` | 1 | QS タイル状態・更新 |
 | `A11yOffExecutor.java` | 1 | 実行部ログ・完了トリガー種別 |
 | `InteropProbeJava.java`（新規・パイロット） | 2 | 双方向フィクスチャ（Java→Kotlin）、帰属行 |
