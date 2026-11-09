@@ -4044,16 +4044,16 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_7():
+def test_locale_tile_version_2_9_8():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.7 / code 60 (was v2.9.6 / code 59 at
-    SPEC-LOCALE-TILE-001 v4)."""
+    carries v2.9.8 / code 61 (was v2.9.7 / code 60 at
+    SPEC-A11Y-OFF-002 v6)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.7"' in build
-    assert "VERSION_CODE=60" in build
+    assert 'VERSION_NAME="2.9.8"' in build
+    assert "VERSION_CODE=61" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4733,15 +4733,15 @@ def test_a11yoff002_d11_logs():
     assert '(success ? "success" : "timeout") + " via " + trigger' in ex
 
 
-def test_a11yoff002_version_2_9_7():
-    """The build now carries v2.9.7 / code 60 (was v2.9.6 / code 59
-    at SPEC-LOCALE-TILE-001 v4)."""
+def test_a11yoff002_version_2_9_8():
+    """The build now carries v2.9.8 / code 61 (was v2.9.7 / code 60
+    at SPEC-A11Y-OFF-002 v6)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.7"' in build
-    assert "VERSION_CODE=60" in build
+    assert 'VERSION_NAME="2.9.8"' in build
+    assert "VERSION_CODE=61" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5004,3 +5004,126 @@ def test_locale_tile_attribution_first_line():
     first = _locale().splitlines()[0]
     assert first == ("// Implemented by MUSE-Koyuki (Muse Spark) "
                      "\u2014 SPEC-LOCALE-TILE-001, 2026-11-09")
+
+
+# ----------------------------------------------------------------------
+# SPEC-KOTLIN-MIGRATION-001 v2.2, pilot (AppVersion + interop fixture).
+# Source-level guards (T-M1 / D6): the compiled JVM properties
+# (volatile, synchronized, static members, signatures) are verified
+# by javap -v on the real build output, not here; these tests guard
+# that the Kotlin sources keep the annotations and call sites the
+# JVM checks depend on, and that the two-compiler pipeline is wired
+# into build.sh. Behavioural verification is by compilation and dex
+# inspection; a live-phone check (T-M3) still needs the user install.
+# ----------------------------------------------------------------------
+
+_KOTLIN_PILOT_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-09")
+
+
+def _kotlin_source(name):
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "src" / "dev" / "muse" / "bridge"
+            / name).read_text(encoding="utf-8")
+
+
+def _kotlin_source_exists(name):
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "src" / "dev" / "muse" / "bridge"
+            / name).exists()
+
+
+def _java_source_exists(name):
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "src" / "dev" / "muse" / "bridge"
+            / name).exists()
+
+
+def _build_sh():
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    return (root / "android-app" / "build.sh").read_text(
+        encoding="utf-8")
+
+
+def test_kotlin_pilot_appversion_is_kotlin():
+    """Pilot: AppVersion.java is gone, AppVersion.kt is the source."""
+    assert not _java_source_exists("AppVersion.java")
+    assert _kotlin_source_exists("AppVersion.kt")
+    assert "object AppVersion" in _kotlin_source("AppVersion.kt")
+
+
+def test_kotlin_pilot_appversion_thread_safety():
+    """Pilot (D4 checklist): @Volatile on both cached fields,
+    @Synchronized on load(), @JvmStatic on the Java-visible API
+    (name/code/load) so the Java callers keep compiling."""
+    src = _kotlin_source("AppVersion.kt")
+    # Exact annotated declarations (not raw counts: the docstring
+    # above mentions the same annotation names).
+    assert "    @Volatile\n    private var cachedName" in src
+    assert "    @Volatile\n    private var cachedCode" in src
+    assert "    @JvmStatic\n    fun name(" in src
+    assert "    @JvmStatic\n    fun code(" in src
+    assert "    @JvmStatic\n    @Synchronized\n    private fun load(" in src
+
+
+def test_kotlin_pilot_appversion_java_callers_unchanged():
+    """Pilot: the Java callers were NOT modified — they still call
+    AppVersion.name(ctx) / AppVersion.code(ctx) as statics, which
+    only compiles because the Kotlin members are @JvmStatic."""
+    for name in ("HttpBridgeServer.java", "LogActivity.java",
+                 "MainActivity.java"):
+        src = _java_source(name)
+        assert "AppVersion.name(" in src, name
+        assert "AppVersion.code(" in src, name
+
+
+def test_kotlin_pilot_interop_fixture_bidirectional():
+    """Pilot (D3): the fixture proves both directions. Kotlin ->
+    Java: InteropProbe.kt calls InteropProbeJava and AppVersion.
+    Java -> Kotlin: InteropProbeJava.java calls InteropProbe and
+    AppVersion. Both files are inert (never called from app code)."""
+    assert _kotlin_source_exists("InteropProbe.kt")
+    assert _java_source_exists("InteropProbeJava.java")
+    kt = _kotlin_source("InteropProbe.kt")
+    assert "InteropProbeJava.javaGreeting()" in kt
+    assert "AppVersion.name(ctx)" in kt
+    assert "@Volatile" in kt
+    assert "@Synchronized" in kt
+    assert "@JvmStatic" in kt
+    java = _java_source("InteropProbeJava.java")
+    assert "InteropProbe.kotlinGreeting()" in java
+    assert "AppVersion.name(ctx)" in java
+    assert "InteropProbe.setFlag(true)" in java
+    assert "probeFromJava" in java
+    assert "probeFromKotlin" in kt
+
+
+def test_kotlin_pilot_attribution_first_line():
+    """New Kotlin/Java files carry the required attribution as line 1."""
+    for name in ("AppVersion.kt", "InteropProbe.kt"):
+        first = _kotlin_source(name).splitlines()[0]
+        assert first == _KOTLIN_PILOT_ATTRIBUTION, name
+    first = _java_source("InteropProbeJava.java").splitlines()[0]
+    assert first == _KOTLIN_PILOT_ATTRIBUTION
+
+
+def test_kotlin_pilot_build_sh_two_compiler_pipeline():
+    """Pilot (D2): build.sh runs the two-compiler pipeline —
+    kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
+    then javac as a normal mandatory step with the Kotlin output
+    and kotlin-stdlib on the classpath, then d8 with exactly one
+    kotlin-stdlib.jar. Version is the pilot's v2.9.8 / code 61."""
+    build = _build_sh()
+    assert 'VERSION_NAME="2.9.8"' in build
+    assert "VERSION_CODE=61" in build
+    assert "kotlinc" in build
+    assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
+    assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
+    assert '-cp "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' in build
+    assert 'KOTLIN_STDLIB="$KOTLIN_HOME/lib/kotlin-stdlib.jar"' in build
+    assert '"$BUILD/classes.jar" "$KOTLIN_STDLIB"' in build
