@@ -4044,16 +4044,16 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_8():
+def test_locale_tile_version_2_9_9():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.8 / code 61 (was v2.9.7 / code 60 at
-    SPEC-A11Y-OFF-002 v6)."""
+    carries v2.9.9 / code 62 (was v2.9.8 / code 61 at the Kotlin
+    pilot)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.8"' in build
-    assert "VERSION_CODE=61" in build
+    assert 'VERSION_NAME="2.9.9"' in build
+    assert "VERSION_CODE=62" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4062,7 +4062,7 @@ def test_drive001_main_activity_calls_ensure_init():
     app-owned state file is created."""
     main = _java_source("MainActivity.java")
     assert "LogActivity.ensureDriveInit(this);" in main
-    boot = _java_source("BootReceiver.java")
+    boot = _kotlin_source("BootReceiver.kt")
     assert "LogActivity.ensureDriveInit(" in boot
     assert boot.index("ensureDriveInit") < boot.index("BridgeLog.init")
     server = _java_source("HttpBridgeServer.java")
@@ -4733,15 +4733,15 @@ def test_a11yoff002_d11_logs():
     assert '(success ? "success" : "timeout") + " via " + trigger' in ex
 
 
-def test_a11yoff002_version_2_9_8():
-    """The build now carries v2.9.8 / code 61 (was v2.9.7 / code 60
-    at SPEC-A11Y-OFF-002 v6)."""
+def test_a11yoff002_version_2_9_9():
+    """The build now carries v2.9.9 / code 62 (was v2.9.8 / code 61
+    at the Kotlin pilot)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.8"' in build
-    assert "VERSION_CODE=61" in build
+    assert 'VERSION_NAME="2.9.9"' in build
+    assert "VERSION_CODE=62" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5117,13 +5117,76 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the pilot's v2.9.8 / code 61."""
+    kotlin-stdlib.jar. Version is batch A's v2.9.9 / code 62."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.8"' in build
-    assert "VERSION_CODE=61" in build
+    assert 'VERSION_NAME="2.9.9"' in build
+    assert "VERSION_CODE=62" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
     assert '-cp "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' in build
     assert 'KOTLIN_STDLIB="$KOTLIN_HOME/lib/kotlin-stdlib.jar"' in build
     assert '"$BUILD/classes.jar" "$KOTLIN_STDLIB"' in build
+
+
+def test_kotlin_batch_a_bootreceiver_is_kotlin():
+    """Batch A (D3 stage 1): BootReceiver.java is gone,
+    BootReceiver.kt is the source, and it still extends
+    BroadcastReceiver with the BOOT_COMPLETED guard and the
+    Drive first-init hook before BridgeLog.init."""
+    assert not _java_source_exists("BootReceiver.java")
+    assert _kotlin_source_exists("BootReceiver.kt")
+    src = _kotlin_source("BootReceiver.kt")
+    assert "class BootReceiver : BroadcastReceiver()" in src
+    assert "Intent.ACTION_BOOT_COMPLETED" in src
+    assert "LogActivity.ensureDriveInit(" in src
+    assert src.index("ensureDriveInit") < src.index("BridgeLog.init")
+
+
+def test_kotlin_batch_a_vpnbindselector_is_kotlin():
+    """Batch A (D3 stage 1, D4 checklist): VpnBindSelector.java
+    is gone, VpnBindSelector.kt is the source. The public API
+    keeps its JVM shape for the Java callers: @JvmStatic on
+    select/isTailscaleRange and on the Decision factories,
+    @JvmField on the VpnNetwork/Decision fields, const val
+    constants (static final fields in the Java original)."""
+    assert not _java_source_exists("VpnBindSelector.java")
+    assert _kotlin_source_exists("VpnBindSelector.kt")
+    src = _kotlin_source("VpnBindSelector.kt")
+    assert "class VpnBindSelector private constructor()" in src
+    assert 'const val DEGRADED_NO_VPN = "tailscale-interface-unavailable"' in src
+    assert 'const val DEGRADED_AMBIGUOUS = "tailscale-network-ambiguous"' in src
+    assert "        @JvmStatic\n        fun isTailscaleRange(" in src
+    assert "        @JvmStatic\n        fun select(" in src
+    assert "        @JvmField val interfaceName: String?" in src
+    assert "        @JvmField\n        val ipv4Addresses: List<String>" in src
+    assert "        @JvmField val bindIp: String?" in src
+    assert "        @JvmField val bindInterface: String?" in src
+    assert "        @JvmField val degradedReason: String?" in src
+    assert "            @JvmStatic\n            fun bind(" in src
+    assert "            @JvmStatic\n            fun degraded(" in src
+
+
+def test_kotlin_batch_a_java_callers_unchanged():
+    """Batch A: the Java callers were NOT modified — they still
+    call VpnBindSelector.select(...) and isTailscaleRange(...)
+    as statics, construct VpnNetwork, and read the Decision
+    fields directly, which only compiles because the Kotlin
+    members are @JvmStatic / @JvmField / const val."""
+    server = _java_source("HttpBridgeServer.java")
+    assert "VpnBindSelector.select(vpns)" in server
+    assert "new VpnBindSelector.VpnNetwork(ifName, v4)" in server
+    assert "decision.bindIp" in server
+    assert "decision.bindInterface" in server
+    assert "decision.degradedReason" in server
+    assert "decision.isBind()" in server
+    main = _java_source("MainActivity.java")
+    assert "VpnBindSelector.isTailscaleRange(ip)" in main
+
+
+def test_kotlin_batch_a_attribution_first_line():
+    """Batch A: new Kotlin files carry the required attribution
+    as line 1."""
+    for name in ("BootReceiver.kt", "VpnBindSelector.kt"):
+        first = _kotlin_source(name).splitlines()[0]
+        assert first == _KOTLIN_PILOT_ATTRIBUTION, name
