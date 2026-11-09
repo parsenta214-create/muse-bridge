@@ -9,16 +9,18 @@
 # What it does, when run:
 #   1. Checks out the repo.
 #   2. Sets up Temurin JDK 17 and the Android SDK (API 34, build-tools 34.0.0).
-#   3. Restores the debug keystore from the DEBUG_KEYSTORE_B64 secret —
+#   3. Fetches kotlinc 2.4.21 (pinned version, SHA-256 verified;
+#      SPEC-KOTLIN-MIGRATION-001 D2) and caches it by compiler version.
+#   4. Restores the debug keystore from the DEBUG_KEYSTORE_B64 secret —
 #      the SAME key that signs the phone installs, so update-installs
 #      keep working. If the secret is not set, build.sh generates a fresh
 #      debug keystore and the APK gets a DIFFERENT signature: it will NOT
 #      update-install over the existing app (uninstall first, which loses
 #      the bridge token). Do not run the workflow until the secret is set.
-#   4. Runs the Python test suite (pytest; the bridge Python code uses
+#   5. Runs the Python test suite (pytest; the bridge Python code uses
 #      stdlib + pytest only, so no requirements file is needed).
-#   5. Builds the APK with the manual aapt2 / javac / d8 pipeline
-#      (android-app/build.sh) and uploads it as an artifact.
+#   6. Builds the APK with the manual aapt2 / kotlinc / javac / d8
+#      pipeline (android-app/build.sh) and uploads it as an artifact.
 #
 # No secrets are printed. The keystore password is the well-known debug
 # default ("android") already used by build.sh.
@@ -58,6 +60,34 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
+      # SPEC-KOTLIN-MIGRATION-001 D2: kotlinc 2.4.21, pinned version,
+      # download URL explicit, SHA-256 verified (fail on mismatch).
+      # The expected digest is a version-controlled value, taken from
+      # the official release's kotlin-compiler-2.4.21.zip.sha256
+      # sidecar file (2026-11-09) — NOT fetched from the same source
+      # as the compiler at build time. Cache is keyed by compiler
+      # version. kotlinc -version is logged so local and CI versions
+      # can never silently differ.
+      - name: Cache kotlinc
+        id: cache-kotlinc
+        uses: actions/cache@v4
+        with:
+          path: kotlin
+          key: kotlinc-2.4.21
+
+      - name: Fetch kotlinc 2.4.21 (pinned, SHA-256 verified)
+        if: steps.cache-kotlinc.outputs.cache-hit != 'true'
+        env:
+          KOTLIN_VERSION: 2.4.21
+          KOTLIN_SHA256: 7cc140e76daf416a0424a5557f99afd7ca89ebd463ea1101261e3e01c33e75cd
+        run: |
+          curl -fsSL -o /tmp/kotlin-compiler.zip \
+            "https://github.com/JetBrains/kotlin/releases/download/v${KOTLIN_VERSION}/kotlin-compiler-${KOTLIN_VERSION}.zip"
+          echo "${KOTLIN_SHA256}  /tmp/kotlin-compiler.zip" | sha256sum -c -
+          mkdir -p "$GITHUB_WORKSPACE/kotlin"
+          unzip -q /tmp/kotlin-compiler.zip -d "$GITHUB_WORKSPACE/kotlin"
+          "$GITHUB_WORKSPACE/kotlin/kotlinc/bin/kotlinc" -version
+
       - name: Restore debug keystore (same key as the phone installs)
         env:
           DEBUG_KEYSTORE_B64: ${{ secrets.DEBUG_KEYSTORE_B64 }}
@@ -77,6 +107,8 @@ jobs:
           python3 -m pytest -q
 
       - name: Build APK
+        env:
+          KOTLIN_HOME: ${{ github.workspace }}/kotlin/kotlinc
         run: |
           cd android-app && ./build.sh
 
