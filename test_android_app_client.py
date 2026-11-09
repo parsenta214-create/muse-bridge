@@ -4044,16 +4044,16 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_6():
-    """AX-12 (superseded by SPEC-LOCALE-TILE-001): the build now
-    carries v2.9.6 / code 59 (was v2.9.5 / code 58 at
-    SPEC-LOCALE-TILE-001 v3)."""
+def test_locale_tile_version_2_9_7():
+    """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
+    carries v2.9.7 / code 60 (was v2.9.6 / code 59 at
+    SPEC-LOCALE-TILE-001 v4)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.6"' in build
-    assert "VERSION_CODE=59" in build
+    assert 'VERSION_NAME="2.9.7"' in build
+    assert "VERSION_CODE=60" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4259,134 +4259,190 @@ def test_override_p202_classify_failure_keeps_folder():
 
 
 # ----------------------------------------------------------------------
-# SPEC-A11Y-OFF-001 (v2.9.3): source-structure guards (section 4).
-# Runtime behaviour (pin dialog, shortcut launch, actual disable,
-# toasts) is covered by live verification AX-L1..L7, not here.
+# SPEC-A11Y-OFF-002 (v2.9.7): source-structure guards (section 4).
+# The 001 shortcut path is DELETED (D3): no PinRequestManager, no
+# token, no shortcut intent, no backup-rules files. The widget's
+# third button and the second QS tile call the shared headless
+# A11yOffExecutor instead. Runtime behaviour is covered by live
+# verification W-L1..L3, T-L1..T-L5, X-L1, L4..L8, not here.
 # ----------------------------------------------------------------------
 
-def _pin():
-    return _java_source("PinRequestManager.java")
+def _executor():
+    return _java_source("A11yOffExecutor.java")
+
+
+def _a11y_tile():
+    return _java_source("A11yOffTileService.java")
 
 
 def _a11y_main():
     return _java_source("MainActivity.java")
 
 
-def test_a11yoff_ax01_shortcut_definition():
-    """AX-01/AX-08: ID, action, extra, explicit intent, labels, icon."""
-    pin = _pin()
-    main = _a11y_main()
-    assert 'SHORTCUT_ID = "a11y_off"' in pin
-    assert '"dev.muse.bridge.ACTION_DISABLE_A11Y"' in main
-    assert '"dev.muse.bridge.EXTRA_DISABLE_TOKEN"' in main
-    assert "intent.setClass(app, MainActivity.class)" in pin
-    assert "putExtra(MainActivity.EXTRA_DISABLE_TOKEN" in pin
-    assert "R.drawable.ic_tile" in pin
-    assert "a11y_off_short_label" in pin and "a11y_off_long_label" in pin
-    strings = _res_text("values/strings.xml")
-    for name in ("a11y_off_short_label", "a11y_off_long_label",
-                 "btn_a11y_off_shortcut", "toast_pin_failed",
-                 "toast_pin_unresolved", "toast_a11y_off_done",
-                 "toast_a11y_already_off", "toast_a11y_not_connected",
-                 "toast_a11y_off_unconfirmed", "toast_a11y_status_unknown"):
-        assert f'name="{name}"' in strings
-
-
-def test_a11yoff_ax02_worker_thread_and_return_meaning():
-    """AX-02/AX-18: requestPinShortcut on a worker, pre-check, no
-    success toast on true, callback null."""
-    pin = _pin()
-    assert "isRequestPinShortcutSupported()" in pin
-    assert "sm.requestPinShortcut(info, null)" in pin
-    assert "EXECUTOR.execute(new PinWorker(" in pin
-    assert pin.index("isRequestPinShortcutSupported()") < pin.index(
-        "EXECUTOR.execute(")
-    # requestPinShortcut is only called inside the worker's run().
-    assert pin.index("requestPinShortcut(info, null)") > pin.index(
-        "class PinWorker")
-    assert "catch (Exception e)" in pin
-    # KNOWN_TRUE path shows no toast.
-    seg = pin[pin.index("case KNOWN_TRUE:"):pin.index("case UNKNOWN:")]
-    assert "toast(" not in seg
-
-
-def test_a11yoff_ax03_flags_and_new_intent():
-    """AX-03/AX-15: D8 flags, onCreate + onNewIntent, setIntent."""
-    pin = _pin()
-    main = _a11y_main()
-    assert "Intent.FLAG_ACTIVITY_NEW_TASK" in pin
-    assert "Intent.FLAG_ACTIVITY_CLEAR_TOP" in pin
-    assert "Intent.FLAG_ACTIVITY_SINGLE_TOP" in pin
-    assert "protected void onNewIntent(Intent intent)" in main
-    assert "setIntent(intent);" in main
-    assert main.count("handleDisableIntent(") >= 3  # def + 2 callers
-    assert "private static boolean disableInProgress" in main
-
-
-def test_a11yoff_ax04_null_branch_three_valued():
-    """AX-04/AX-14/AX-19: getInstance()==null uses the three-valued
-    state; none of the branches disables."""
-    main = _a11y_main()
-    assert "enum A11yState { ENABLED, DISABLED, UNKNOWN }" in main
-    st = main[main.index("public static A11yState getAccessibilityState"):]
-    st = st[:st.index("protected void onCreate")]
-    assert "return A11yState.DISABLED;" in st  # null string
-    assert "catch (Exception e)" in st and "return A11yState.UNKNOWN;" in st
-    h = main[main.index("private void handleDisableA11y"):]
-    h = h[:h.index("private static String readA11yOffToken")]
-    nul = h[h.index("disableInProgress = false;"):]
-    assert "disableSelf" not in nul
-    assert "toast_a11y_already_off" in nul
-    assert "toast_a11y_not_connected" in nul
-    assert "toast_a11y_status_unknown" in nul
-    # existing boolean helper stays for display only
-    assert "public static boolean isAccessibilityEnabled(" in main
-
-
-def test_a11yoff_ax05_disable_self_and_completion_check():
-    """AX-05/AX-29/AX-37/AX-39: disableSelf, success toast only after
-    DISABLED is confirmed, 2s x3 re-checks, 6s unconfirmed toast."""
-    main = _a11y_main()
-    h = main[main.index("private void handleDisableA11y"):]
-    h = h[:h.index("private static String readA11yOffToken")]
-    assert h.count("service.disableSelf()") == 1
-    # no success toast inside the handler itself
-    assert "toast_a11y_off_done" not in h
-    assert "DISABLE_CHECK_INTERVAL_MS = 2000L" in main
-    assert "DISABLE_CHECK_MAX = 3" in main
-    chk = main[main.index("private static void scheduleDisableCheck"):]
-    chk = chk[:chk.index("private static void finishDisable")]
-    assert "A11yState.DISABLED" in chk
-    assert "toast_a11y_off_done" in chk
-    assert "toast_a11y_off_unconfirmed" in chk
-    assert "opGen != disableGeneration" in chk
-    bc = main[main.index("private void onA11yBroadcastForDisable"):]
-    bc = bc[:bc.index("private void refreshPinButton")]
-    assert "if (!disableInProgress)" in bc
-    assert "A11yState.DISABLED" in bc
-
-
-def test_a11yoff_ax06_ax07_only_disable_self_no_server_stop():
-    """AX-06/AX-07/AX-17: no settings put/adb/device admin, no server
-    stop in the shortcut execution path."""
-    main = _a11y_main()
-    h = main[main.index("private void handleDisableIntent"):]
-    h = h[:h.index("private void refreshPinButton")]
-    for bad in ("settings put", "adb", "DevicePolicyManager",
-                "stopService", "server.stop", "BridgeService"):
-        assert bad not in h
-    pin = _pin()
-    for bad in ("disableSelf", "stopService", "server.stop"):
-        assert bad not in pin
-
-
-def test_a11yoff_ax09_ax10_manifest_no_new_perm_or_component():
-    """AX-09/AX-10/AX-58/AX-65: only the two backup attributes are
-    added; MainActivity stays exported; exclusion paths match."""
-    import re
+def _a11y_tile_block():
+    """The A11yOffTileService <service> block of the manifest."""
     man = _manifest_source()
-    assert 'android:fullBackupContent="@xml/backup_rules"' in man
-    assert 'android:dataExtractionRules="@xml/data_extraction_rules"' in man
+    start = man.index('android:name=".A11yOffTileService"')
+    start = man.rindex("<service", 0, start)
+    end = man.index("</service>", start) + len("</service>")
+    return man[start:end]
+
+
+def test_a11yoff002_d3_shortcut_button_gone():
+    """D3: the in-app shortcut button is gone from the layout and
+    from MainActivity."""
+    layout = _res_text("layout/activity_main.xml")
+    assert "a11y_off_shortcut_button" not in layout
+    main = _a11y_main()
+    assert "a11y_off_shortcut_button" not in main
+    assert "pinButton" not in main
+
+
+def test_a11yoff002_d3_pin_manager_gone():
+    """D3: PinRequestManager.java is deleted; no reference remains."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    assert not (root / "android-app" / "src" / "dev" / "muse" / "bridge"
+                / "PinRequestManager.java").exists()
+    main = _a11y_main()
+    assert "PinRequestManager" not in main
+    assert "requestPinShortcut" not in main
+
+
+def test_a11yoff002_d3_token_gone():
+    """D3: the 001 token is gone — no prefs file, no create/match/
+    read helpers, no token in the executor."""
+    main = _a11y_main()
+    for sym in ("a11y_off_token_prefs", "getOrCreateA11yOffToken",
+                "isA11yOffTokenMatch", "readA11yOffToken",
+                "A11Y_OFF_TOKEN_PREFS", "KEY_A11Y_OFF_TOKEN"):
+        assert sym not in main
+    ex = _executor()
+    for sym in ("a11y_off_token_prefs", "getOrCreateA11yOffToken",
+                "isA11yOffTokenMatch", "readA11yOffToken"):
+        assert sym not in ex
+
+
+def test_a11yoff002_d3_backup_rules_gone():
+    """D3: backup_rules.xml and data_extraction_rules.xml are
+    deleted; the manifest drops both attributes but keeps
+    allowBackup=false."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    xml = root / "android-app" / "res" / "xml"
+    assert not (xml / "backup_rules.xml").exists()
+    assert not (xml / "data_extraction_rules.xml").exists()
+    man = _manifest_source()
+    assert 'android:allowBackup="false"' in man
+    assert "fullBackupContent" not in man
+    assert "dataExtractionRules" not in man
+    assert "backup_rules" not in man
+    assert "data_extraction_rules" not in man
+
+
+def test_a11yoff002_d3_mainactivity_intent_handling_gone():
+    """D3: MainActivity no longer handles the disable intent and no
+    longer owns the disable flow (executor owns it now)."""
+    main = _a11y_main()
+    for sym in ("handleDisableIntent", "handleDisableA11y",
+                "ACTION_DISABLE_A11Y", "EXTRA_DISABLE_TOKEN",
+                "onNewIntent", "disableInProgress", "disableGeneration",
+                "MAIN_HANDLER", "scheduleDisableCheck", "finishDisable",
+                "onA11yBroadcastForDisable", "refreshPinButton",
+                "getAccessibilityState", "A11yState"):
+        assert sym not in main, sym
+    # the a11y-state receiver still refreshes the UI, nothing else
+    assert "a11yStateReceiver" in main
+
+
+def test_a11yoff002_d3_shortcut_strings_gone():
+    """D3: shortcut-only strings are deleted; the 001 toasts are
+    reused, and the new tile/widget strings exist."""
+    strings = _res_text("values/strings.xml")
+    for name in ("btn_a11y_off_shortcut", "a11y_off_short_label",
+                 "a11y_off_long_label", "toast_pin_failed",
+                 "toast_pin_unresolved"):
+        assert f'name="{name}"' not in strings, name
+    for name in ("toast_a11y_off_done", "toast_a11y_already_off",
+                 "toast_a11y_not_connected", "toast_a11y_off_unconfirmed",
+                 "toast_a11y_status_unknown", "a11y_off_tile_label",
+                 "widget_a11y_off_button", "toast_a11y_off_failed"):
+        assert f'name="{name}"' in strings, name
+    assert "補助機能オフ" in strings
+
+
+def test_a11yoff002_d3_no_new_drawable():
+    """D6: the a11y-off tile reuses the main tile's icon; no new
+    drawable file was added (ic_locale is the locale tile's)."""
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    names = sorted(p.name for p in
+                   (root / "android-app" / "res" / "drawable").iterdir())
+    assert names == ["card_background.xml", "ic_locale.xml",
+                     "ic_override.xml", "ic_tile.xml"]
+
+
+def test_a11yoff002_d5_widget_pending_intent():
+    """D5: the widget's third button uses an explicit intent to the
+    non-exported receiver, a dedicated action and request code, and
+    FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE."""
+    prov = _java_source("BridgeWidgetProvider.java")
+    assert "REQUEST_A11Y_OFF = 3" in prov
+    assert "REQUEST_TOGGLE = 1" in prov and "REQUEST_OPEN = 2" in prov
+    seg = prov[prov.index("Intent a11yOff = new Intent"):]
+    assert "new Intent(context, BridgeWidgetActionReceiver.class)" in seg
+    assert ".setAction(BridgeWidgetActionReceiver.ACTION_WIDGET_A11Y_OFF)" in seg
+    assert "PendingIntent.getBroadcast(" in seg
+    assert "REQUEST_A11Y_OFF" in seg
+    assert ("PendingIntent.FLAG_UPDATE_CURRENT | "
+            "PendingIntent.FLAG_IMMUTABLE") in seg
+    assert "setOnClickPendingIntent(R.id.widget_a11y_off_button" in seg
+    recv = _java_source("BridgeWidgetActionReceiver.java")
+    assert ('ACTION_WIDGET_A11Y_OFF =\n            "dev.muse.bridge.'
+            'ACTION_WIDGET_A11Y_OFF"') in recv
+    assert "A11yOffExecutor.execute(context);" in recv
+
+
+def test_a11yoff002_d5_widget_third_button_layout():
+    """D5: the widget layout has the third button, and the provider
+    labels it from the new string."""
+    layout = _res_text("layout/widget_bridge.xml")
+    assert "widget_a11y_off_button" in layout
+    assert "@string/widget_a11y_off_button" in layout
+    prov = _java_source("BridgeWidgetProvider.java")
+    assert "R.id.widget_a11y_off_button" in prov
+    assert "R.string.widget_a11y_off_button" in prov
+
+
+def test_a11yoff002_d5_action_receiver_not_exported():
+    """D5: the widget action receiver stays exported=false with no
+    intent-filter, so only our own PendingIntent reaches it."""
+    man = _manifest_source()
+    start = man.index('android:name=".BridgeWidgetActionReceiver"')
+    start = man.rindex("<receiver", 0, start)
+    end = man.index("/>", start) + len("/>")
+    block = man[start:end]
+    assert 'android:exported="false"' in block
+    assert "intent-filter" not in block
+
+
+def test_a11yoff002_d6_tile_manifest():
+    """D6: the manifest declares the second tile (exported=true,
+    BIND_QUICK_SETTINGS_TILE, QS_TILE filter, label + icon), once."""
+    man = _manifest_source()
+    assert man.count('android:name=".A11yOffTileService"') == 1
+    block = _a11y_tile_block()
+    assert 'android:exported="true"' in block
+    assert ('android:permission="android.permission.'
+            'BIND_QUICK_SETTINGS_TILE"') in block
+    assert ('android.service.quicksettings.action.QS_TILE') in block
+    assert 'android:label="@string/a11y_off_tile_label"' in block
+    assert 'android:icon="@drawable/ic_tile"' in block
+    # the first tile and the locale tile are unchanged
+    assert man.count('android:name=".BridgeTileService"') == 1
+    assert man.count('android:name=".LocaleTileService"') == 1
+    # no new permission was added
+    import re
     perms = re.findall(r'<uses-permission android:name="([^"]+)"', man)
     assert sorted(perms) == sorted([
         "android.permission.INTERNET",
@@ -4397,365 +4453,284 @@ def test_a11yoff_ax09_ax10_manifest_no_new_perm_or_component():
         "android.permission.RECEIVE_BOOT_COMPLETED",
         "android.permission.REQUEST_INSTALL_PACKAGES",
         "com.termux.permission.RUN_COMMAND"])
-    comps = re.findall(r"<(?:activity|receiver|service)\s+android:name=\"([^\"]+)\"", man)
-    assert sorted(comps) == sorted([
-        ".MainActivity", ".LogActivity", ".BootReceiver",
-        ".BridgeAccessibilityService", ".BridgeService",
-        ".BridgeNotificationListener", ".BridgeTileService",
-        ".LocaleTileService",
-        ".BridgeWidgetProvider", ".BridgeWidgetActionReceiver"])
-    main_region = man[man.index('android:name=".MainActivity"'):]
-    assert 'android:exported="true"' in main_region[:80]
-    # prefs file name vs exclusion XML paths
-    main = _a11y_main()
-    assert 'A11Y_OFF_TOKEN_PREFS = "a11y_off_token_prefs"' in main
-    full = _res_text("xml/backup_rules.xml")
-    assert 'domain="sharedpref" path="a11y_off_token_prefs.xml"' in full
-    ext = _res_text("xml/data_extraction_rules.xml")
-    cloud = ext[ext.index("<cloud-backup>"):ext.index("</cloud-backup>")]
-    xfer = ext[ext.index("<device-transfer>"):ext.index("</device-transfer>")]
-    for seg in (cloud, xfer):
-        assert 'domain="sharedpref" path="a11y_off_token_prefs.xml"' in seg
 
 
-def test_a11yoff_ax11_no_new_drawable():
-    """AX-08/D6: ic_tile reused, no new drawable file. (Updated for
-    SPEC-LOCALE-TILE-001 v2.9.4: ic_locale.xml is the one new drawable
-    the locale tile adds; nothing else was added.)"""
+def test_a11yoff002_d6_tile_state_table():
+    """D6: ENABLED -> ACTIVE, DISABLED -> INACTIVE, UNKNOWN ->
+    UNAVAILABLE. UNKNOWN is never misclassified."""
+    tile = _a11y_tile()
+    assert "A11yOffExecutor.getAccessibilityState(this)" in tile
+    assert "Tile.STATE_ACTIVE" in tile
+    assert "Tile.STATE_INACTIVE" in tile
+    assert "Tile.STATE_UNAVAILABLE" in tile
+    # the state read feeds the switch, not a cached value
+    seg = tile[tile.index("private void refreshTile"):]
+    assert "A11yOffExecutor.A11yState state" in seg
+    assert "switch (state)" in seg
+    assert "case ENABLED:" in seg
+    assert "case DISABLED:" in seg
+    assert "default:" in seg
+
+
+def test_a11yoff002_d6_tile_refresh_helper_three_sites():
+    """D6 (Argon P1-01): refreshTile() updates the tile directly
+    (getQsTile().setState + updateTile) and is called from all three
+    sites — onStartListening, the runtime receiver, and onClick."""
+    tile = _a11y_tile()
+    assert "private void refreshTile()" in tile
+    helper = tile[tile.index("private void refreshTile"):]
+    assert "getQsTile()" in helper
+    assert "tile.setState(" in helper
+    assert "tile.updateTile();" in helper
+    assert "requestListeningState" not in helper
+    # onStartListening calls it
+    start = tile[tile.index("public void onStartListening"):]
+    start = start[:start.index("public void onStopListening")]
+    assert "refreshTile();" in start
+    # the runtime receiver calls it
+    assert tile.count("refreshTile();") >= 3
+    # onClick calls the executor, then refreshes directly
+    click = tile[tile.index("public void onClick"):]
+    click = click[:click.index("private void refreshTile")]
+    assert "A11yOffExecutor.execute(this);" in click
+    assert click.index("A11yOffExecutor.execute(this);") < click.index(
+        "refreshTile();")
+
+
+def test_a11yoff002_d6_tile_receiver_not_exported_idempotent():
+    """D6 (Argon P2-01 / GPT P2-02): the tile's runtime receiver is
+    registered with RECEIVER_NOT_EXPORTED, idempotently, and
+    unregistered only if registered (double-unregister guarded)."""
+    tile = _a11y_tile()
+    assert "Context.RECEIVER_NOT_EXPORTED" in tile
+    assert "private boolean receiverRegistered = false;" in tile
+    start = tile[tile.index("public void onStartListening"):]
+    start = start[:start.index("public void onStopListening")]
+    assert "if (!receiverRegistered)" in start
+    assert "receiverRegistered = true;" in start
+    stop = tile[tile.index("public void onStopListening"):]
+    stop = stop[:stop.index("public void onClick")]
+    assert "if (receiverRegistered)" in stop
+    assert "unregisterReceiver(a11yStateReceiver);" in stop
+    assert "receiverRegistered = false;" in stop
+    assert "catch (IllegalArgumentException ignored)" in stop
+
+
+def test_a11yoff002_d7_three_valued_state():
+    """D7: the executor's three-valued state read — null means
+    DISABLED, an exception means UNKNOWN."""
+    ex = _executor()
+    assert "enum A11yState { ENABLED, DISABLED, UNKNOWN }" in ex
+    st = ex[ex.index("public static A11yState getAccessibilityState"):]
+    st = st[:st.index("public static void execute")]
+    assert "return A11yState.DISABLED;" in st  # null string
+    assert "catch (Exception e)" in st and "return A11yState.UNKNOWN;" in st
+
+
+def test_a11yoff002_d7_entry_state_first():
+    """D7: the outcome is decided by STATE first. UNKNOWN and
+    DISABLED apply regardless of the instance; only ENABLED
+    consults the instance (null -> not-connected toast)."""
+    ex = _executor()
+    body = ex[ex.index("public static void execute"):]
+    body = body[:body.index("// Stage A")]
+    # state is read before the instance is consulted for the
+    # not-connected branch
+    assert body.index("A11yState state = getAccessibilityState(app);") < \
+        body.index("if (service == null)")
+    assert "R.string.toast_a11y_status_unknown" in body
+    assert "R.string.toast_a11y_already_off" in body
+    assert "R.string.toast_a11y_not_connected" in body
+    # no disableSelf in the early-return region
+    early = body[:body.index("disableInProgress = true;")]
+    assert "disableSelf" not in early
+
+
+def test_a11yoff002_d11_entry_ordering():
+    """D11b: the in-progress check comes FIRST (silent ignore, no
+    toast); early returns keep the guard false; the guard and the
+    generation are set only when ENABLED and the instance is
+    non-null, in the same synchronized block."""
+    ex = _executor()
+    body = ex[ex.index("public static void execute"):]
+    body = body[:body.index("// Stage A")]
+    assert "synchronized (LOCK)" in body
+    assert body.index("if (disableInProgress)") < body.index(
+        "A11yState state = getAccessibilityState(app);")
+    assert 'Log.i(TAG, "ignored-during-execution");' in body
+    # the ignore path has no toast
+    ign = body[body.index("if (disableInProgress)"):]
+    ign = ign[:ign.index("service = BridgeAccessibilityService.getInstance();")]
+    assert "Toast" not in ign
+    # guard + generation in the same synchronized block, after the
+    # early returns
+    assert "disableInProgress = true;" in body
+    assert "opGen = ++disableGeneration;" in body
+    assert body.index("disableInProgress = true;") > body.index(
+        "if (service == null)")
+
+
+def test_a11yoff002_d11_atomic_completion():
+    """D11c: completion ownership is acquired atomically — the guard
+    is flipped and the receiver detached in the same synchronized
+    block, and only the owning caller unregisters and toasts."""
+    ex = _executor()
+    fin = ex[ex.index("private static void finishDisable"):]
+    fin = fin[:fin.index("private static final class DisableBroadcastReceiver")]
+    sync = fin[fin.index("synchronized (LOCK)"):]
+    sync = sync[:sync.index("}\n        if (toUnregister != null)")]
+    assert "if (!disableInProgress || opGen != disableGeneration)" in sync
+    assert "return;" in sync
+    assert "disableInProgress = false;" in sync
+    assert "currentReceiverGen == opGen" in sync
+    assert "toUnregister = currentReceiver;" in sync
+    assert "currentReceiver = null;" in sync
+    assert "currentReceiverGen = 0;" in sync
+    # unregister + toast happen after the lock is released, once
+    assert fin.count("unregisterReceiver(toUnregister)") == 1
+    assert fin.count("Toast.makeText(app, toastRes, Toast.LENGTH_LONG)") == 1
+    # completion notifies the open tile and the widget
+    assert "TileService.requestListeningState(app," in fin
+    assert "A11yOffTileService.class" in fin
+    assert "ACTION_A11Y_STATE_CHANGED" in fin
+    assert ".setPackage(app.getPackageName())" in fin
+    assert "BridgeWidgetProvider.updateAllWidgets(app);" in fin
+    # the completion trigger is logged
+    assert '" via " + trigger' in fin
+
+
+def test_a11yoff002_d11_per_generation_receiver():
+    """D11c (GPT re-review 2 P1-01): the receiver is owned per
+    operation — generation and receiver are stored and cleared
+    together, and finishDisable unregisters only its own
+    generation's receiver."""
+    ex = _executor()
+    assert "private static BroadcastReceiver currentReceiver = null;" in ex
+    assert "private static int currentReceiverGen = 0;" in ex
+    body = ex[ex.index("public static void execute"):]
+    body = body[:body.index("// Stage A")]
+    assert "currentReceiver = receiver;" in body
+    assert "currentReceiverGen = opGen;" in body
+    fin = ex[ex.index("private static void finishDisable"):]
+    fin = fin[:fin.index("private static final class DisableBroadcastReceiver")]
+    assert "if (currentReceiverGen == opGen)" in fin
+    # the receiver reference is captured, not re-read, for unregister
+    assert "toUnregister = currentReceiver;" in fin
+
+
+def test_a11yoff002_d11_executor_receiver_not_exported():
+    """D11 (Argon P2-01): the executor registers its receiver with
+    RECEIVER_NOT_EXPORTED (targetSdk 34), and the unregister is
+    double-unregister guarded."""
+    ex = _executor()
+    assert "Context.RECEIVER_NOT_EXPORTED" in ex
+    assert "catch (IllegalArgumentException ignored)" in ex
+
+
+def test_a11yoff002_d11_stage_exceptions():
+    """D11b (GPT re-review 2 P2-02): stage-based exception handling.
+    Stage A (register) and stage B (disableSelf) roll back; stage C
+    (polling registration) does NOT roll back."""
+    ex = _executor()
+    # stage A
+    assert "rollback(app, opGen, false);" in ex
+    # stage B
+    assert "rollback(app, opGen, true);" in ex
+    assert "service.disableSelf();" in ex
+    # stage C keeps the guard: no rollback call in the stage C catch
+    stage_c = ex[ex.index("// Stage C"):]
+    stage_c = stage_c[:stage_c.index("private static void stageCFallback")]
+    assert "stageCFallback(app, opGen);" in stage_c
+    assert "rollback(" not in stage_c
+    # rollback releases the guard and clears the receiver
+    rb = ex[ex.index("private static void rollback"):]
+    rb = rb[:rb.index("private static void scheduleDisableCheck")]
+    assert "disableInProgress = false;" in rb
+    assert "currentReceiver = null;" in rb
+    assert "currentReceiverGen = 0;" in rb
+
+
+def test_a11yoff002_d11_stage_c_fallback():
+    """D11b (GPT re-review 3 P1-01): stage C has a guaranteed fallback
+    completion independent of the failed polling — a one-shot
+    delayed re-check at the 6 s mark, generation-checked; if the
+    fallback registration itself fails, it completes immediately
+    with a final state check."""
+    ex = _executor()
+    assert "private static void stageCFallback" in ex
+    fb = ex[ex.index("private static void stageCFallback"):]
+    fb = fb[:fb.index("private static void rollback")]
+    # immediate re-check first
+    assert "if (getAccessibilityState(app) == A11yState.DISABLED)" in fb
+    # one-shot delayed re-check at the 6 s mark
+    assert "DISABLE_CHECK_INTERVAL_MS * DISABLE_CHECK_MAX" in fb
+    assert "MAIN_HANDLER.postDelayed(" in fb
+    # fallback registration failure -> immediate completion
+    assert "stage C fallback registration failed" in fb
+    # the fallback completes with success or timeout, never silently
+    assert "R.string.toast_a11y_off_done" in fb
+    assert "R.string.toast_a11y_off_unconfirmed" in fb
+
+
+def test_a11yoff002_d11_no_token_no_server_stop():
+    """D4/D7: the executor uses no token and never stops the server."""
+    ex = _executor()
+    assert "stopService" not in ex
+    assert "BridgeService" not in ex
+    assert "server.stop" not in ex
+    assert "A11yState.DISABLED" in ex
+
+
+def test_a11yoff002_d11_polling_and_broadcast():
+    """D7/D11: 2 s x 3 polling, generation-checked; the broadcast is
+    a fast path that completes only on DISABLED."""
+    ex = _executor()
+    assert "DISABLE_CHECK_INTERVAL_MS = 2000L" in ex
+    assert "DISABLE_CHECK_MAX = 3" in ex
+    poll = ex[ex.index("private static void scheduleDisableCheck"):]
+    poll = poll[:poll.index("private static void finishDisable")]
+    assert "if (!disableInProgress || opGen != disableGeneration)" in poll
+    assert "A11yState.DISABLED" in poll
+    assert "attempt < DISABLE_CHECK_MAX" in poll
+    assert "scheduleDisableCheck(app, opGen, attempt + 1);" in poll
+    bc = ex[ex.index("private static final class DisableBroadcastReceiver"):]
+    assert "if (getAccessibilityState(app) == A11yState.DISABLED)" in bc
+    assert 'finishDisable(app, opGen, R.string.toast_a11y_off_done, "broadcast")' in bc
+
+
+def test_a11yoff002_d11_logs():
+    """D11d: the executor logs request / already-off / UNKNOWN /
+    ignored-during-execution / success / timeout, with the
+    completion trigger type."""
+    ex = _executor()
+    assert 'private static final String TAG = "A11yOff";' in ex
+    assert 'Log.i(TAG, "request");' in ex
+    assert 'Log.i(TAG, "already-off");' in ex
+    assert 'Log.i(TAG, "UNKNOWN");' in ex
+    assert 'Log.i(TAG, "ignored-during-execution");' in ex
+    assert 'Log.i(TAG, "not-connected");' in ex
+    assert '(success ? "success" : "timeout") + " via " + trigger' in ex
+
+
+def test_a11yoff002_version_2_9_7():
+    """The build now carries v2.9.7 / code 60 (was v2.9.6 / code 59
+    at SPEC-LOCALE-TILE-001 v4)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
-    names = sorted(p.name for p in
-                   (root / "android-app" / "res" / "drawable").iterdir())
-    assert names == ["card_background.xml", "ic_locale.xml",
-                     "ic_override.xml", "ic_tile.xml"]
+    build = (root / "android-app" / "build.sh").read_text(
+        encoding="utf-8")
+    assert 'VERSION_NAME="2.9.7"' in build
+    assert "VERSION_CODE=60" in build
 
 
-def test_a11yoff_ax13_ax20_ax21_ax70_token():
-    """AX-13/AX-20/AX-21/AX-70: UUID once, dedicated prefs, commit(),
-    null/empty never match, creation aborted on save failure, token
-    not logged."""
-    main = _a11y_main()
-    t = main[main.index("static String getOrCreateA11yOffToken"):]
-    t = t[:t.index("static boolean isA11yOffTokenMatch")]
-    assert "UUID.randomUUID().toString()" in t
-    assert ".commit()" in t and ".apply()" not in t
-    assert "return saved ? token : null;" in t
-    m = main[main.index("static boolean isA11yOffTokenMatch"):]
-    m = m[:m.index("/** Returns the runtime token")]
-    assert "stored == null || stored.isEmpty()" in m
-    assert "received == null || received.isEmpty()" in m
-    assert "MessageDigest.isEqual" in m
-    pin = _pin()
-    assert "if (token == null)" in pin
-    assert pin.index("if (token == null)") < pin.index("EXECUTOR.execute(")
-    # the intent path reads the stored token but never creates one
-    assert "readA11yOffToken(app)" in main
-    # token handling code never reaches a log / exception message
-    for src in (t, m, pin):
-        assert "Log." not in src and "BridgeLog" not in src
-    # mismatch is silent: token check precedes flag, no toast on mismatch
-    h = main[main.index("private void handleDisableA11y"):]
-    assert h.index("isA11yOffTokenMatch(stored, received)") < h.index(
-        "if (disableInProgress)")
-    mism = h[h.index("isA11yOffTokenMatch(stored, received)"):
-             h.index("if (disableInProgress)")]
-    assert "Toast" not in mism and "return;" in mism
-
-
-def test_a11yoff_ax18_pin_manager_states():
-    """AX-18/AX-56: four separate states, application-scoped static,
-    workerRunning atomic, main-thread Handler."""
-    pin = _pin()
-    assert "enum UiState { IDLE, REQUESTING, WAITING_CONFIRMATION }" in pin
-    assert ("enum UnresolvedState { NONE, REQUESTING_UNRESOLVED, "
-            "CONFIRMATION_UNRESOLVED }") in pin
-    assert "COMPLETED" not in pin
-    assert "AtomicBoolean workerRunning" in pin
-    assert "private static boolean pauseObserved" in pin
-    assert "private static boolean resumeObserved" in pin
-    assert "new Handler(Looper.getMainLooper())" in pin
-    assert "public final class PinRequestManager" in pin
-    assert "REQUESTING_TIMEOUT_MS = 30_000L" in pin
-    assert "WAITING_TIMEOUT_MS = 30_000L" in pin
-    assert "RELEASE_TIMEOUT_MS = 60_000L" in pin
-
-
-def test_a11yoff_press_handler_branches():
-    """Step 1: not IDLE -> nothing; IDLE with worker/unresolved ->
-    unresolved toast; button mirrors uiState == IDLE."""
-    pin = _pin()
-    r = pin[pin.index("public static void requestPin"):]
-    r = r[:r.index("private static ShortcutInfo buildShortcutInfo")]
-    a = r.index("if (uiState != UiState.IDLE)")
-    b = r.index("workerRunning.get() || unresolvedState != UnresolvedState.NONE")
-    assert a < b
-    assert "toast_pin_unresolved" in r[b:b + 200]
-    assert "return uiState == UiState.IDLE;" in pin
-    main = _a11y_main()
-    assert "pinButton.setEnabled(PinRequestManager.isButtonEnabled())" in main
-    assert "PinRequestManager.requestPin(MainActivity.this)" in main
-    # start sets the documented state
-    for line in ("requestGeneration++;", "uiState = UiState.REQUESTING;",
-                 "workerRunning.set(true);",
-                 "unresolvedState = UnresolvedState.NONE;",
-                 "armRequestingTimer(gen);"):
-        assert line in r
-
-
-def test_a11yoff_ax55_ax64_executor_rejection_restores():
-    """AX-55/AX-64: rejection / startup exception restores IDLE/false/NONE."""
-    pin = _pin()
-    r = pin[pin.index("EXECUTOR.execute(new PinWorker("):]
-    r = r[:r.index("private static ShortcutInfo buildShortcutInfo")]
-    assert "catch (Exception e)" in r
-    assert "workerRunning.set(false);" in r
-    assert "uiState = UiState.IDLE;" in r
-    assert "unresolvedState = UnresolvedState.NONE;" in r
-    assert "toast_pin_failed" in r
-    assert "cancelRequestingTimer();" in r
-
-
-def test_a11yoff_ax67_ax76_ax77_worker_events():
-    """AX-67/76/77/78/90: resultEventPosted, outcome recorded before
-    post, Error not caught, recovery only when no result was posted."""
-    pin = _pin()
-    w = pin[pin.index("private static final class PinWorker"):
-            pin.index("// ---- events (main thread) ----")]
-    assert "boolean resultEventPosted = false;" in w
-    assert "Outcome known = Outcome.UNKNOWN;" in w
-    assert "catch (Error" not in w and "catch (Throwable" not in w
-    assert "catch (Exception e)" in w
-    api = w.index("sm.requestPinShortcut(info, null)")
-    assert w.index("known = ok ? Outcome.KNOWN_TRUE : Outcome.KNOWN_FALSE;") > api
-    first_post = w.index("HANDLER.post(")
-    assert w.index("known = ok ?") < first_post
-    assert w.index("known = Outcome.KNOWN_EXCEPTION;") < first_post
-    fin = w[w.index("} finally {"):]
-    assert "if (!resultEventPosted)" in fin
-    assert "onRecoveryEvent(gen, carried)" in fin
-    # direct workerRunning reset only when the recovery post failed
-    assert fin.count("workerRunning.set(false)") == 1
-    assert "if (!posted)" in fin
-    # post failure never rewrites the recorded outcome
-    posts = w[first_post:w.index("} finally {")]
-    assert "known =" not in posts
-
-
-def test_a11yoff_ax68_ax71_ax72_recovery_paths():
-    """AX-68/71/72/81/91: outcome application on the main thread."""
-    pin = _pin()
-    ap = pin[pin.index("private static void applyOutcome"):
-             pin.index("// ---- timers")]
-    f = ap[ap.index("case KNOWN_FALSE:"):ap.index("case KNOWN_TRUE:")]
-    assert "case KNOWN_EXCEPTION:" in f
-    assert "uiState = UiState.IDLE;" in f
-    assert "unresolvedState = UnresolvedState.NONE;" in f
-    assert "toast(R.string.toast_pin_failed)" in f
-    assert "startReleaseTimerOnce" not in f
-    t = ap[ap.index("case KNOWN_TRUE:"):ap.index("case UNKNOWN:")]
-    assert "CONFIRMATION_UNRESOLVED" in t
-    assert "UiState.WAITING_CONFIRMATION" in t
-    assert "armWaitingTimer(gen)" in t
-    assert "pauseObserved = false;" in t and "resumeObserved = false;" in t
-    u = ap[ap.index("case UNKNOWN:"):]
-    assert "if (uiState == UiState.REQUESTING)" in u
-    assert "unresolvedState = UnresolvedState.CONFIRMATION_UNRESOLVED;" in u
-    assert "startReleaseTimerOnce(gen)" in u
-
-
-def test_a11yoff_ax74_ax79_ax80_ax88_ax95_recovery_generation():
-    """AX-74/79/80/88/95: recovery events are generation-checked and
-    processed once; the 60s timer starts only once (AX-93)."""
-    pin = _pin()
-    r = pin[pin.index("private static void onRecoveryEvent"):]
-    r = r[:r.index("private static void applyOutcome")]
-    assert "gen != requestGeneration" in r
-    assert "processedGeneration == gen" in r
-    s = pin[pin.index("private static void startReleaseTimerOnce"):]
-    s = s[:s.index("private static void cancelReleaseTimer")]
-    assert "if (releaseTimerRunning)" in s
-    assert "RELEASE_TIMEOUT_MS" in s
-    assert "gen != requestGeneration" in s
-
-
-def test_a11yoff_ax53_ax54_ax34_late_results_not_discarded():
-    """AX-26/34/53/54/59/60: late results of the CURRENT generation are
-    applied, not discarded (stale generations are covered by AX-96)."""
-    pin = _pin()
-    r = pin[pin.index("private static void onResultEvent"):
-            pin.index("/** Error-specific recovery event")]
-    assert "gen != requestGeneration" in r
-    assert "applyOutcome(outcome)" in r
-    ap = pin[pin.index("case KNOWN_TRUE:"):pin.index("case UNKNOWN:")]
-    assert "else {" in ap and "startReleaseTimerOnce(gen)" in ap
-
-
-def test_a11yoff_ax61_ax62_ax89_ax94_timeouts_and_guard():
-    """AX-61/62/63/85/89/92: REQUESTING timeout with guard re-arming,
-    Error-recovery terminal state, generation-checked old timers."""
-    pin = _pin()
-    t = pin[pin.index("private static void onRequestingTimeout"):
-            pin.index("private static void armWaitingTimer")]
-    assert "gen != requestGeneration" in t
-    assert "if (workerRunning.get())" in t
-    run = t[t.index("if (workerRunning.get())"):t.index("} else {")]
-    assert "UnresolvedState.REQUESTING_UNRESOLVED" in run
-    assert "armRequestingTimer(gen)" in run  # guard re-arm
-    conv = t[t.index("} else {"):]
-    assert "UnresolvedState.CONFIRMATION_UNRESOLVED" in conv
-    assert "startReleaseTimerOnce(gen)" in conv
-    assert "armRequestingTimer" not in conv  # stops re-arming
-    # events cancel the guard
-    assert "cancelRequestingTimer();" in pin[
-        pin.index("private static void applyOutcome"):
-        pin.index("case KNOWN_FALSE:")]
-    # WAITING_CONFIRMATION timeout: UI back to IDLE, unresolved kept
-    w = pin[pin.index("private static void armWaitingTimer"):
-            pin.index("private static void cancelWaitingTimer")]
-    assert "gen != requestGeneration" in w
-    assert "uiState = UiState.IDLE;" in w
-    assert "startReleaseTimerOnce(gen)" in w
-    rel = pin[pin.index("private static void startReleaseTimerOnce"):
-              pin.index("private static void cancelReleaseTimer")]
-    assert "unresolvedState = UnresolvedState.NONE;" in rel
-
-
-def test_a11yoff_ax46_ax51_ax52_lifecycle_reference_only():
-    """AX-46/51/52: pause/resume recorded for reference only; never a
-    release condition."""
-    pin = _pin()
-    lc = pin[pin.index("public static void onActivityPaused"):
-             pin.index("// ---- press handler")]
-    assert "pauseObserved = true;" in lc
-    assert "resumeObserved = true;" in lc
-    assert "unresolvedState = " not in lc and "uiState = " not in lc
-    # no other code branches on the observed flags
-    body = pin.replace(lc, "")
-    for flag in ("pauseObserved", "resumeObserved"):
-        for line in body.splitlines():
-            if line.lstrip().startswith(("*", "//", "/*")):
-                continue
-            if flag in line:
-                assert ("= false;" in line or "private static boolean" in line
-                        or "return " in line), line
-    main = _a11y_main()
-    assert "PinRequestManager.onActivityPaused();" in main
-    assert "PinRequestManager.onActivityResumed();" in main
-    assert "PinRequestManager.setListener(pinListener);" in main
-    assert "PinRequestManager.clearListener(pinListener);" in main
-
-
-def test_a11yoff_ax96_stale_result_discarded_after_new_generation():
-    """AX-96 (CONS-097 P1-01): the worker captures its generation at post
-    time; a stale normal result A arriving after B started is discarded
-    and cannot touch B's four state dimensions or timers."""
-    pin = _pin()
-    w = pin[pin.index("private static final class PinWorker"):
-            pin.index("// ---- events (main thread) ----")]
-    assert "final int postedGen = gen;" in w
-    assert "onResultEvent(postedGen, carried)" in w
-    assert "onResultEvent(carried)" not in pin
-    r = pin[pin.index("private static void onResultEvent"):
-            pin.index("/** Error-specific recovery event")]
-    # discard check precedes any state mutation / applyOutcome
-    guard = r.index("gen != requestGeneration")
-    assert guard < r.index("processedGeneration = gen;")
-    assert guard < r.index("applyOutcome(outcome)")
-    assert "return;" in r[guard:r.index("processedGeneration = gen;")]
-    # applyOutcome is the only place state is applied
-    assert "processedGeneration = requestGeneration" not in pin
-
-
-def test_a11yoff_ax97_same_generation_result_and_recovery_once():
-    """AX-97: result and recovery events of one generation share the same
-    apply-once guard, so exactly one transition happens."""
-    pin = _pin()
-    res = pin[pin.index("private static void onResultEvent"):
-              pin.index("/** Error-specific recovery event")]
-    rec = pin[pin.index("private static void onRecoveryEvent"):
-              pin.index("private static void applyOutcome")]
-    for seg in (res, rec):
-        assert "gen != requestGeneration || processedGeneration == gen" in seg
-        assert seg.index("processedGeneration = gen;") < seg.index(
-            "applyOutcome(outcome)")
-        assert seg.count("applyOutcome(outcome)") == 1
-    # only these two events record a processed generation
-    assert pin.count("processedGeneration = gen;") == 2
-
-
-def test_a11yoff_ax98_requesting_guard_post_failure():
-    """AX-98: a failed requesting-guard post never leaves a timer claimed
-    as armed, and does not release the unresolved request."""
-    pin = _pin()
-    assert "private static boolean postDelayedChecked" in pin
-    a = pin[pin.index("private static boolean armRequestingTimer"):
-            pin.index("private static void cancelRequestingTimer")]
-    assert "postDelayedChecked(r, REQUESTING_TIMEOUT_MS)" in a
-    fail = a[a.index("if (!postDelayedChecked"):a.index("requestingTimer = r;")]
-    assert "requestingTimer = null;" in fail
-    assert "return false;" in fail
-    assert "unresolvedState" not in a and "NONE" not in a
-    # the timer field is assigned only after a successful post
-    assert a.index("requestingTimer = r;") > a.index("if (!postDelayedChecked")
-    # no unchecked postDelayed remains anywhere
-    assert "HANDLER.postDelayed(" not in pin.replace(
-        "return HANDLER.postDelayed(r, delayMs);", "")
-
-
-def test_a11yoff_ax99_release_timer_post_failure():
-    """AX-99: a failed release-timer post leaves the running flag false
-    and the unresolved state intact (no false auto-release display)."""
-    pin = _pin()
-    s = pin[pin.index("private static void startReleaseTimerOnce"):
-            pin.index("private static void cancelReleaseTimer")]
-    assert "postDelayedChecked(r, RELEASE_TIMEOUT_MS)" in s
-    fail = s[s.index("if (!postDelayedChecked"):s.index("releaseTimer = r;")]
-    assert "releaseTimerRunning = false;" in fail
-    assert "releaseTimer = null;" in fail
-    assert "return;" in fail
-    assert "unresolvedState = UnresolvedState.NONE;" not in fail
-    # running flag set only after the successful post
-    assert s.index("releaseTimerRunning = true;") > s.index("releaseTimer = r;")
-    # waiting timer failure also keeps the unresolved state
-    wt = pin[pin.index("private static void armWaitingTimer"):
-             pin.index("private static void cancelWaitingTimer")]
-    wfail = wt[wt.index("if (!postDelayedChecked"):wt.index("waitingTimer = r;")]
-    assert "waitingTimer = null;" in wfail
-    assert "unresolvedState" not in wfail
-
-
-def test_a11yoff_ax100_concurrent_completion_timeout_recreation():
-    """AX-100: worker completion, timeout and Activity recreation are all
-    serialized on the main thread and generation-guarded, so they
-    converge on one consistent final state."""
-    pin = _pin()
-    # every event / timer callback is generation-checked
-    for name in ("onResultEvent", "onRecoveryEvent", "onRequestingTimeout"):
-        seg = pin[pin.index("private static void " + name):]
-        seg = seg[:seg.index("\n    }\n")]
-        assert "gen != requestGeneration" in seg, name
-        assert "processedGeneration == gen" in seg, name
-    # Activity recreation only swaps the listener; it never mutates state
-    lst = pin[pin.index("public static void setListener"):
-              pin.index("// ---- lifecycle record")]
-    assert "uiState" not in lst and "unresolvedState" not in lst
-    assert "workerRunning" not in lst
-    # the timeout never overrides an already-processed generation
-    t = pin[pin.index("private static void onRequestingTimeout"):
-            pin.index("private static void armWaitingTimer")]
-    assert t.index("processedGeneration == gen") < t.index("uiState =")
-    # results are applied only through the main Handler
-    w = pin[pin.index("private static final class PinWorker"):
-            pin.index("// ---- events (main thread) ----")]
-    assert "applyOutcome" not in w
-
-
-def test_a11yoff_attribution_first_line():
-    """New Java file carries the required attribution as line 1."""
-    first = _pin().splitlines()[0]
-    assert first == ("// Implemented by claude-sonnet-5-5 (medium) "
-                     "\u2014 SPEC-A11Y-OFF-001, 2026-11-08")
-
+def test_a11yoff002_attribution_first_line():
+    """New Java files carry the required attribution as line 1."""
+    ex = _executor().splitlines()[0]
+    assert ex == ("// Implemented by MUSE-Koyuki (Muse Spark) "
+                  "\u2014 SPEC-A11Y-OFF-002 v6, 2026-11-09")
+    tile = _a11y_tile().splitlines()[0]
+    assert tile == ("// Implemented by MUSE-Koyuki (Muse Spark) "
+                    "\u2014 SPEC-A11Y-OFF-002 v6, 2026-11-09")
 
 def _locale():
     return _java_source("LocaleTileService.java")

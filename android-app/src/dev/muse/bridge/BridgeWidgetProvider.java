@@ -50,6 +50,9 @@ public class BridgeWidgetProvider extends AppWidgetProvider {
 
     private static final int REQUEST_TOGGLE = 1;
     private static final int REQUEST_OPEN = 2;
+    /** SPEC-A11Y-OFF-002 v6: distinct request code for the
+     * "Accessibility off" button (must differ from TOGGLE/OPEN). */
+    private static final int REQUEST_A11Y_OFF = 3;
 
     @Override
     public void onUpdate(Context context, AppWidgetManager appWidgetManager,
@@ -122,6 +125,8 @@ public class BridgeWidgetProvider extends AppWidgetProvider {
         views.setTextViewText(R.id.widget_toggle_button,
                 running ? "停止" : "開始");
         views.setTextViewText(R.id.widget_open_button, "開く");
+        views.setTextViewText(R.id.widget_a11y_off_button,
+                context.getString(R.string.widget_a11y_off_button));
 
         // Toggle: broadcast to the NON-exported action receiver
         // (CONS-037 P1) — never to this exported provider.
@@ -131,6 +136,18 @@ public class BridgeWidgetProvider extends AppWidgetProvider {
                 context, REQUEST_TOGGLE, toggle,
                 PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         views.setOnClickPendingIntent(R.id.widget_toggle_button, togglePending);
+
+        // SPEC-A11Y-OFF-002 v6: "Accessibility off" — explicit
+        // intent to the NON-exported action receiver, dedicated
+        // action + request code, FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE.
+        // Same pattern as the toggle; the receiver stays
+        // exported=false with no intent-filter.
+        Intent a11yOff = new Intent(context, BridgeWidgetActionReceiver.class)
+                .setAction(BridgeWidgetActionReceiver.ACTION_WIDGET_A11Y_OFF);
+        PendingIntent a11yOffPending = PendingIntent.getBroadcast(
+                context, REQUEST_A11Y_OFF, a11yOff,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        views.setOnClickPendingIntent(R.id.widget_a11y_off_button, a11yOffPending);
 
         // Open app: MainActivity (also the body tap target).
         Intent open = new Intent(context, MainActivity.class);

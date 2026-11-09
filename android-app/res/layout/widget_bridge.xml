@@ -59,5 +59,15 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="開く" />
+
+        <!-- SPEC-A11Y-OFF-002 v6: third button, "Accessibility off".
+             Headless disable via the shared executor; never opens
+             the app. -->
+        <Button
+            android:id="@+id/widget_a11y_off_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="@string/widget_a11y_off_button" />
     </LinearLayout>
 </LinearLayout>

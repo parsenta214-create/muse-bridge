@@ -38,6 +38,12 @@ public class BridgeWidgetActionReceiver extends BroadcastReceiver {
     public static final String ACTION_WIDGET_TOGGLE =
             "dev.muse.bridge.ACTION_WIDGET_TOGGLE";
 
+    /** "Accessibility off" tap (SPEC-A11Y-OFF-002 v6): broadcast from
+     * the widget's third button. Handled by the shared headless
+     * executor; never opens MainActivity. */
+    public static final String ACTION_WIDGET_A11Y_OFF =
+            "dev.muse.bridge.ACTION_WIDGET_A11Y_OFF";
+
     /** Widget refresh settle delay — same as the QS tile. */
     private static final long TOGGLE_SETTLE_DELAY_MS = 600;
 
@@ -58,6 +64,22 @@ public class BridgeWidgetActionReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? null : intent.getAction();
+        if (ACTION_WIDGET_A11Y_OFF.equals(action)) {
+            // SPEC-A11Y-OFF-002 v6: headless disable. The executor
+            // shows the result toast and refreshes the widget when
+            // it completes (immediately and ~600 ms later, below).
+            A11yOffExecutor.execute(context);
+            BridgeWidgetProvider.updateAllWidgets(context);
+            final Context appContext = context.getApplicationContext();
+            Handler handler = new Handler(Looper.getMainLooper());
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    BridgeWidgetProvider.updateAllWidgets(appContext);
+                }
+            }, TOGGLE_SETTLE_DELAY_MS);
+            return;
+        }
         if (!ACTION_WIDGET_TOGGLE.equals(action)) {
             return;
         }
