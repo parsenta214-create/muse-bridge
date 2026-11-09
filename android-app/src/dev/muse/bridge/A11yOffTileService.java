@@ -15,9 +15,11 @@ import android.service.quicksettings.TileService;
  * One tap calls the shared headless executor (A11yOffExecutor) — it
  * never opens MainActivity, so the Quick Settings panel stays open
  * and the tile's state change is visible in place. The tile mirrors
- * the accessibility state: ENABLED -> STATE_ACTIVE, DISABLED ->
- * STATE_INACTIVE, UNKNOWN -> STATE_UNAVAILABLE (UNKNOWN is never
- * misclassified as ACTIVE or INACTIVE).
+ * the accessibility state, inverted per SPEC-UI-003 v2 (frozen
+ * 2026-11-10): DISABLED -> STATE_ACTIVE, ENABLED -> STATE_INACTIVE,
+ * UNKNOWN -> STATE_UNAVAILABLE (UNKNOWN is never misclassified as
+ * ACTIVE or INACTIVE). The tile reads as a mode name — lit means
+ * the off state holds.
  *
  * State updates (D6): requestListeningState() alone is NOT relied
  * upon. onStartListening() is a transition callback — it is only
@@ -103,10 +105,10 @@ public class A11yOffTileService extends TileService {
                 A11yOffExecutor.getAccessibilityState(this);
         switch (state) {
             case ENABLED:
-                tile.setState(Tile.STATE_ACTIVE);
+                tile.setState(Tile.STATE_INACTIVE);
                 break;
             case DISABLED:
-                tile.setState(Tile.STATE_INACTIVE);
+                tile.setState(Tile.STATE_ACTIVE);
                 break;
             default:
                 tile.setState(Tile.STATE_UNAVAILABLE);

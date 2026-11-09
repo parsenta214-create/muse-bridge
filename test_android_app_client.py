@@ -4044,16 +4044,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_9():
+def test_locale_tile_version_2_9_10():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.9 / code 62 (was v2.9.8 / code 61 at the Kotlin
-    pilot)."""
+    carries v2.9.10 / code 63 (was v2.9.9 / code 62 at Batch A)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.9"' in build
-    assert "VERSION_CODE=62" in build
+    assert 'VERSION_NAME="2.9.10"' in build
+    assert "VERSION_CODE=63" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4455,9 +4454,11 @@ def test_a11yoff002_d6_tile_manifest():
         "com.termux.permission.RUN_COMMAND"])
 
 
-def test_a11yoff002_d6_tile_state_table():
-    """D6: ENABLED -> ACTIVE, DISABLED -> INACTIVE, UNKNOWN ->
-    UNAVAILABLE. UNKNOWN is never misclassified."""
+def test_ui003_a11y_tile_state_inverted():
+    """UI-003 D1 replaces A11Y-OFF-002 D6's mapping: DISABLED ->
+    ACTIVE, ENABLED -> INACTIVE, UNKNOWN -> UNAVAILABLE. The tile
+    reads as a mode name — lit means the off state holds. UNKNOWN is
+    never misclassified."""
     tile = _a11y_tile()
     assert "A11yOffExecutor.getAccessibilityState(this)" in tile
     assert "Tile.STATE_ACTIVE" in tile
@@ -4470,6 +4471,46 @@ def test_a11yoff002_d6_tile_state_table():
     assert "case ENABLED:" in seg
     assert "case DISABLED:" in seg
     assert "default:" in seg
+    # order-sensitive: ENABLED must be followed by INACTIVE and
+    # DISABLED by ACTIVE — mere presence of both constants would not
+    # prove the inversion.
+    enabled = seg[seg.index("case ENABLED:"):seg.index("case DISABLED:")]
+    assert "Tile.STATE_INACTIVE" in enabled
+    disabled = seg[seg.index("case DISABLED:"):seg.index("default:")]
+    assert "Tile.STATE_ACTIVE" in disabled
+    after_default = seg[seg.index("default:"):]
+    assert "Tile.STATE_UNAVAILABLE" in after_default
+
+
+def test_ui003_three_tile_semantics_table():
+    """UI-003 D2: the three-tile semantics table, pinned at source
+    level. Main tile ACTIVE = server running; a11y-off tile uses
+    the inverted mapping; locale tile has no ACTIVE state."""
+    # Muse Bridge tile: refreshTile reads BridgeService.isRunning()
+    main = _java_source("BridgeTileService.java")
+    ref = main[main.index("private void refreshTile"):]
+    assert "BridgeService.isRunning()" in ref
+    assert "Tile.STATE_ACTIVE" in ref
+    assert "Tile.STATE_INACTIVE" in ref
+    assert ref.index("BridgeService.isRunning()") < ref.index(
+        "Tile.STATE_ACTIVE")
+    # A11y-off tile: inverted mapping (details pinned by
+    # test_ui003_a11y_tile_state_inverted; here only the switch
+    # correspondence is re-checked).
+    tile = _a11y_tile()
+    seg = tile[tile.index("private void refreshTile"):]
+    enabled = seg[seg.index("case ENABLED:"):seg.index("case DISABLED:")]
+    assert "Tile.STATE_INACTIVE" in enabled
+    disabled = seg[seg.index("case DISABLED:"):seg.index("default:")]
+    assert "Tile.STATE_ACTIVE" in disabled
+    # Locale tile: no ACTIVE state, always INACTIVE, subtitle shows
+    # the current language (details pinned by
+    # test_locale_tile_state_inactive_and_subtitle).
+    loc = _locale()
+    assert "Tile.STATE_ACTIVE" not in loc
+    lref = loc[loc.index("private void refreshTile"):]
+    assert "tile.setState(Tile.STATE_INACTIVE);" in lref
+    assert "Locale.getDefault().getDisplayLanguage()" in lref
 
 
 def test_a11yoff002_d6_tile_refresh_helper_three_sites():
@@ -4733,15 +4774,15 @@ def test_a11yoff002_d11_logs():
     assert '(success ? "success" : "timeout") + " via " + trigger' in ex
 
 
-def test_a11yoff002_version_2_9_9():
-    """The build now carries v2.9.9 / code 62 (was v2.9.8 / code 61
-    at the Kotlin pilot)."""
+def test_a11yoff002_version_2_9_10():
+    """The build now carries v2.9.10 / code 63 (was v2.9.9 / code 62
+    at Batch A)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.9"' in build
-    assert "VERSION_CODE=62" in build
+    assert 'VERSION_NAME="2.9.10"' in build
+    assert "VERSION_CODE=63" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5117,10 +5158,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is batch A's v2.9.9 / code 62."""
+    kotlin-stdlib.jar. Version is SPEC-UI-003's v2.9.10 / code 63."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.9"' in build
-    assert "VERSION_CODE=62" in build
+    assert 'VERSION_NAME="2.9.10"' in build
+    assert "VERSION_CODE=63" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
