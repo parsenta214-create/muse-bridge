@@ -4628,48 +4628,68 @@ def test_a11yoff002_d11_executor_receiver_not_exported():
 
 
 def test_a11yoff002_d11_stage_exceptions():
-    """D11b (GPT re-review 2 P2-02): stage-based exception handling.
-    Stage A (register) and stage B (disableSelf) roll back; stage C
-    (polling registration) does NOT roll back."""
+    """D11b (GPT re-review 2 P2-02, CONS-110 P1-01): stage-based
+    exception handling. Stage A (register) and stage B (disableSelf)
+    roll back; stage C (polling registration) does NOT roll back.
+    A false return from postDelayed() is a registration failure
+    too — not just an exception."""
     ex = _executor()
     # stage A
     assert "rollback(app, opGen, false);" in ex
     # stage B
     assert "rollback(app, opGen, true);" in ex
     assert "service.disableSelf();" in ex
-    # stage C keeps the guard: no rollback call in the stage C catch
+    # stage C: the polling registration's boolean return is checked
     stage_c = ex[ex.index("// Stage C"):]
     stage_c = stage_c[:stage_c.index("private static void stageCFallback")]
+    assert "if (!scheduleDisableCheck(app, opGen, 1))" in stage_c
     assert "stageCFallback(app, opGen);" in stage_c
     assert "rollback(" not in stage_c
+    # scheduleDisableCheck returns the postDelayed() result
+    assert "private static boolean scheduleDisableCheck" in ex
+    assert "return MAIN_HANDLER.postDelayed(" in ex
+    # a failed re-registration (attempt 2/3) also moves to fallback
+    poll = ex[ex.index("private static boolean scheduleDisableCheck"):]
+    poll = poll[:poll.index("private static void finishDisable")]
+    assert "if (!scheduleDisableCheck(app, opGen, attempt + 1))" in poll
+    assert "stageCFallback(app, opGen);" in poll
     # rollback releases the guard and clears the receiver
     rb = ex[ex.index("private static void rollback"):]
-    rb = rb[:rb.index("private static void scheduleDisableCheck")]
+    rb = rb[:rb.index("private static boolean scheduleDisableCheck")]
     assert "disableInProgress = false;" in rb
     assert "currentReceiver = null;" in rb
     assert "currentReceiverGen = 0;" in rb
 
 
 def test_a11yoff002_d11_stage_c_fallback():
-    """D11b (GPT re-review 3 P1-01): stage C has a guaranteed fallback
-    completion independent of the failed polling — a one-shot
-    delayed re-check at the 6 s mark, generation-checked; if the
-    fallback registration itself fails, it completes immediately
-    with a final state check."""
+    """D11b (GPT re-review 3 P1-01, CONS-110 P1-01/P2-01): stage C has
+    a guaranteed fallback completion independent of the failed
+    polling — a one-shot delayed re-check at the 6 s mark,
+    generation-checked; if the fallback registration itself fails
+    (exception OR a false return from postDelayed), it completes
+    immediately with a final state check. The state is logged
+    distinctly (DISABLED / ENABLED / UNKNOWN)."""
     ex = _executor()
     assert "private static void stageCFallback" in ex
     fb = ex[ex.index("private static void stageCFallback"):]
     fb = fb[:fb.index("private static void rollback")]
-    # immediate re-check first
-    assert "if (getAccessibilityState(app) == A11yState.DISABLED)" in fb
+    # immediate re-check first, with the state logged distinctly
+    assert 'Log.i(TAG, "stage C fallback state=" + now);' in fb
+    assert "if (now == A11yState.DISABLED)" in fb
     # one-shot delayed re-check at the 6 s mark
     assert "DISABLE_CHECK_INTERVAL_MS * DISABLE_CHECK_MAX" in fb
-    assert "MAIN_HANDLER.postDelayed(" in fb
+    assert "posted = MAIN_HANDLER.postDelayed(" in fb
+    # a false return is handled, not just an exception
+    assert "if (!posted)" in fb
+    assert "stage C fallback not posted" in fb
     # fallback registration failure -> immediate completion
     assert "stage C fallback registration failed" in fb
     # the fallback completes with success or timeout, never silently
     assert "R.string.toast_a11y_off_done" in fb
     assert "R.string.toast_a11y_off_unconfirmed" in fb
+    # the fallback logs the state distinctly (P2-01)
+    assert 'Log.i(TAG, "fallback state=" + state);' in fb
+    assert 'Log.i(TAG, "fallback immediate state=" + state);' in fb
 
 
 def test_a11yoff002_d11_no_token_no_server_stop():
@@ -4683,16 +4703,17 @@ def test_a11yoff002_d11_no_token_no_server_stop():
 
 def test_a11yoff002_d11_polling_and_broadcast():
     """D7/D11: 2 s x 3 polling, generation-checked; the broadcast is
-    a fast path that completes only on DISABLED."""
+    a fast path that completes only on DISABLED. A failed polling
+    registration (false return) moves to the stage C fallback."""
     ex = _executor()
     assert "DISABLE_CHECK_INTERVAL_MS = 2000L" in ex
     assert "DISABLE_CHECK_MAX = 3" in ex
-    poll = ex[ex.index("private static void scheduleDisableCheck"):]
+    poll = ex[ex.index("private static boolean scheduleDisableCheck"):]
     poll = poll[:poll.index("private static void finishDisable")]
     assert "if (!disableInProgress || opGen != disableGeneration)" in poll
     assert "A11yState.DISABLED" in poll
     assert "attempt < DISABLE_CHECK_MAX" in poll
-    assert "scheduleDisableCheck(app, opGen, attempt + 1);" in poll
+    assert "if (!scheduleDisableCheck(app, opGen, attempt + 1))" in poll
     bc = ex[ex.index("private static final class DisableBroadcastReceiver"):]
     assert "if (getAccessibilityState(app) == A11yState.DISABLED)" in bc
     assert 'finishDisable(app, opGen, R.string.toast_a11y_off_done, "broadcast")' in bc

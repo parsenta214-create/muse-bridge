@@ -187,8 +187,13 @@ public class A11yOffExecutor {
         // Keep the guard and the receiver; the broadcast fast path
         // stays active, and a fallback completion mechanism
         // independent of the failed polling guarantees completion.
+        // CONS-110 P1-01: postDelayed() can return false without
+        // throwing — a false return is a registration failure too.
         try {
-            scheduleDisableCheck(app, opGen, 1);
+            if (!scheduleDisableCheck(app, opGen, 1)) {
+                Log.w(TAG, "stage C scheduleDisableCheck returned false");
+                stageCFallback(app, opGen);
+            }
         } catch (RuntimeException e) {
             Log.w(TAG, "stage C scheduleDisableCheck failed: "
                     + e.getClass().getSimpleName());
@@ -206,17 +211,25 @@ public class A11yOffExecutor {
      * Settings.Secure reflects the change, and the polling is gone).
      * If even the fallback registration fails, complete immediately
      * with a final state check — the guard never stays set forever.
+     * CONS-110 P1-01: a false return from postDelayed() is a
+     * registration failure, not just an exception. CONS-110 P2-01:
+     * the state is logged distinctly (DISABLED / ENABLED / UNKNOWN)
+     * so a failed confirmation is diagnosable.
      */
     private static void stageCFallback(final Context app, final int opGen) {
-        if (getAccessibilityState(app) == A11yState.DISABLED) {
-            finishDisable(app, opGen, R.string.toast_a11y_off_done, "broadcast");
+        A11yState now = getAccessibilityState(app);
+        Log.i(TAG, "stage C fallback state=" + now);
+        if (now == A11yState.DISABLED) {
+            finishDisable(app, opGen, R.string.toast_a11y_off_done, "fallback");
             return;
         }
+        boolean posted;
         try {
-            MAIN_HANDLER.postDelayed(new Runnable() {
+            posted = MAIN_HANDLER.postDelayed(new Runnable() {
                 @Override
                 public void run() {
                     A11yState state = getAccessibilityState(app);
+                    Log.i(TAG, "fallback state=" + state);
                     if (state == A11yState.DISABLED) {
                         finishDisable(app, opGen,
                                 R.string.toast_a11y_off_done, "fallback");
@@ -229,7 +242,15 @@ public class A11yOffExecutor {
         } catch (RuntimeException e) {
             Log.w(TAG, "stage C fallback registration failed: "
                     + e.getClass().getSimpleName());
+            posted = false;
+        }
+        if (!posted) {
+            // The fallback was not registered (false return or
+            // exception). Complete immediately with a final state
+            // check so the guard never stays set forever.
+            Log.w(TAG, "stage C fallback not posted");
             A11yState state = getAccessibilityState(app);
+            Log.i(TAG, "fallback immediate state=" + state);
             if (state == A11yState.DISABLED) {
                 finishDisable(app, opGen, R.string.toast_a11y_off_done, "fallback");
             } else {
@@ -266,10 +287,13 @@ public class A11yOffExecutor {
 
     /** Completion check on the 2 s timer: re-check the Android-side
      * state, up to 3 times (6 s). Never asserts success without
-     * DISABLED. Stale generations are discarded. */
-    private static void scheduleDisableCheck(final Context app, final int opGen,
+     * DISABLED. Stale generations are discarded. Returns true when
+     * the check was posted, false when postDelayed() failed to
+     * enqueue it (CONS-110 P1-01) — the caller then moves to the
+     * stage C fallback so monitoring is never abandoned. */
+    private static boolean scheduleDisableCheck(final Context app, final int opGen,
             final int attempt) {
-        MAIN_HANDLER.postDelayed(new Runnable() {
+        return MAIN_HANDLER.postDelayed(new Runnable() {
             @Override
             public void run() {
                 synchronized (LOCK) {
@@ -281,7 +305,13 @@ public class A11yOffExecutor {
                 if (state == A11yState.DISABLED) {
                     finishDisable(app, opGen, R.string.toast_a11y_off_done, "poll");
                 } else if (state == A11yState.ENABLED && attempt < DISABLE_CHECK_MAX) {
-                    scheduleDisableCheck(app, opGen, attempt + 1);
+                    if (!scheduleDisableCheck(app, opGen, attempt + 1)) {
+                        // Next polling registration failed (false
+                        // return): move to the independent fallback.
+                        Log.w(TAG, "polling registration failed at attempt "
+                                + (attempt + 1));
+                        stageCFallback(app, opGen);
+                    }
                 } else {
                     finishDisable(app, opGen,
                             R.string.toast_a11y_off_unconfirmed, "poll");
