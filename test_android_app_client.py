@@ -4044,15 +4044,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_13():
+def test_locale_tile_version_2_9_14():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.13 / code 66 (was v2.9.12 / code 65 at batch C)."""
+    carries v2.9.14 / code 67 (was v2.9.13 / code 66 at batch D)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.13"' in build
-    assert "VERSION_CODE=66" in build
+    assert 'VERSION_NAME="2.9.14"' in build
+    assert "VERSION_CODE=67" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4829,15 +4829,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_13():
-    """The build now carries v2.9.13 / code 66 (was v2.9.12 / code 65
+def test_a11yoff002_version_2_9_14():
+    """The build now carries v2.9.14 / code 67 (was v2.9.13 / code 66
     at SPEC-UI-003)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.13"' in build
-    assert "VERSION_CODE=66" in build
+    assert 'VERSION_NAME="2.9.14"' in build
+    assert "VERSION_CODE=67" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5364,15 +5364,91 @@ def test_kotlin_batch_d_java_callers_unchanged():
     assert "UriPermissionRegistry.FEATURE_LOG_FOLDER" in src
 
 
+_KOTLIN_BATCH_E_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+
+
+def test_kotlin_batch_e_pingprober_is_kotlin():
+    """Batch E: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1.
+    (No pre-existing test referenced PingProber — the migration
+    adds the first source-level coverage for it.)"""
+    assert not _java_source_exists("PingProber.java")
+    assert _kotlin_source_exists("PingProber.kt")
+    first = _kotlin_source("PingProber.kt").splitlines()[0]
+    assert first == _KOTLIN_BATCH_E_ATTRIBUTION
+
+
+def test_kotlin_batch_e_pingprober_interop():
+    """Batch E (D4 checklist): @JvmStatic on the five public
+    methods so the Java callers keep compiling; Result fields are
+    @JvmField so Java keeps its field access (r.target, r.rttMs,
+    r.error, ...); Listener is a fun interface so the Java lambda
+    in MainActivity keeps working; the four state fields stay
+    @Volatile (the unsynchronised readers rely on it); the lock
+    moved from the Class object to the singleton instance
+    (@Synchronized + synchronized(PingProber)) with no outside
+    locker."""
+    src = _kotlin_source("PingProber.kt")
+    assert "object PingProber" in src
+    for name in ("setLastClientIp(", "getLastClientIp(",
+                 "getLastResult(", "isProbing(", "probe("):
+        assert "    @JvmStatic\n    fun " + name in src, name
+    assert "fun interface Listener" in src
+    for field in ("target: String?", "method: String?",
+                  "rttMs: Long", "sent: Int", "received: Int",
+                  "measuredAtMs: Long", "measuredAtElapsedMs: Long",
+                  "error: String?"):
+        assert "        @JvmField val " + field in src, field
+    assert src.count("@Volatile") >= 4
+    assert "private var lastClientIp" in src
+    assert "private var lastResult" in src
+    assert "private var lastProbeStartedMs" in src
+    assert "private var probing" in src
+    # One monitor for all probe-state critical sections (PROBE_LOCK).
+    # @Synchronized is deliberately NOT used: on a @JvmStatic
+    # function it locks the Class object, while synchronized
+    # (PingProber) would lock the singleton instance — two
+    # different monitors, which would break the probe/throttle
+    # exclusion (caught by javap on the first build).
+    assert "@Synchronized" not in src
+    assert "private val PROBE_LOCK = Any()" in src
+    assert src.count("synchronized(PROBE_LOCK)") == 3
+    assert "PingProber.class" not in src
+
+
+def test_kotlin_batch_e_java_callers_unchanged():
+    """Batch E: the Java callers were NOT modified — MainActivity
+    still probes with a lambda and reads Result fields directly,
+    and HttpBridgeServer still records the client IP and reads
+    the last result's fields. That only compiles because the
+    Kotlin members are @JvmStatic and the Result fields are
+    @JvmField."""
+    main = _java_source("MainActivity.java")
+    assert "PingProber.probe(result -> runOnUiThread(this::updatePingDisplay));" in main
+    assert "PingProber.Result r = PingProber.getLastResult();" in main
+    assert "PingProber.getLastClientIp()" in main
+    assert "PingProber.isProbing()" in main
+    assert "r.target" in main
+    assert "r.rttMs" in main
+    assert "r.error" in main
+    srv = _java_source("HttpBridgeServer.java")
+    assert "PingProber.setLastClientIp(remote.getHostAddress());" in srv
+    assert "PingProber.Result r = PingProber.getLastResult();" in srv
+    assert ".put(\"target\", r.target)" in srv
+    assert ".put(\"rtt_ms\", r.rttMs)" in srv
+
+
 def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     """Pilot (D2): build.sh runs the two-compiler pipeline —
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is Stage 2 batch D's v2.9.13 / code 66."""
+    kotlin-stdlib.jar. Version is Stage 2 batch E's v2.9.14 / code 67."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.13"' in build
-    assert "VERSION_CODE=66" in build
+    assert 'VERSION_NAME="2.9.14"' in build
+    assert "VERSION_CODE=67" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build

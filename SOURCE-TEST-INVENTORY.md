@@ -4,9 +4,8 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-09、バッチA P2対応（Argonレビュー）
-完了時。フルスイート: **460 passed、18 subtests**
-（バッチA時の 458 件 ＋ P2対応新規 2 件）。
+最終確認: 2026-11-12、バッチE完了時。フルスイート: **476 passed、18 subtests**
+（バッチD時の 473 件 ＋ バッチE新規 3 件）。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
@@ -35,6 +34,7 @@ res の対応を記す。バッチごとに更新する。
 | `BridgeLog.java` | 2 | ログ初期化・PII 除去 |
 | `BridgeAccessibilityService.java` | 2 | P1-01 collectNodes recycle |
 | `UriPermissionRegistry.kt` | 1 | 権限レジストリ（バッチDで Java から移行） |
+| `PingProber.kt`（バッチEで Java から移行） | 3 | ping 往復測定（※移行前はソース検査ゼロだった） |
 | `LogActivity.java` | 1 | Drive 初期化フック、AppVersion 呼び出し（不変） |
 | `LocaleTileService.kt`（バッチBで Java から移行） | 1 | ロケールタイル起動・帰属行 |
 | `BridgeService.kt`（バッチBで Java から移行） | 1 | サービス起動 |
@@ -51,7 +51,7 @@ res の対応を記す。バッチごとに更新する。
 
 | 検査 | テスト |
 |---|---|
-| `VERSION_NAME="2.9.13"` / `VERSION_CODE=66`（バッチD） | `test_locale_tile_version_2_9_13`、`test_a11yoff002_version_2_9_13`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
+| `VERSION_NAME="2.9.14"` / `VERSION_CODE=67`（バッチE） | `test_locale_tile_version_2_9_14`、`test_a11yoff002_version_2_9_14`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
 | kotlinc ステップ（`-jvm-target 17`、256m、2 コンパイラ・パイプライン）、javac の `-cp` に `$KOTLIN_STDLIB`、d8 に stdlib を 1 個だけ | `test_kotlin_pilot_build_sh_two_compiler_pipeline` |
 
 ## 運用ルール（D6）
