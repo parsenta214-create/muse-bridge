@@ -34,7 +34,7 @@ res の対応を記す。バッチごとに更新する。
 | `BridgeWidgetActionReceiver.java` | 2 | ウィジェットアクション分岐 |
 | `BridgeLog.java` | 2 | ログ初期化・PII 除去 |
 | `BridgeAccessibilityService.java` | 2 | P1-01 collectNodes recycle |
-| `UriPermissionRegistry.java` | 1 | 権限レジストリ |
+| `UriPermissionRegistry.kt` | 1 | 権限レジストリ（バッチDで Java から移行） |
 | `LogActivity.java` | 1 | Drive 初期化フック、AppVersion 呼び出し（不変） |
 | `LocaleTileService.kt`（バッチBで Java から移行） | 1 | ロケールタイル起動・帰属行 |
 | `BridgeService.kt`（バッチBで Java から移行） | 1 | サービス起動 |
@@ -51,7 +51,7 @@ res の対応を記す。バッチごとに更新する。
 
 | 検査 | テスト |
 |---|---|
-| `VERSION_NAME="2.9.12"` / `VERSION_CODE=65`（バッチC） | `test_locale_tile_version_2_9_12`、`test_a11yoff002_version_2_9_12`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
+| `VERSION_NAME="2.9.13"` / `VERSION_CODE=66`（バッチD） | `test_locale_tile_version_2_9_13`、`test_a11yoff002_version_2_9_13`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
 | kotlinc ステップ（`-jvm-target 17`、256m、2 コンパイラ・パイプライン）、javac の `-cp` に `$KOTLIN_STDLIB`、d8 に stdlib を 1 個だけ | `test_kotlin_pilot_build_sh_two_compiler_pipeline` |
 
 ## 運用ルール（D6）

@@ -3072,7 +3072,7 @@ def _drive_log():
 
 
 def _drive_registry():
-    return _java_source("UriPermissionRegistry.java")
+    return _kotlin_source("UriPermissionRegistry.kt")
 
 
 def test_drive001_t01_folder_pick_uses_document_tree():
@@ -3629,7 +3629,7 @@ def test_drive001_t58_next_launch_releases_only_orphans():
     assert "UriPermissionRegistry.reconcile" in src
     assert "getPersistedUriPermissions" in src
     reg = _drive_registry()
-    assert "public static void reconcile" in reg
+    assert "fun reconcile(" in reg
 
 
 def test_drive001_t59_allowed_transition_combinations():
@@ -3794,7 +3794,7 @@ def test_drive001_t74_shared_uri_keeps_other_permission():
     refused (isUsedByOther / the other-feature check)."""
     reg = _drive_registry()
     assert "isUsedByOther" in reg
-    assert "!e[0].equals(feature)" in reg
+    assert "e[0] != feature" in reg
 
 
 def test_drive001_t75_both_files_lost_no_fixed_restart():
@@ -3847,7 +3847,7 @@ def test_drive001_t79_registry_read_failure_no_release():
     is released (isUsedByOther / releaseIfUnused fail safe)."""
     reg = _drive_registry()
     assert "entries == null" in reg
-    start = reg.index("public static boolean isUsedByOther")
+    start = reg.index("fun isUsedByOther(")
     region = reg[start:start + 900]
     assert "return true" in region
 
@@ -3856,16 +3856,16 @@ def test_drive001_t80_registry_ops_serialized_under_one_lock():
     """T-80: register / unregister / read / release all run
     under the one private REGISTRY_LOCK."""
     reg = _drive_registry()
-    assert "private static final Object REGISTRY_LOCK" in reg
-    assert reg.count("synchronized (REGISTRY_LOCK)") >= 5
+    assert "private val REGISTRY_LOCK = Any()" in reg
+    assert reg.count("synchronized(REGISTRY_LOCK)") >= 5
 
 
 def test_drive001_t81_release_registry_failure_reconciled():
     """T-81: a registry-update failure after a release leaves
     a stale entry that reconcile() drops at next launch."""
     reg = _drive_registry()
-    assert "public static void reconcile" in reg
-    start = reg.index("public static void reconcile")
+    assert "fun reconcile(" in reg
+    start = reg.index("fun reconcile(")
     region = reg[start:start + 1200]
     assert "getPersistedUriPermissions" in region
     assert "writeLocked(ctx, entries)" in region
@@ -3943,12 +3943,12 @@ def test_drive001_t89_registry_lock_private_and_single_entry():
     """T-89: REGISTRY_LOCK is private to UriPermissionRegistry
     and every operation goes through its synchronized methods."""
     reg = _drive_registry()
-    assert "private static final Object REGISTRY_LOCK" in reg
-    assert "public static boolean register" in reg
-    assert "public static boolean unregister" in reg
-    assert "public static boolean isUsedByOther" in reg
-    assert "public static boolean releaseIfUnused" in reg
-    assert "public static void reconcile" in reg
+    assert "private val REGISTRY_LOCK = Any()" in reg
+    assert "fun register(" in reg
+    assert "fun unregister(" in reg
+    assert "fun isUsedByOther(" in reg
+    assert "fun releaseIfUnused(" in reg
+    assert "fun reconcile(" in reg
     # No other file reaches the lock directly.
     assert "REGISTRY_LOCK" not in _drive_log()
 
@@ -3981,9 +3981,9 @@ def test_drive001_t92_corrupt_registry_refuses_and_keeps():
     and is never auto-deleted."""
     reg = _drive_registry()
     assert "return null" in reg
-    start = reg.index("private static List<String[]> readLocked")
+    start = reg.index("private fun readLocked(")
     region = reg[start:start + 1400]
-    assert "parts.length != 2" in region
+    assert "second.contains('\\t')" in region
     assert "never auto-deleted" in reg
 
 
@@ -4044,15 +4044,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_12():
+def test_locale_tile_version_2_9_13():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.12 / code 65 (was v2.9.11 / code 64 at batch B)."""
+    carries v2.9.13 / code 66 (was v2.9.12 / code 65 at batch C)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.12"' in build
-    assert "VERSION_CODE=65" in build
+    assert 'VERSION_NAME="2.9.13"' in build
+    assert "VERSION_CODE=66" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4829,15 +4829,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_12():
-    """The build now carries v2.9.12 / code 65 (was v2.9.11 / code 64
+def test_a11yoff002_version_2_9_13():
+    """The build now carries v2.9.13 / code 66 (was v2.9.12 / code 65
     at SPEC-UI-003)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.12"' in build
-    assert "VERSION_CODE=65" in build
+    assert 'VERSION_NAME="2.9.13"' in build
+    assert "VERSION_CODE=66" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5306,15 +5306,73 @@ def test_kotlin_batch_c_java_callers_unchanged():
     assert "A11yOffExecutor.execute(context);" in src
 
 
+_KOTLIN_BATCH_D_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+
+
+def test_kotlin_batch_d_registry_is_kotlin():
+    """Batch D: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1."""
+    assert not _java_source_exists("UriPermissionRegistry.java")
+    assert _kotlin_source_exists("UriPermissionRegistry.kt")
+    first = _kotlin_source("UriPermissionRegistry.kt").splitlines()[0]
+    assert first == _KOTLIN_BATCH_D_ATTRIBUTION
+
+
+def test_kotlin_batch_d_registry_interop():
+    """Batch D (D4 checklist): @JvmStatic on the five public
+    methods so the Java LogActivity caller keeps compiling;
+    registryFile stays a plain static method (public, because
+    Kotlin has no package-private and internal would mangle the
+    name to registryFile$main, unusable from Java);
+    FEATURE_LOG_FOLDER stays a static constant; the lock stays
+    a private Any() guarded by synchronized blocks."""
+    src = _kotlin_source("UriPermissionRegistry.kt")
+    assert "object UriPermissionRegistry" in src
+    assert "const val FEATURE_LOG_FOLDER" in src
+    assert "private val REGISTRY_LOCK = Any()" in src
+    for name in ("register(", "unregister(", "isUsedByOther(",
+                 "releaseIfUnused(", "reconcile(", "registryFile("):
+        assert "    @JvmStatic\n    fun " + name in src, name
+    assert src.count("synchronized(REGISTRY_LOCK)") >= 5
+
+
+def test_kotlin_batch_d_registry_split_equivalence():
+    """Batch D: Kotlin's String.split rejects a negative limit,
+    so the corrupt-line check is an indexOf parse, not a split.
+    It must be exactly equivalent to Java's split("\\t", -1) +
+    length-2 check: exactly one tab, both fields non-empty."""
+    src = _kotlin_source("UriPermissionRegistry.kt")
+    assert 'split("\\t", -1)' not in src
+    assert "val tab = line.indexOf('\\t')" in src
+    assert "if (tab < 0)" in src
+    assert "second.contains('\\t')" in src
+    assert "entries.add(arrayOf(first, second))" in src
+
+
+def test_kotlin_batch_d_java_callers_unchanged():
+    """Batch D: the Java caller was NOT modified — LogActivity
+    still calls the registry the same way, which only compiles
+    because the Kotlin members are @JvmStatic (registryFile is
+    public @JvmStatic: Kotlin has no package-private)."""
+    src = _java_source("LogActivity.java")
+    assert "UriPermissionRegistry.registryFile(ctx)" in src
+    assert "UriPermissionRegistry.register(this," in src
+    assert "UriPermissionRegistry.releaseIfUnused(this," in src
+    assert "UriPermissionRegistry.reconcile(this);" in src
+    assert "UriPermissionRegistry.FEATURE_LOG_FOLDER" in src
+
+
 def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     """Pilot (D2): build.sh runs the two-compiler pipeline —
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is Stage 2 batch C's v2.9.12 / code 65."""
+    kotlin-stdlib.jar. Version is Stage 2 batch D's v2.9.13 / code 66."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.12"' in build
-    assert "VERSION_CODE=65" in build
+    assert 'VERSION_NAME="2.9.13"' in build
+    assert "VERSION_CODE=66" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
