@@ -51,7 +51,7 @@ cd ~/workspace/computer-use-preview/android-app
 - P1（CONS-022 の 5 項目、v2.3.0）：UI と Health の一致、tailscale_ips の再取得、`install_apk_permitted`、Health の相互検証。
 - CONS-014 P1（6 項目、v2.5.0）：ログの PII 除去、`/scroll_node` の direction 必須、`/node_action` の引数検証など。
 - 操作通知（v2.1.0）、ウィジェット（v2.6.0、決定98で中止・Museスペースへ移行）、step 3 P2 丸め（凍結判断待ち）。
-- PING-001（v2.8.0、決定99）、LOG-001 v5（v2.8.6、決定100）、OVERRIDE-001 v6（v2.9.2、決定101）。
+- PING-001（v2.8.0、決定99）、LOG-001 v5（v2.8.6、決定100）、OVERRIDE-001 v6（v2.9.2、決定101）、BATCH-PERSIST-001 v2.8（決定103）、FOREGROUND-GUARD-001 v2.1（決定104）。
 
 ## 触ってはいけないもの・禁則
 

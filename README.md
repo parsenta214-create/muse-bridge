@@ -2315,6 +2315,41 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     D3 revises frozen SPEC-OPERATION-NOTIFY D6; recorded
     here, OPERATION-NOTIFY is not edited. Communication-
     layer freeze set is now complete (decisions 99-101).
+103. SPEC-BATCH-PERSIST-001 v2.8 FROZEN (2026-11-12, System
+    Development Lead decision): persistent batch execution records
+    (C-01, CONS-131 A1). Kohaku Tier 1 ADOPT (CONS-20261112-145,
+    P0=0/P1=0/P2=1); Mitsuki final review ADOPTABLE 9.7/10
+    (P0=0/P1=0/P2=0). At-most-once design: BatchRegistry sole
+    authority; IN_PROGRESS persisted before execution; UNKNOWN never
+    auto-recovers; no batch_id reuse; no logical-batch reissue under a
+    new ID without human confirmation; recovery gate (503
+    batch_store_recovery_pending) after restore or clear; phone-side
+    and VM-side durability gates (503
+    batch_store_durability_unverified / storage-method gate).
+    Acceptance criteria C-01-1..18. Implementation in Kotlin migration
+    Stage 2, Executor-first. Implementation gates (not spec defects):
+    real-device power-loss-equivalent test on the Galaxy A55 and final
+    phone-side storage method; VM-side outbox storage method and crash
+    test. Until the phone-side gate is demonstrated, /batch stays
+    fail-closed.
+104. SPEC-FOREGROUND-GUARD-001 v2.1 FROZEN (2026-11-12, System
+    Development Lead decision): foreground verification and operation
+    context for non-node operations (C-04, CONS-131 A4). Kohaku Tier 1
+    ADOPT (CONS-20261112-139, P0=0/P1=0/P2=0); Mitsuki final review
+    ADOPTABLE 9.6/10 (P0=0/P1=0/P2=3, all implementation
+    clarifications, no SPEC text change required). Serialized
+    admission boundary on the service main thread; operation_context
+    (expected_package + server-issued session_id, optional
+    tree_hash/generation); 409 on foreground/tree/generation/session
+    mismatch, 503 when unverifiable; no auto-retry on 409/timeout/lost
+    response; session state machine (NONE -> ACTIVE -> ENDED -> NONE,
+    10 s idle timeout); launch contract with five outcomes;
+    notification is visibility only. Acceptance criteria C-04-1..22.
+    Implementation in Kotlin migration Stage 3, with the
+    HttpBridgeServer conversion. Mitsuki P2s carried into
+    implementation: session-start bootstrap contract; /batch node ops
+    and /notification_action scope; generation acceptance tests as an
+    extension of C-04-5.
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
