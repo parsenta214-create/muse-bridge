@@ -4,8 +4,8 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-12、バッチF完了時。フルスイート: **479 passed、18 subtests**
-（バッチE時の 476 件 ＋ バッチF新規 3 件）。
+最終確認: 2026-11-13、バッチG完了時。フルスイート: **482 passed、18 subtests**
+（バッチF時の 479 件 ＋ バッチG新規 3 件）。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
@@ -31,7 +31,7 @@ res の対応を記す。バッチごとに更新する。
 | `BridgeWidgetProvider.java` | 4 | ウィジェットボタン／PendingIntent |
 | `MainActivity.java` | 3 | Drive 初期化フック、AppVersion 呼び出し（Kotlin パイロットで不変） |
 | `BridgeWidgetActionReceiver.java` | 2 | ウィジェットアクション分岐 |
-| `BridgeLog.java` | 2 | ログ初期化・PII 除去 |
+| `BridgeLog.kt`（バッチGで Java から移行） | 5 | ログ初期化・PII 除去（T-33/T-36は .kt 読取へ更新） |
 | `BridgeAccessibilityService.java` | 2 | P1-01 collectNodes recycle |
 | `UriPermissionRegistry.kt` | 1 | 権限レジストリ（バッチDで Java から移行） |
 | `PingProber.kt`（バッチEで Java から移行） | 3 | ping 往復測定（※移行前はソース検査ゼロだった） |
@@ -52,7 +52,7 @@ res の対応を記す。バッチごとに更新する。
 
 | 検査 | テスト |
 |---|---|
-| `VERSION_NAME="2.9.15"` / `VERSION_CODE=68`（バッチF） | `test_locale_tile_version_2_9_15`、`test_a11yoff002_version_2_9_15`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
+| `VERSION_NAME="2.9.16"` / `VERSION_CODE=69`（バッチG） | `test_locale_tile_version_2_9_16`、`test_a11yoff002_version_2_9_16`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
 | kotlinc ステップ（`-jvm-target 17`、256m、2 コンパイラ・パイプライン）、javac の `-cp` に `$KOTLIN_STDLIB`、d8 に stdlib を 1 個だけ | `test_kotlin_pilot_build_sh_two_compiler_pipeline` |
 
 ## 運用ルール（D6）

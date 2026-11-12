@@ -3364,12 +3364,14 @@ def test_drive001_t32_same_uri_save_failure_keeps_permission():
 
 def test_drive001_t33_atomic_write_pattern():
     """T-33: atomic write is temp + fsync + Os.rename + parent
-    dir fsync (BridgeLog.atomicWriteText)."""
-    src = _java_source("BridgeLog.java")
-    start = src.index("static boolean atomicWriteText")
+    dir fsync (BridgeLog.atomicWriteText). Batch G: the source
+    is Kotlin now (fos.fd.sync() is the Kotlin spelling of
+    Java's fos.getFD().sync())."""
+    src = _kotlin_source("BridgeLog.kt")
+    start = src.index("fun atomicWriteText")
     region = src[start:start + 1600]
     assert 'fileName + ".tmp"' in region
-    assert "getFD().sync()" in region
+    assert "fd.sync()" in region
     assert "Os.rename(" in region
     assert "fsyncDirectory(dir)" in region
 
@@ -3397,8 +3399,8 @@ def test_drive001_t36_dir_fsync_failure_keeps_old_permission():
     fail, so the old permission is not released."""
     src = _drive_log()
     assert "atomicWriteText" in src
-    bridge = _java_source("BridgeLog.java")
-    start = bridge.index("static boolean atomicWriteText")
+    bridge = _kotlin_source("BridgeLog.kt")
+    start = bridge.index("fun atomicWriteText")
     region = bridge[start:start + 1600]
     assert "return fsyncDirectory(dir)" in region
 
@@ -4044,15 +4046,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_15():
+def test_locale_tile_version_2_9_16():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.15 / code 68 (was v2.9.14 / code 67 at batch E)."""
+    carries v2.9.16 / code 69 (was v2.9.15 / code 68 at batch F)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.15"' in build
-    assert "VERSION_CODE=68" in build
+    assert 'VERSION_NAME="2.9.16"' in build
+    assert "VERSION_CODE=69" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4829,15 +4831,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_15():
-    """The build now carries v2.9.15 / code 68 (was v2.9.14 / code 67
-    at SPEC-UI-003)."""
+def test_a11yoff002_version_2_9_16():
+    """The build now carries v2.9.16 / code 69 (was v2.9.15 / code 68
+    at batch F)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.15"' in build
-    assert "VERSION_CODE=68" in build
+    assert 'VERSION_NAME="2.9.16"' in build
+    assert "VERSION_CODE=69" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5520,15 +5522,114 @@ def test_kotlin_batch_f_java_callers_unchanged():
     assert "BridgeNotificationListener.isAccessGranted(this)" in main
 
 
+_KOTLIN_BATCH_G_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-13")
+
+
+def test_kotlin_batch_g_bridge_log_is_kotlin():
+    """Batch G: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1.
+    (Two pre-existing tests read BridgeLog.java source — T-33
+    and T-36, updated to read the .kt — so the migration keeps
+    their coverage and adds the first D4 interop test.)"""
+    assert not _java_source_exists("BridgeLog.java")
+    assert _kotlin_source_exists("BridgeLog.kt")
+    first = _kotlin_source("BridgeLog.kt").splitlines()[0]
+    assert first == _KOTLIN_BATCH_G_ATTRIBUTION
+
+
+def test_kotlin_batch_g_bridge_log_interop():
+    """Batch G (D4 checklist): an object (all-static Java
+    class); @JvmStatic on the ten public methods so the Java
+    callers keep compiling; one explicit LOG_LOCK for the six
+    former static-synchronized methods (no @Synchronized — the
+    batch E lesson); atomicWriteText/fsyncDirectory are public
+    @JvmStatic because LogActivity.java calls them and Kotlin
+    internal would mangle the name (batch D precedent);
+    runMetaFile has no callers, so it stays internal; the
+    private field is renamed runMeta because a property and a
+    function cannot share a name in Kotlin; split semantics
+    are Java-exact (split(':') keeps trailing empties like
+    split(":", -1); maskIpv4 drops them like split("\\.")); the
+    DEL check is the explicit '\\u007f' escape, not a raw byte."""
+    src = _kotlin_source("BridgeLog.kt")
+    assert "object BridgeLog {" in src
+    for name in ("init(ctx: Context?)", "log(event: String?, detail: String?)",
+                 "logThrottled(key: String?, event: String?, detail: String?)",
+                 "flushThrottled(key: String?, event: String?)",
+                 "snapshot()", "previousSnapshot()",
+                 "renderText(appVersion: String?, appVersionCode: Int)",
+                 "maskIp(ip: String?)", "atomicWriteText(",
+                 "fsyncDirectory("):
+        assert "    @JvmStatic\n    fun " + name in src, name
+    # CONS-151 P2-01 fix: the Java original tolerated null inputs,
+    # so the Kotlin parameters stay nullable (log/logThrottled/
+    # flushThrottled/renderText/init/runMetaFile) and the throttle
+    # maps accept a null key, as Java HashMap does.
+    assert "HashMap<String?, Long>" in src
+    assert "HashMap<String?, Int>" in src
+    assert 'var d = detail ?: ""' in src
+    assert 'internal fun runMetaFile(ctx: Context?)' in src
+    assert src.count("File(ctx!!.filesDir") == 3
+    # The word appears in the LOG_LOCK comment, so the check is
+    # per-line: no line may START with the annotation.
+    assert not any(
+        line.strip().startswith("@Synchronized")
+        for line in src.splitlines()
+    )
+    assert "private val LOG_LOCK = Any()" in src
+    # The phrase also appears in the P2-02 comment, so count
+    # only the code lines (each block opens with exactly this).
+    assert sum(
+        1 for line in src.splitlines()
+        if line.strip() == "synchronized(LOG_LOCK) {"
+    ) == 6
+    assert "private var runMeta: File? = null" in src
+    assert "ip.split(':')" in src
+    assert "dropLastWhile { it.isEmpty() }" in src
+    assert "fos.fd.sync()" in src
+    assert "'\\u007f'" in src
+    assert "BridgeLog.class" not in src
+
+
+def test_kotlin_batch_g_bridge_log_java_callers_unchanged():
+    """Batch G: the Java/Kotlin callers were NOT modified —
+    HttpBridgeServer still drives the log the same way (init,
+    log, logThrottled, flushThrottled, maskIp, snapshot,
+    previousSnapshot), LogActivity still uses atomicWriteText /
+    fsyncDirectory / renderText, UriPermissionRegistry still
+    uses atomicWriteText, and BootReceiver still inits and logs.
+    That only compiles because the Kotlin members are
+    @JvmStatic (and atomicWriteText/fsyncDirectory public)."""
+    srv = _java_source("HttpBridgeServer.java")
+    assert "BridgeLog.init(this.context);" in srv
+    assert "BridgeLog.log(" in srv
+    assert "BridgeLog.logThrottled(" in srv
+    assert "BridgeLog.flushThrottled(" in srv
+    assert "BridgeLog.maskIp(" in srv
+    assert "BridgeLog.snapshot()" in srv
+    assert "BridgeLog.previousSnapshot()" in srv
+    log = _java_source("LogActivity.java")
+    assert "BridgeLog.atomicWriteText(" in log
+    assert "BridgeLog.fsyncDirectory(" in log
+    assert "BridgeLog.renderText(" in log
+    reg = _kotlin_source("UriPermissionRegistry.kt")
+    assert "BridgeLog.atomicWriteText(ctx.filesDir, REGISTRY_NAME," in reg
+    boot = _kotlin_source("BootReceiver.kt")
+    assert "BridgeLog.init(appContext)" in boot
+    assert "BridgeLog.log(" in boot
+
+
 def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     """Pilot (D2): build.sh runs the two-compiler pipeline —
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is Stage 2 batch F's v2.9.15 / code 68."""
+    kotlin-stdlib.jar. Version is Stage 2 batch G's v2.9.16 / code 69."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.15"' in build
-    assert "VERSION_CODE=68" in build
+    assert 'VERSION_NAME="2.9.16"' in build
+    assert "VERSION_CODE=69" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
