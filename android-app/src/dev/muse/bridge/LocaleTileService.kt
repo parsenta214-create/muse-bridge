@@ -1,14 +1,13 @@
-// Implemented by MUSE-Koyuki (Muse Spark) — SPEC-LOCALE-TILE-001, 2026-11-09
-package dev.muse.bridge;
+// Implemented by MUSE-Koyuki (Muse Spark) — SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12
+package dev.muse.bridge
 
-import android.content.Intent;
-import android.provider.Settings;
-import android.service.quicksettings.Tile;
-import android.service.quicksettings.TileService;
-import android.util.Log;
-import android.widget.Toast;
-
-import java.util.Locale;
+import android.content.Intent
+import android.provider.Settings
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
+import android.util.Log
+import android.widget.Toast
+import java.util.Locale
 
 /**
  * Quick Settings tile for the language settings (SPEC-LOCALE-TILE-001 v4).
@@ -46,36 +45,39 @@ import java.util.Locale;
  * the launch method returned, not that the Settings screen opened.
  * If the Settings open, the toast hides behind them; if only the
  * toast is visible, the launch failed silently.
+ *
+ * Converted from LocaleTileService.java in SPEC-KOTLIN-MIGRATION-001
+ * Stage 1 batch B (v2.2). Behaviour unchanged.
  */
-public class LocaleTileService extends TileService {
+class LocaleTileService : TileService() {
 
-    private static final String TAG = "LocaleTile";
-
-    @Override
-    public void onStartListening() {
-        super.onStartListening();
-        refreshTile();
+    companion object {
+        private const val TAG = "LocaleTile"
     }
 
-    @Override
-    public void onClick() {
-        super.onClick();
-        Intent locale = new Intent(Settings.ACTION_LOCALE_SETTINGS);
-        locale.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    override fun onStartListening() {
+        super.onStartListening()
+        refreshTile()
+    }
+
+    override fun onClick() {
+        super.onClick()
+        val locale = Intent(Settings.ACTION_LOCALE_SETTINGS)
+        locale.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (tryLaunch(locale, "locale")) {
-            return;
+            return
         }
         // The locale launch threw: fall back to the main Settings
         // page (L3 step 2). From there the user reaches Language in
         // two taps (General management).
-        Intent settings = new Intent(Settings.ACTION_SETTINGS);
-        settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        val settings = Intent(Settings.ACTION_SETTINGS)
+        settings.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (tryLaunch(settings, "settings")) {
-            return;
+            return
         }
         // Every attempt failed. Say so; never open the app instead.
         Toast.makeText(this, R.string.toast_locale_open_failed,
-                Toast.LENGTH_SHORT).show();
+            Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -84,35 +86,31 @@ public class LocaleTileService extends TileService {
      * shows the launch-confirmation toast, v4 diagnostic only).
      * Returns false when the launch threw.
      */
-    private boolean tryLaunch(Intent intent, String label) {
+    private fun tryLaunch(intent: Intent, label: String): Boolean {
         try {
-            startActivity(intent);
+            startActivity(intent)
             // Diagnostic (v4 only, removed in v5): confirms the
             // launch method returned without throwing. It does NOT
             // guarantee the Settings screen actually opened. Shown
             // immediately after startActivity() returns.
             Toast.makeText(this, R.string.toast_locale_opened,
-                    Toast.LENGTH_SHORT).show();
-            return true;
-        } catch (Exception e) {
-            Log.w(TAG, "startActivity " + label + " failed: "
-                    + e.getClass().getSimpleName());
+                Toast.LENGTH_SHORT).show()
+            return true
+        } catch (e: Exception) {
+            Log.w(TAG, "startActivity $label failed: ${e.javaClass.simpleName}")
         }
-        return false;
+        return false
     }
 
-    private void refreshTile() {
-        Tile tile = getQsTile();
-        if (tile == null) {
-            return;
-        }
-        tile.setState(Tile.STATE_INACTIVE);
-        String language = Locale.getDefault().getDisplayLanguage();
+    private fun refreshTile() {
+        val tile = qsTile ?: return
+        tile.state = Tile.STATE_INACTIVE
+        var language = Locale.getDefault().getDisplayLanguage()
         if (language.isEmpty()) {
             // Do not leave a stale subtitle behind.
-            language = getString(R.string.locale_unknown);
+            language = getString(R.string.locale_unknown)
         }
-        tile.setSubtitle(language);
-        tile.updateTile();
+        tile.setSubtitle(language)
+        tile.updateTile()
     }
 }

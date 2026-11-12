@@ -1,10 +1,11 @@
-package dev.muse.bridge;
+// Implemented by MUSE-Koyuki (Muse Spark) — SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12
+package dev.muse.bridge
 
-import android.content.Intent;
-import android.os.Handler;
-import android.os.Looper;
-import android.service.quicksettings.Tile;
-import android.service.quicksettings.TileService;
+import android.content.Intent
+import android.os.Handler
+import android.os.Looper
+import android.service.quicksettings.Tile
+import android.service.quicksettings.TileService
 
 /**
  * Quick Settings tile for the Muse Bridge (v1.7).
@@ -26,53 +27,45 @@ import android.service.quicksettings.TileService;
  * interaction, so startForegroundService is normally allowed. If the
  * platform still refuses (ForegroundServiceStartNotAllowedException),
  * fall back to opening the app so the user can tap Start there.
+ *
+ * Converted from BridgeTileService.java in SPEC-KOTLIN-MIGRATION-001
+ * Stage 1 batch B (v2.2). Behaviour unchanged.
  */
-public class BridgeTileService extends TileService {
+class BridgeTileService : TileService() {
 
-    private final Handler handler = new Handler(Looper.getMainLooper());
+    private val handler = Handler(Looper.getMainLooper())
 
-    @Override
-    public void onStartListening() {
-        super.onStartListening();
-        refreshTile();
+    override fun onStartListening() {
+        super.onStartListening()
+        refreshTile()
     }
 
-    @Override
-    public void onClick() {
-        super.onClick();
+    override fun onClick() {
+        super.onClick()
         if (BridgeService.isRunning()) {
             // SPEC-LOG-001 LOG-03: a tile stop is a widget stop.
             BridgeService.pendingStopReason =
-                    HttpBridgeServer.StopReason.WIDGET;
-            stopService(new Intent(this, BridgeService.class));
+                HttpBridgeServer.StopReason.WIDGET
+            stopService(Intent(this, BridgeService::class.java))
         } else {
             try {
-                startForegroundService(new Intent(this, BridgeService.class));
-            } catch (Exception e) {
+                startForegroundService(Intent(this, BridgeService::class.java))
+            } catch (e: Exception) {
                 // Fall back to the app: the user can tap Start there.
-                Intent openApp = new Intent(this, MainActivity.class);
-                openApp.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(openApp);
+                val openApp = Intent(this, MainActivity::class.java)
+                openApp.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                startActivity(openApp)
             }
         }
         // The service flips its flag in onCreate/onDestroy, so refresh
         // now (best effort) and again once it has settled.
-        refreshTile();
-        handler.postDelayed(new Runnable() {
-            @Override
-            public void run() {
-                refreshTile();
-            }
-        }, 600);
+        refreshTile()
+        handler.postDelayed({ refreshTile() }, 600)
     }
 
-    private void refreshTile() {
-        Tile tile = getQsTile();
-        if (tile == null) {
-            return;
-        }
-        tile.setState(BridgeService.isRunning()
-                ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
-        tile.updateTile();
+    private fun refreshTile() {
+        val tile = qsTile ?: return
+        tile.state = if (BridgeService.isRunning()) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
+        tile.updateTile()
     }
 }

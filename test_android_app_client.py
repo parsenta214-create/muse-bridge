@@ -2255,12 +2255,12 @@ def test_widget_updates_pushed_from_service_and_mode_toggle():
     """W3: updateAllWidgets must be pushed from
     BridgeService.onCreate/onDestroy (service start/stop) and
     from the MainActivity mode-toggle path."""
-    svc = _java_source("BridgeService.java")
-    start = svc.index("public void onCreate()")
-    end = svc.index("public int onStartCommand", start)
+    svc = _kotlin_source("BridgeService.kt")
+    start = svc.index("override fun onCreate()")
+    end = svc.index("override fun onStartCommand(", start)
     assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
-    start = svc.index("public void onDestroy()")
-    end = svc.index("public IBinder onBind", start)
+    start = svc.index("override fun onDestroy()")
+    end = svc.index("override fun onBind(", start)
     assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
     main = _java_source("MainActivity.java")
     start = main.index("modeButton.setOnClickListener")
@@ -4044,15 +4044,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_10():
+def test_locale_tile_version_2_9_11():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.10 / code 63 (was v2.9.9 / code 62 at Batch A)."""
+    carries v2.9.11 / code 64 (was v2.9.10 / code 63 at SPEC-UI-003)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.10"' in build
-    assert "VERSION_CODE=63" in build
+    assert 'VERSION_NAME="2.9.11"' in build
+    assert "VERSION_CODE=64" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4487,8 +4487,8 @@ def test_ui003_three_tile_semantics_table():
     level. Main tile ACTIVE = server running; a11y-off tile uses
     the inverted mapping; locale tile has no ACTIVE state."""
     # Muse Bridge tile: refreshTile reads BridgeService.isRunning()
-    main = _java_source("BridgeTileService.java")
-    ref = main[main.index("private void refreshTile"):]
+    main = _kotlin_source("BridgeTileService.kt")
+    ref = main[main.index("private fun refreshTile()"):]
     assert "BridgeService.isRunning()" in ref
     assert "Tile.STATE_ACTIVE" in ref
     assert "Tile.STATE_INACTIVE" in ref
@@ -4508,8 +4508,8 @@ def test_ui003_three_tile_semantics_table():
     # test_locale_tile_state_inactive_and_subtitle).
     loc = _locale()
     assert "Tile.STATE_ACTIVE" not in loc
-    lref = loc[loc.index("private void refreshTile"):]
-    assert "tile.setState(Tile.STATE_INACTIVE);" in lref
+    lref = loc[loc.index("private fun refreshTile()"):]
+    assert "tile.state = Tile.STATE_INACTIVE" in lref
     assert "Locale.getDefault().getDisplayLanguage()" in lref
 
 
@@ -4829,15 +4829,15 @@ def test_a11yoff002_d11_logs():
     assert '(success ? "success" : "timeout") + " via " + trigger' in ex
 
 
-def test_a11yoff002_version_2_9_10():
-    """The build now carries v2.9.10 / code 63 (was v2.9.9 / code 62
-    at Batch A)."""
+def test_a11yoff002_version_2_9_11():
+    """The build now carries v2.9.11 / code 64 (was v2.9.10 / code 63
+    at SPEC-UI-003)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.10"' in build
-    assert "VERSION_CODE=63" in build
+    assert 'VERSION_NAME="2.9.11"' in build
+    assert "VERSION_CODE=64" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -4850,7 +4850,7 @@ def test_a11yoff002_attribution_first_line():
                     "\u2014 SPEC-A11Y-OFF-002 v6, 2026-11-09")
 
 def _locale():
-    return _java_source("LocaleTileService.java")
+    return _kotlin_source("LocaleTileService.kt")
 
 
 def _locale_service_block():
@@ -4914,11 +4914,11 @@ def test_locale_tile_opens_locale_settings():
     src = _locale()
     assert "Settings.ACTION_LOCALE_SETTINGS" in src
     assert "Intent.FLAG_ACTIVITY_NEW_TASK" in src
-    assert "import android.provider.Settings;" in src
+    assert "import android.provider.Settings" in src
     # No explicit-ification and no startActivityAndCollapse in the
     # class body (the class Javadoc legitimately names them as things
     # v4 dropped, so scope to the body).
-    body = src[src.index("public class LocaleTileService"):]
+    body = src[src.index("class LocaleTileService"):]
     assert "resolveActivity" not in body
     assert "setComponent" not in body
     assert "resolveExplicit" not in body
@@ -4928,14 +4928,14 @@ def test_locale_tile_opens_locale_settings():
     assert "ComponentName" not in body
     # tryLaunch uses plain startActivity and shows the
     # launch-confirmation toast when it returns without throwing.
-    launch = src[src.index("private boolean tryLaunch("):]
-    launch = launch[:launch.index("private void refreshTile()")]
-    assert "startActivity(intent);" in launch
+    launch = src[src.index("private fun tryLaunch("):]
+    launch = launch[:launch.index("private fun refreshTile()")]
+    assert "startActivity(intent)" in launch
     assert "R.string.toast_locale_opened" in launch
     assert "Toast.makeText" in launch
     # The confirmation toast is shown only after startActivity
     # returns (not before the launch attempt).
-    assert (launch.index("startActivity(intent);")
+    assert (launch.index("startActivity(intent)")
             < launch.index("R.string.toast_locale_opened"))
 
 
@@ -4946,23 +4946,23 @@ def test_locale_tile_settings_fallback():
     after a successful locale launch (early return)."""
     src = _locale()
     assert "Settings.ACTION_SETTINGS" in src
-    click = src[src.index("public void onClick()"):]
-    click = click[:click.index("private boolean tryLaunch(")]
+    click = src[src.index("override fun onClick()"):]
+    click = click[:click.index("private fun tryLaunch(")]
     # (1) Early return on a successful locale launch: the
     # if (tryLaunch(locale, "locale")) branch returns before the
     # Settings fallback is reached.
     succ = click[click.index('if (tryLaunch(locale, "locale")) {'):]
-    succ = succ[:succ.index("Intent settings = ")]
-    assert "return;" in succ
+    succ = succ[:succ.index("val settings = ")]
+    assert "\n            return\n" in succ
     # (2) The Settings fallback is a fresh implicit intent launched
     # with startActivity via tryLaunch (no resolve, no explicit
     # component, no startActivityAndCollapse).
-    assert "Intent settings = new Intent(Settings.ACTION_SETTINGS);" \
+    assert "val settings = Intent(Settings.ACTION_SETTINGS)" \
         in click
     assert 'tryLaunch(settings, "settings")' in click
     assert click.index('tryLaunch(locale, "locale")') < \
         click.index('tryLaunch(settings, "settings")')
-    assert (click.index("Intent settings = ")
+    assert (click.index("val settings = ")
             < click.index('tryLaunch(settings, "settings")'))
     # (3) The failure toast comes after the Settings fallback.
     assert (click.index('tryLaunch(settings, "settings")')
@@ -4976,14 +4976,14 @@ def test_locale_tile_logs_failed_stages():
     resolveExplicit anymore, so no 'did not resolve' log and no
     startActivityAndCollapse log."""
     src = _locale()
-    assert "import android.util.Log;" in src
-    assert 'private static final String TAG = "LocaleTile";' in src
-    assert 'e.getClass().getSimpleName()' in src
-    assert 'Log.w(TAG, "startActivity " + label' in src
+    assert "import android.util.Log" in src
+    assert 'private const val TAG = "LocaleTile"' in src
+    assert 'e.javaClass.simpleName' in src
+    assert 'Log.w(TAG, "startActivity $label failed: ' in src
     assert "intent did not resolve" not in src
     # The class body only: the class Javadoc legitimately names
     # startActivityAndCollapse (as a thing v4 dropped).
-    body = src[src.index("public class LocaleTileService"):]
+    body = src[src.index("class LocaleTileService"):]
     assert "startActivityAndCollapse" not in body
     # No persistent state for the diagnostics.
     assert "SharedPreferences" not in src
@@ -4998,8 +4998,8 @@ def test_locale_tile_toast_only_after_all_fail():
     tryLaunch when a launch returns without throwing, never on the
     failure path. There is still no MainActivity fallback."""
     src = _locale()
-    click = src[src.index("public void onClick()"):]
-    click = click[:click.index("private boolean tryLaunch(")]
+    click = src[src.index("override fun onClick()"):]
+    click = click[:click.index("private fun tryLaunch(")]
     assert "R.string.toast_locale_open_failed" in click
     assert "Toast.makeText" in click
     # The failure toast is the last step in onClick, after both
@@ -5010,12 +5010,12 @@ def test_locale_tile_toast_only_after_all_fail():
     # lives in tryLaunch (success), not in onClick after the
     # fallbacks.
     assert "R.string.toast_locale_opened" not in click
-    launch = src[src.index("private boolean tryLaunch("):]
-    launch = launch[:launch.index("private void refreshTile()")]
+    launch = src[src.index("private fun tryLaunch("):]
+    launch = launch[:launch.index("private fun refreshTile()")]
     assert "R.string.toast_locale_opened" in launch
     # The class body only: the header comment legitimately names
     # MainActivity (as a thing the tile must NOT fall back to).
-    body = src[src.index("public class LocaleTileService"):]
+    body = src[src.index("class LocaleTileService"):]
     assert "MainActivity" not in body
 
 
@@ -5026,16 +5026,16 @@ def test_locale_tile_state_inactive_and_subtitle():
     src = _locale()
     assert "Tile.STATE_INACTIVE" in src
     assert "Tile.STATE_ACTIVE" not in src
-    on = src[src.index("public void onStartListening()"):]
-    on = on[:on.index("public void onClick()")]
-    assert "refreshTile();" in on
-    ref = src[src.index("private void refreshTile()"):]
-    assert "tile.setState(Tile.STATE_INACTIVE);" in ref
+    on = src[src.index("override fun onStartListening()"):]
+    on = on[:on.index("override fun onClick()")]
+    assert "refreshTile()" in on
+    ref = src[src.index("private fun refreshTile()"):]
+    assert "tile.state = Tile.STATE_INACTIVE" in ref
     assert "Locale.getDefault().getDisplayLanguage()" in ref
-    assert "tile.setSubtitle(language);" in ref
-    assert "tile.updateTile();" in ref
-    assert ref.index("tile.setSubtitle(language);") < ref.index(
-        "tile.updateTile();")
+    assert "tile.setSubtitle(language)" in ref
+    assert "tile.updateTile()" in ref
+    assert ref.index("tile.setSubtitle(language)") < ref.index(
+        "tile.updateTile()")
     assert "R.string.locale_unknown" in ref
     assert "language.isEmpty()" in ref
     # L-104-01 (CONS-104 P2): negative guards — no cached locale, no
@@ -5057,7 +5057,7 @@ def test_locale_tile_no_mainline_reference():
     src = _locale()
     # The class body only: the header comment legitimately names
     # MainActivity (as a thing the tile must NOT fall back to).
-    src = src[src.index("public class LocaleTileService"):]
+    src = src[src.index("class LocaleTileService"):]
     for bad in ("MainActivity", "token", "Token", "Executor",
                 "executor", "BridgeService", "stopService",
                 "disableSelf", "Settings.Secure", "putString"):
@@ -5065,7 +5065,7 @@ def test_locale_tile_no_mainline_reference():
     # The launch failure is caught (not silently swallowed):
     # tryLaunch catches the single startActivity attempt. (v3 had
     # two catches, one per launch method; v4 has one.)
-    assert src.count("catch (Exception e)") == 1
+    assert src.count("catch (e: Exception)") == 1
 
 
 def test_locale_tile_strings_and_icon():
@@ -5096,10 +5096,12 @@ def test_locale_tile_strings_and_icon():
 
 
 def test_locale_tile_attribution_first_line():
-    """New Java file carries the required attribution as line 1."""
+    """New Kotlin file carries the required attribution as line 1."""
     first = _locale().splitlines()[0]
     assert first == ("// Implemented by MUSE-Koyuki (Muse Spark) "
-                     "\u2014 SPEC-LOCALE-TILE-001, 2026-11-09")
+                     "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+    # The SPEC-LOCALE-TILE-001 design note stays in the class KDoc.
+    assert "SPEC-LOCALE-TILE-001 v4" in _locale()
 
 
 # ----------------------------------------------------------------------
@@ -5208,15 +5210,71 @@ def test_kotlin_pilot_attribution_first_line():
     assert first == _KOTLIN_PILOT_ATTRIBUTION
 
 
+# ----------------------------------------------------------------------
+# SPEC-KOTLIN-MIGRATION-001 v2.2, Stage 1 batch B (BridgeTileService,
+# LocaleTileService, BridgeService). Same D6 guards as the pilot:
+# the compiled JVM properties are verified by javap -v on the real
+# build output (T-M1), not here; these tests guard that the Kotlin
+# sources keep the annotations and call sites the JVM checks depend
+# on. Behavioural verification is by compilation and dex inspection;
+# a live-phone check (T-M3) still needs the user install.
+# ----------------------------------------------------------------------
+
+_KOTLIN_BATCH_B_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+
+
+def test_kotlin_batch_b_services_are_kotlin():
+    """Batch B: the three .java files are gone, the .kt files are
+    the source, and each carries the migration attribution as
+    line 1."""
+    for name in ("BridgeTileService", "LocaleTileService",
+                 "BridgeService"):
+        assert not _java_source_exists(name + ".java"), name
+        assert _kotlin_source_exists(name + ".kt"), name
+        first = _kotlin_source(name + ".kt").splitlines()[0]
+        assert first == _KOTLIN_BATCH_B_ATTRIBUTION, name
+
+
+def test_kotlin_batch_b_bridgeservice_thread_safety():
+    """Batch B (D4 checklist): @Volatile on the running flag and on
+    pendingStopReason, @JvmField on ACTION_STOP and
+    pendingStopReason, @JvmStatic on isRunning() so the Java
+    callers keep compiling and the LOG-03 stop-reason handoff
+    keeps working."""
+    src = _kotlin_source("BridgeService.kt")
+    assert "        @Volatile\n        private var running" in src
+    assert ("        @JvmField\n        @Volatile\n"
+            "        var pendingStopReason") in src
+    assert "        @JvmField\n        val ACTION_STOP" in src
+    assert "        @JvmStatic\n        fun isRunning()" in src
+
+
+def test_kotlin_batch_b_java_callers_unchanged():
+    """Batch B: the Java callers were NOT modified — they still call
+    BridgeService.isRunning() and set BridgeService.pendingStopReason
+    as before, which only compiles because the Kotlin members are
+    @JvmStatic / @JvmField."""
+    for name in ("MainActivity.java", "BridgeWidgetActionReceiver.java",
+                 "BridgeWidgetProvider.java"):
+        src = _java_source(name)
+        assert "BridgeService.isRunning()" in src, name
+    for name in ("MainActivity.java",
+                 "BridgeWidgetActionReceiver.java"):
+        src = _java_source(name)
+        assert "BridgeService.pendingStopReason" in src, name
+
+
 def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     """Pilot (D2): build.sh runs the two-compiler pipeline —
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is SPEC-UI-003's v2.9.10 / code 63."""
+    kotlin-stdlib.jar. Version is Stage 1 batch B's v2.9.11 / code 64."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.10"' in build
-    assert "VERSION_CODE=63" in build
+    assert 'VERSION_NAME="2.9.11"' in build
+    assert "VERSION_CODE=64" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
