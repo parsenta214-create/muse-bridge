@@ -4044,15 +4044,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_14():
+def test_locale_tile_version_2_9_15():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.14 / code 67 (was v2.9.13 / code 66 at batch D)."""
+    carries v2.9.15 / code 68 (was v2.9.14 / code 67 at batch E)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.14"' in build
-    assert "VERSION_CODE=67" in build
+    assert 'VERSION_NAME="2.9.15"' in build
+    assert "VERSION_CODE=68" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4829,15 +4829,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_14():
-    """The build now carries v2.9.14 / code 67 (was v2.9.13 / code 66
+def test_a11yoff002_version_2_9_15():
+    """The build now carries v2.9.15 / code 68 (was v2.9.14 / code 67
     at SPEC-UI-003)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.14"' in build
-    assert "VERSION_CODE=67" in build
+    assert 'VERSION_NAME="2.9.15"' in build
+    assert "VERSION_CODE=68" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5440,15 +5440,95 @@ def test_kotlin_batch_e_java_callers_unchanged():
     assert ".put(\"rtt_ms\", r.rttMs)" in srv
 
 
+_KOTLIN_BATCH_F_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+
+
+def test_kotlin_batch_f_notification_listener_is_kotlin():
+    """Batch F: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1.
+    (No pre-existing test referenced BridgeNotificationListener
+    by source — the migration adds the first source-level
+    coverage for it.)"""
+    assert not _java_source_exists("BridgeNotificationListener.java")
+    assert _kotlin_source_exists("BridgeNotificationListener.kt")
+    first = _kotlin_source("BridgeNotificationListener.kt").splitlines()[0]
+    assert first == _KOTLIN_BATCH_F_ATTRIBUTION
+
+
+def test_kotlin_batch_f_notification_listener_interop():
+    """Batch F (D4 checklist): a service class (not an object)
+    extending NotificationListenerService; @JvmStatic on the
+    eight public companion methods so the Java callers keep
+    compiling; all NotificationEvent / NotificationsResult
+    fields are @JvmField so Java keeps its field access
+    (e.seq, e.type, nr.latestSeq, nr.dropped, ...); accepting
+    stays @Volatile; the buffer critical sections share one
+    explicit BUFFER_LOCK (no @Synchronized — the batch E
+    lesson); wait/notify go through a java.lang.Object cast,
+    which Kotlin's Any does not expose."""
+    src = _kotlin_source("BridgeNotificationListener.kt")
+    assert "class BridgeNotificationListener : NotificationListenerService()" in src
+    for name in ("setAccepting(", "awaitQuiesce(", "inFlightCount(",
+                 "getInstance(", "isAccessGranted(", "getEvents(",
+                 "openNotification(", "replyNotification("):
+        assert "        @JvmStatic\n        fun " + name in src, name
+    for field in ("seq: Long", "type: String", "key: String",
+                  "packageName: String", "id: Int", "tag: String?",
+                  "title: String", "text: String", "t: Long",
+                  "ongoing: Boolean", "groupSummary: Boolean",
+                  "removedT: Long"):
+        assert "        @JvmField var " + field in src, field
+    for field in ("events: MutableList<NotificationEvent>",
+                  "latestSeq: Long", "dropped: Boolean"):
+        assert "        @JvmField var " + field in src, field
+    assert src.count("@Volatile") >= 1
+    assert "private var accepting" in src
+    assert "        @Volatile\n        private var instance: BridgeNotificationListener?" in src
+    assert "@Synchronized" not in src
+    assert "private val BUFFER_LOCK = Any()" in src
+    assert src.count("synchronized(BUFFER_LOCK)") == 3
+    assert "(quiesceLock as Object).wait(remaining)" in src
+    assert "(quiesceLock as Object).notifyAll()" in src
+    assert "BridgeNotificationListener.class" not in src
+
+
+def test_kotlin_batch_f_java_callers_unchanged():
+    """Batch F: the Java callers were NOT modified — HttpBridgeServer
+    still drives the listener the same way (accepting, quiesce,
+    access grant, instance, events, open/reply) and reads the
+    result/event fields directly, and MainActivity still checks
+    the access grant. That only compiles because the Kotlin
+    members are @JvmStatic and the fields are @JvmField."""
+    srv = _java_source("HttpBridgeServer.java")
+    assert "BridgeNotificationListener.setAccepting(true);" in srv
+    assert "BridgeNotificationListener.setAccepting(false);" in srv
+    assert "BridgeNotificationListener.awaitQuiesce(5000);" in srv
+    assert "BridgeNotificationListener.inFlightCount()" in srv
+    assert "BridgeNotificationListener.isAccessGranted(context)" in srv
+    assert "BridgeNotificationListener.getInstance()" in srv
+    assert "BridgeNotificationListener.getEvents(since, limit, pkg);" in srv
+    assert "BridgeNotificationListener.openNotification(key);" in srv
+    assert "BridgeNotificationListener.replyNotification(key, text);" in srv
+    assert ".put(\"latest_seq\", nr.latestSeq)" in srv
+    assert ".put(\"dropped\", nr.dropped)" in srv
+    assert "e.seq" in srv
+    assert "e.type" in srv
+    assert "e.key" in srv
+    main = _java_source("MainActivity.java")
+    assert "BridgeNotificationListener.isAccessGranted(this)" in main
+
+
 def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     """Pilot (D2): build.sh runs the two-compiler pipeline —
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is Stage 2 batch E's v2.9.14 / code 67."""
+    kotlin-stdlib.jar. Version is Stage 2 batch F's v2.9.15 / code 68."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.14"' in build
-    assert "VERSION_CODE=67" in build
+    assert 'VERSION_NAME="2.9.15"' in build
+    assert "VERSION_CODE=68" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
