@@ -1,6 +1,6 @@
 # SPEC-LOG-001 — ロガー改良
 
-- Status: Draft
+- Status: FROZEN (v2.8.6/code 52, README decision 100, 2026-11-12)
 - Version target: v2.8.6 (code 52)
 - Date: 2026-11-08
 - Requested by: サイガマン (2026-11-08 04:09 +07) — まずロガーの改良。2026-11-08 の接続障害（03:32–04:07、VM からブリッジに届かなくなった）の原因特定が、ログの読みにくさで遅れたため。
@@ -279,7 +279,7 @@
 - v5 を採用する。サイガマンの決定「いったんv5を実装して様子見よう」（2026-11-08 04:44 +07）。
 - GPT レビュー：CONS-20261108-063 は条件付き採用（P0×2、P1×8、P2×5）。v5 の設計方向は妥当とされ、全体を作り直す必要はないとされた。
 - CONS-063 の P0-01／P0-02 の補強内容（onLost 後の再登録禁止、共通ライフサイクルロック、InterruptedException の本文定義、T-31〜T-38 の競合試験）は、実装時の条件として引き継ぐ。単体テストと実機確認で検証する。
-- Status は Draft のまま。採用であり、仕様の凍結ではない。
+- Status は §16 で凍結とした。
 
 ## 実装 — v2.8.6（2026-11-08、MUSE-Koyuki が直接実装）
 
@@ -313,3 +313,10 @@
 - LOG-03：確認済み。`[11-08 06:46:41] server STOPPED: MANUAL`、`[11-08 06:46:55] server STOPPED: MANUAL`、`[11-08 06:54:11] server STOPPED: MANUAL` — STOPPED 行に理由（MANUAL）が付いている。
 - BIND-02：確認済み。06:17:23 の BOOT_COMPLETED 起動時、Tailscale が未接続で `ifaces rmnet0:100.69.*.*, lo:127.0.*.*`（tun0 なし）、`bind-summary bound=1 excluded=1 failed=0 (loopback bound)`、`server DEGRADED: tailscale-interface-unavailable`。06:54:15 の Tailscale 復旧後の再起動では `listen tun0 100.111.*.*:8080`、`bind-summary bound=2 excluded=1 failed=0 (tailscale bound) (loopback bound)`、`server RUNNING`。
 - これで §5.5 の未確認 2 件はすべて確認済みとなった。
+
+## 凍結 — 2026-11-12（サイガマン決定、README 決定 100）
+
+- v5 を凍結する。GPT レビュー CONS-20261108-063 は条件付き採用（P0×2、P1×8、P2×5）で、v6 を作らず P0-01／P0-02 の補強を実装時の条件として引き継いだ。実装注記とコード（HttpBridgeServer.discoverVpnNetworks() の CONS-062/063 準拠コメント）は条件を満たすと主張しており、サイガマンは実装後の独立した再レビューなしでこれを受け入れて凍結する。
+- 受け入れた意図的な逸脱 2 点：(1) ウェイクシグナルによる即時キャンセルは未実装（将来の改善候補）。(2) 競合試験 T-31〜T-38 は Java 単体テスト基盤がないため実機確認とライブ検証で代替する。
+- 決定 98（2026-11-12）により Android ホーム画面ウィジェットは中止された。変更ファイル一覧の BridgeWidgetActionReceiver.java（停止理由 WIDGET）は凍結時点では対象外となった。停止理由 WIDGET 自体の扱いは本凍結の範囲外。
+- 凍結後は本ファイルを直接編集しない。変更は新バージョンで行う。

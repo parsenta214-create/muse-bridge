@@ -1,6 +1,6 @@
-# Muse Bridge — 操作中のライブ通知「Override - x/y」Spec (Draft)
+# Muse Bridge — 操作中のライブ通知「Override - x/y」Spec (FROZEN)
 
-- Status: Draft（GPT レビュー CONS-079〜CONS-083 はいずれも条件付き採用。v4 で P1 は 0 件、v5 で P2 は 1 件まで減った。v6 を作成し、サイガマンの採用判断を待つ。採用・凍結はサイガマンの決定による）
+- Status: FROZEN（決定101、2026-11-12。GPT CONS-20261112-129 採用可 P0/P1/P2=0。実機確認 OV-L1・L2・L4・L5・L6・L7 PASS、L3 はサイガマン決定でスキップ）
 - Source: サイガマンの提案 2026-11-08 07:46 +07「Museが端末を操作中にステータスバーに「Override - x/y」みたいなライブ通知追加できない？　君が操作中に間違って操作するのが申し訳ない」
 - Version target: v2.9.2 / code 55
 - Local file: `~/workspace/muse-bridge-repo/SPEC-OVERRIDE-001.md`（正本。`~/workspace/muse-bridge/SPEC-OVERRIDE-001.md` は同期コピー）
@@ -192,3 +192,11 @@ VM 側が端末の画面を操作している間、Bridge アプリの「操作�
 - ビルド時の不具合と対処：computer-use-preview 側の res/ が古く（`card_background.xml`・`colors.xml` 欠落、`activity_main.xml` 旧版）、初回ビルドが R 参照エラーで失敗した。原因は res/ の同期漏れ。repo から test tree へ res/ を同期して解決した。両 tree の debug.keystore は Drive バックアップと同一（SHA-256 8d144b54…）であることを確認済み。
 - 配信：push_apk.sh は Termux SSH が落ちているため失敗（tunnel proxy empty reply）。Drive 書斎/設備管理にアップロード済み（`Muse_Bridge_v2.9.2.apk`、file id `1YYHMbirWA8xCNJHXKyY5UM18GX1hKJr1`）。実機確認 OV-L1〜OV-L7 はインストール後に実施する。
 - CONS-078 P2-02 の堅牢化（`getPersistedUriPermissions()` の try/catch）は v2.9.2 に同梱した（§8 参照）。
+
+## 9. 凍結 — 2026-11-12（決定101）
+
+- 凍結決定：System Development Lead 決定、2026-11-12。SPEC-OVERRIDE-001 v6 を凍結する。
+- GPT 再レビュー：CONS-20261112-129、採用可、P0/P1/P2 = 0。NEW-P2-01（§3.3 の pendingGeneration / pendingToken 初期値 -1、OV-14(a) の `pendingGeneration == -1` チェック）解決。親 CONS は CONS-20261108-083。記録：`~/workspace/ai-corporation/02_logs/consultation/CONS-20261112-129-gpt-spec-override-001-v6-re-review.md`。
+- 実機確認 OV-L1〜L7（端末 Galaxy A55 5G、Bridge v2.9.10 / code 63、2026-11-12 16:27〜16:40 +07）：L1 PASS（`Override - タップ 540/2320`）、L2 PASS（`Override - スワイプ 200/1200 → 880/1200`）、L4 PASS（セッション終了で「操作中」が消え「操作終了」が出る）、L5 PASS（ステータスバーと通知シェードの両方で ic_override アイコンが見える）、L6 PASS（`Override - 文字を入力中`、入力文字は見えない）、L7 PASS（通知権限オフでも操作は正常に継続し、ログに `[11-12 16:40:01] op-notify-disabled operation notifications disabled` が記録される）。L3 はサイガマン決定でスキップ（3回連続タップは実行済みだが、キープアライブ中にアクセシビリティがオフになり文面の目視確認ができなかった）。詳細：`~/workspace/research/override-001-live-2026-11-12.md`。
+- D3 の記録方法：D3（§1）は凍結済み SPEC-OPERATION-NOTIFY の D6 を改訂する。OPERATION-NOTIFY は凍結済みの仕様書のため直接編集しない。改訂はここ（OVERRIDE-001 の凍結記録）に記す。
+- 通信層の凍結セットはこれで完了（決定99 PING-001、決定100 LOG-001 v5、決定101 OVERRIDE-001 v6）。

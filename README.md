@@ -8,7 +8,7 @@ AI（Muse）が Android スマホを遠隔操作するための橋渡しアプ�
 - 凍結仕様書：`SPEC-*.md`（P0 / P1 / CONS-014 P1 / 操作通知 / ウィジェットほか）
 - ビルド：`android-app/build.sh`（手動 aapt2 / javac / d8、Gradle なし）。テスト：`pytest -q`。詳しくは AGENTS.md へ。
 
-この README の先頭部分は、元になった Google の computer-use-preview の説明です。その下（`Local trial setup` 以降）が Muse Bridge の作業記録で、末尾近くに番号付きの凍結決定（1〜97）があります。
+この README の先頭部分は、元になった Google の computer-use-preview の説明です。その下（`Local trial setup` 以降）が Muse Bridge の作業記録で、末尾近くに番号付きの凍結決定（1〜101）があります。
 
 ---
 
@@ -2250,6 +2250,71 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     tests); CONS-028 P2-01/02/03, CONS-022
     P2, and the CONS-031 tailscale_ips [""]
     note still open (step 3, P2 wrap-up).
+98. Home-screen widget dropped; widget moves to the Muse
+    Space (2026-11-12, System Development Lead decision):
+    the Android home-screen widget (SPEC-WIDGET.md v2.6.0,
+    draft, revision round stopped) is NOT built. Its
+    function — Bridge status at a glance — moves to the
+    Muse Space dashboard (muse-bridge-sutetasu). Reasons:
+    (1) Bridge is Muse-premised; status and control
+    already live in Muse. (2) In the Space, Muse itself
+    manages the design — no app build/install cycle to
+    iterate. (3) Android widgets cannot use the custom
+    dial view (RemoteViews); the dial would degrade to a
+    bitmap. (4) The phone-side at-a-glance need is
+    already covered by the QS tile (BridgeTileService).
+    Consequences: Kotlin migration Stage 1 drops
+    BridgeWidgetActionReceiver, StatusDialView,
+    BridgeWidgetProvider (~450 lines); the scope change
+    goes into the next SPEC-KOTLIN-MIGRATION-001 version
+    (v2.2 is frozen). The Space widget's design/content
+    is still to be designed, after the communication-layer
+    freeze.
+99. SPEC-PING-001 FROZEN (2026-11-12, System Development
+    Lead decision): v2.8.5 adopted (GPT CONS-20261107-057,
+    adoptable, P0/P1/P2 = 0; live check RTT 364ms 3/3).
+    Communication-layer freeze scope: the freeze set is
+    SPEC-V2-STARTUP-P0 (frozen, decision 93),
+    SPEC-PING-001 (this decision), SPEC-OPERATION-NOTIFY
+    (frozen, decision 89), SPEC-LOG-001 v5 (decision 100),
+    SPEC-OVERRIDE-001 v6 (pending, last). Gaps with no
+    spec (token lifecycle, client retry policy, SSH path,
+    health-check rules, HTTP protocol overall) are
+    code-as-spec: the code is the spec; specify on change.
+    Known limit (by design): /state ping_to_client is
+    only the last value from MainActivity UI; a fresh
+    ping cannot be taken from the VM side.
+100. SPEC-LOG-001 v5 FROZEN (2026-11-12, System
+    Development Lead decision "accept the deviations
+    and freeze"): GPT CONS-20261108-063 was conditional
+    (P0 x2, P1 x8, P2 x5); no v6 was made, the P0-01/
+    P0-02 reinforcements were carried as implementation
+    conditions. The implementation notes and code claim
+    the conditions are met; the user accepts this
+    without an independent post-implementation re-review.
+    Accepted deliberate deviations: (1) no immediate
+    cancel by wake signal (future improvement); (2)
+    race tests T-31..T-38 replaced by live verification
+    (no Java unit-test harness). Decision 98 note:
+    BridgeWidgetActionReceiver.java is out of scope at
+    freeze time (Android widget dropped).
+101. SPEC-OVERRIDE-001 v6 FROZEN (2026-11-12, System
+    Development Lead decision): GPT CONS-20261112-129
+    re-review, adoptable, P0/P1/P2 = 0 (NEW-P2-01
+    resolved; parent CONS-20261108-083). Live checks
+    OV-L1..L7 on device v2.9.10/code 63: L1 PASS
+    ("Override - タップ 540/2320"), L2 PASS ("Override -
+    スワイプ 200/1200 → 880/1200"), L4 PASS ("操作終了"),
+    L5 PASS (ic_override icon in status bar + shade),
+    L6 PASS ("Override - 文字を入力中", input hidden),
+    L7 PASS (operation continues with notification
+    permission off; log "op-notify-disabled operation
+    notifications disabled" 16:40:01). L3 SKIPPED by
+    user decision (rapid-tap text not visually confirmed;
+    accessibility turned off mid-check 16:33). D3 note:
+    D3 revises frozen SPEC-OPERATION-NOTIFY D6; recorded
+    here, OPERATION-NOTIFY is not edited. Communication-
+    layer freeze set is now complete (decisions 99-101).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

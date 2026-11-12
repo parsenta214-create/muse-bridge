@@ -1,5 +1,8 @@
 # AGENTS.md — Muse Bridge
 
+> 階層：Level 1（プロジェクト）。親は `~/AGENTS.md`（全体ルール）を先に読むこと。このファイルは Bridge 固有の地図・ビルド・凍結・禁則だけを書く。全体ルールをここへ丸写ししない。
+> 正本はこのファイル。`~/workspace/muse-bridge/AGENTS.md` は push 用の写し（直で編集しない。変更はここで行い、写すときに `diff` で確認する）。作業コピーは `~/workspace/computer-use-preview/` で、そこにはこのファイルがないため、作業前にこのファイルを読むこと。
+
 Muse（AI）が Android スマホ（Galaxy A55 5G）を遠隔操作するための橋渡しアプリと、その VM 側クライアントのリポジトリ。最終決定者は人間のユーザー（システム開発責任者）。
 
 ## このリポジトリは何か
@@ -10,7 +13,7 @@ Muse（AI）が Android スマホ（Galaxy A55 5G）を遠隔操作するため�
 
 ## 地図
 
-- `README.md`：上流の説明＋ Muse の作業記録。末尾近くに番号付きの凍結決定（1〜97）がある。決定の追加は末尾の作法を守ること（下記）。
+- `README.md`：上流の説明＋ Muse の作業記録。末尾近くに番号付きの凍結決定（1〜101）がある。決定の追加は末尾の作法を守ること（下記）。
 - `MUSE_BRIDGE_OVERVIEW.md`：日本語の概要。「スマホに手足を生やすアプリ」という説明。
 - `ROADMAP.md`：Phase D-1 完了、D-2/D-3 未着手。
 - `SPEC-*.md`：凍結仕様書（P0 / P1 / CONS-014 P1 / 操作通知 / ウィジェット / PING / LOG / DRIVE など）。凍結済みのものは直接編集しない。
@@ -47,7 +50,8 @@ cd ~/workspace/computer-use-preview/android-app
 - P0（v2.0 起動仕様、v2.2.0）：HTTP サーバーと AccessibilityService の分離、モード（MINIMAL / FULL_ACCESS / BANKING_SAFE）、モジュール別 Health、P0-4（`/launch_app` の正直な報告＋銀行アプリの拒否リスト）。
 - P1（CONS-022 の 5 項目、v2.3.0）：UI と Health の一致、tailscale_ips の再取得、`install_apk_permitted`、Health の相互検証。
 - CONS-014 P1（6 項目、v2.5.0）：ログの PII 除去、`/scroll_node` の direction 必須、`/node_action` の引数検証など。
-- 操作通知（v2.1.0）、ウィジェット（v2.6.0、修正ラウンドは停止中）、step 3 P2 丸め（凍結判断待ち）。
+- 操作通知（v2.1.0）、ウィジェット（v2.6.0、決定98で中止・Museスペースへ移行）、step 3 P2 丸め（凍結判断待ち）。
+- PING-001（v2.8.0、決定99）、LOG-001 v5（v2.8.6、決定100）、OVERRIDE-001 v6（v2.9.2、決定101）。
 
 ## 触ってはいけないもの・禁則
 
@@ -65,9 +69,10 @@ cd ~/workspace/computer-use-preview/android-app
 - 銀行アプリ（K PLUS、Bualuang mBanking、SCB EASY、KMA）は `/launch_app` の拒否リスト入りで 403 になる。Krungthai NEXT も対象だが、コードには未追加。
 - Termux の sshd が落ちていると VM からの SSH は通らない。`/repair_termux` で直せる（`allow-external-apps=true` が `~/.termux/termux.properties` に必要）。
 
-## 現在の状態（2026-11-08）
+## 現在の状態（2026-11-10、更新）
 
-- GitHub HEAD は v2.8.5/code 51。電話は v2.8.6/code 52（メインの部屋の作業、push 待ち）。
-- GitHub Actions は登録済みだが未実行（手動のみ）。走らせるのはユーザーの合図があったときだけ。
-- Kotlin 移行の方針（2026-11-08 決定）：Android 側（`android-app/`）だけ Kotlin にする。VM 側 Python と上流の Python 樹は対象外。時期は v2.9.0 の後で、GitHub Actions のビルド証明が先。移行の細則（試すファイル、巨大小ファイルの扱い、Kotlin 標準ライブラリの依存ゼロ例外）は移行 SPEC で決める。
+- 電話は v2.9.7/code 60（CONS-110 ADOPTABLE、P0/P1/P2=0）。ライブテスト W-L1〜L3、T-L1〜L5、X-L1、L4、L5 は合格。L6 は部分合格（無効化が操作完了後に入ったため、実行中の割り込みは未捕捉）。L7/L8 は保留。
+- Kotlin 移行は 2026-11-09 に開始済み。SPEC-KOTLIN-MIGRATION-001 v2.2、batch A 進行中。Android 側（`android-app/`）だけが対象。VM 側 Python は対象外。
+- GitHub HEAD は v2.9.7 系の同期が進行中。全体 push の前は必ず差分を確認する（別チャットの未 push 作業が staging にあることがある）。
+- GitHub Actions は登録済みだが手動のみ。走らせるのはユーザーの合図があったときだけ。
 - ライセンス Apache-2.0。トピック：`android`、`accessibility-service`、`tailscale`、`termux`。
