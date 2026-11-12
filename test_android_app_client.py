@@ -4044,15 +4044,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_11():
+def test_locale_tile_version_2_9_12():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.11 / code 64 (was v2.9.10 / code 63 at SPEC-UI-003)."""
+    carries v2.9.12 / code 65 (was v2.9.11 / code 64 at batch B)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.11"' in build
-    assert "VERSION_CODE=64" in build
+    assert 'VERSION_NAME="2.9.12"' in build
+    assert "VERSION_CODE=65" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4267,11 +4267,11 @@ def test_override_p202_classify_failure_keeps_folder():
 # ----------------------------------------------------------------------
 
 def _executor():
-    return _java_source("A11yOffExecutor.java")
+    return _kotlin_source("A11yOffExecutor.kt")
 
 
 def _a11y_tile():
-    return _java_source("A11yOffTileService.java")
+    return _kotlin_source("A11yOffTileService.kt")
 
 
 def _a11y_main():
@@ -4465,20 +4465,20 @@ def test_ui003_a11y_tile_state_inverted():
     assert "Tile.STATE_INACTIVE" in tile
     assert "Tile.STATE_UNAVAILABLE" in tile
     # the state read feeds the switch, not a cached value
-    seg = tile[tile.index("private void refreshTile"):]
-    assert "A11yOffExecutor.A11yState state" in seg
-    assert "switch (state)" in seg
-    assert "case ENABLED:" in seg
-    assert "case DISABLED:" in seg
-    assert "default:" in seg
+    seg = tile[tile.index("private fun refreshTile()"):]
+    assert "val state = A11yOffExecutor.getAccessibilityState(this)" in seg
+    assert "when (state)" in seg
+    assert "A11yOffExecutor.A11yState.ENABLED ->" in seg
+    assert "A11yOffExecutor.A11yState.DISABLED ->" in seg
+    assert "else ->" in seg
     # order-sensitive: ENABLED must be followed by INACTIVE and
     # DISABLED by ACTIVE — mere presence of both constants would not
     # prove the inversion.
-    enabled = seg[seg.index("case ENABLED:"):seg.index("case DISABLED:")]
+    enabled = seg[seg.index("A11yOffExecutor.A11yState.ENABLED ->"):seg.index("A11yOffExecutor.A11yState.DISABLED ->")]
     assert "Tile.STATE_INACTIVE" in enabled
-    disabled = seg[seg.index("case DISABLED:"):seg.index("default:")]
+    disabled = seg[seg.index("A11yOffExecutor.A11yState.DISABLED ->"):seg.index("else ->")]
     assert "Tile.STATE_ACTIVE" in disabled
-    after_default = seg[seg.index("default:"):]
+    after_default = seg[seg.index("else ->"):]
     assert "Tile.STATE_UNAVAILABLE" in after_default
 
 
@@ -4498,10 +4498,10 @@ def test_ui003_three_tile_semantics_table():
     # test_ui003_a11y_tile_state_inverted; here only the switch
     # correspondence is re-checked).
     tile = _a11y_tile()
-    seg = tile[tile.index("private void refreshTile"):]
-    enabled = seg[seg.index("case ENABLED:"):seg.index("case DISABLED:")]
+    seg = tile[tile.index("private fun refreshTile()"):]
+    enabled = seg[seg.index("A11yOffExecutor.A11yState.ENABLED ->"):seg.index("A11yOffExecutor.A11yState.DISABLED ->")]
     assert "Tile.STATE_INACTIVE" in enabled
-    disabled = seg[seg.index("case DISABLED:"):seg.index("default:")]
+    disabled = seg[seg.index("A11yOffExecutor.A11yState.DISABLED ->"):seg.index("else ->")]
     assert "Tile.STATE_ACTIVE" in disabled
     # Locale tile: no ACTIVE state, always INACTIVE, subtitle shows
     # the current language (details pinned by
@@ -4573,24 +4573,24 @@ def test_a11yoff002_d6_tile_refresh_helper_three_sites():
     (getQsTile().setState + updateTile) and is called from all three
     sites — onStartListening, the runtime receiver, and onClick."""
     tile = _a11y_tile()
-    assert "private void refreshTile()" in tile
-    helper = tile[tile.index("private void refreshTile"):]
-    assert "getQsTile()" in helper
-    assert "tile.setState(" in helper
-    assert "tile.updateTile();" in helper
+    assert "private fun refreshTile()" in tile
+    helper = tile[tile.index("private fun refreshTile()"):]
+    assert "qsTile" in helper
+    assert "tile.state = " in helper
+    assert "tile.updateTile()" in helper
     assert "requestListeningState" not in helper
     # onStartListening calls it
-    start = tile[tile.index("public void onStartListening"):]
-    start = start[:start.index("public void onStopListening")]
-    assert "refreshTile();" in start
+    start = tile[tile.index("override fun onStartListening()"):]
+    start = start[:start.index("override fun onStopListening()")]
+    assert "refreshTile()" in start
     # the runtime receiver calls it
-    assert tile.count("refreshTile();") >= 3
+    assert tile.count("refreshTile()") >= 3
     # onClick calls the executor, then refreshes directly
-    click = tile[tile.index("public void onClick"):]
-    click = click[:click.index("private void refreshTile")]
-    assert "A11yOffExecutor.execute(this);" in click
-    assert click.index("A11yOffExecutor.execute(this);") < click.index(
-        "refreshTile();")
+    click = tile[tile.index("override fun onClick()"):]
+    click = click[:click.index("private fun refreshTile()")]
+    assert "A11yOffExecutor.execute(this)" in click
+    assert click.index("A11yOffExecutor.execute(this)") < click.index(
+        "refreshTile()")
 
 
 def test_a11yoff002_d6_tile_receiver_not_exported_idempotent():
@@ -4599,28 +4599,28 @@ def test_a11yoff002_d6_tile_receiver_not_exported_idempotent():
     unregistered only if registered (double-unregister guarded)."""
     tile = _a11y_tile()
     assert "Context.RECEIVER_NOT_EXPORTED" in tile
-    assert "private boolean receiverRegistered = false;" in tile
-    start = tile[tile.index("public void onStartListening"):]
-    start = start[:start.index("public void onStopListening")]
+    assert "private var receiverRegistered = false" in tile
+    start = tile[tile.index("override fun onStartListening()"):]
+    start = start[:start.index("override fun onStopListening()")]
     assert "if (!receiverRegistered)" in start
-    assert "receiverRegistered = true;" in start
-    stop = tile[tile.index("public void onStopListening"):]
-    stop = stop[:stop.index("public void onClick")]
+    assert "receiverRegistered = true" in start
+    stop = tile[tile.index("override fun onStopListening()"):]
+    stop = stop[:stop.index("override fun onClick()")]
     assert "if (receiverRegistered)" in stop
-    assert "unregisterReceiver(a11yStateReceiver);" in stop
-    assert "receiverRegistered = false;" in stop
-    assert "catch (IllegalArgumentException ignored)" in stop
+    assert "unregisterReceiver(a11yStateReceiver)" in stop
+    assert "receiverRegistered = false" in stop
+    assert "catch (ignored: IllegalArgumentException)" in stop
 
 
 def test_a11yoff002_d7_three_valued_state():
     """D7: the executor's three-valued state read — null means
     DISABLED, an exception means UNKNOWN."""
     ex = _executor()
-    assert "enum A11yState { ENABLED, DISABLED, UNKNOWN }" in ex
-    st = ex[ex.index("public static A11yState getAccessibilityState"):]
-    st = st[:st.index("public static void execute")]
-    assert "return A11yState.DISABLED;" in st  # null string
-    assert "catch (Exception e)" in st and "return A11yState.UNKNOWN;" in st
+    assert "enum class A11yState { ENABLED, DISABLED, UNKNOWN }" in ex
+    st = ex[ex.index("fun getAccessibilityState("):]
+    st = st[:st.index("fun execute(")]
+    assert "return A11yState.DISABLED" in st  # null string
+    assert "catch (e: Exception)" in st and "return A11yState.UNKNOWN" in st
 
 
 def test_a11yoff002_d7_entry_state_first():
@@ -4628,17 +4628,17 @@ def test_a11yoff002_d7_entry_state_first():
     DISABLED apply regardless of the instance; only ENABLED
     consults the instance (null -> not-connected toast)."""
     ex = _executor()
-    body = ex[ex.index("public static void execute"):]
+    body = ex[ex.index("fun execute("):]
     body = body[:body.index("// Stage A")]
     # state is read before the instance is consulted for the
     # not-connected branch
-    assert body.index("A11yState state = getAccessibilityState(app);") < \
+    assert body.index("val state = getAccessibilityState(app)") < \
         body.index("if (service == null)")
     assert "R.string.toast_a11y_status_unknown" in body
     assert "R.string.toast_a11y_already_off" in body
     assert "R.string.toast_a11y_not_connected" in body
     # no disableSelf in the early-return region
-    early = body[:body.index("disableInProgress = true;")]
+    early = body[:body.index("disableInProgress = true")]
     assert "disableSelf" not in early
 
 
@@ -4648,21 +4648,21 @@ def test_a11yoff002_d11_entry_ordering():
     generation are set only when ENABLED and the instance is
     non-null, in the same synchronized block."""
     ex = _executor()
-    body = ex[ex.index("public static void execute"):]
+    body = ex[ex.index("fun execute("):]
     body = body[:body.index("// Stage A")]
-    assert "synchronized (LOCK)" in body
+    assert "synchronized(LOCK)" in body
     assert body.index("if (disableInProgress)") < body.index(
-        "A11yState state = getAccessibilityState(app);")
-    assert 'Log.i(TAG, "ignored-during-execution");' in body
+        "val state = getAccessibilityState(app)")
+    assert 'Log.i(TAG, "ignored-during-execution")' in body
     # the ignore path has no toast
     ign = body[body.index("if (disableInProgress)"):]
-    ign = ign[:ign.index("service = BridgeAccessibilityService.getInstance();")]
+    ign = ign[:ign.index("service = BridgeAccessibilityService.getInstance()")]
     assert "Toast" not in ign
     # guard + generation in the same synchronized block, after the
     # early returns
-    assert "disableInProgress = true;" in body
-    assert "opGen = ++disableGeneration;" in body
-    assert body.index("disableInProgress = true;") > body.index(
+    assert "disableInProgress = true" in body
+    assert "opGen = ++disableGeneration" in body
+    assert body.index("disableInProgress = true") > body.index(
         "if (service == null)")
 
 
@@ -4671,28 +4671,28 @@ def test_a11yoff002_d11_atomic_completion():
     is flipped and the receiver detached in the same synchronized
     block, and only the owning caller unregisters and toasts."""
     ex = _executor()
-    fin = ex[ex.index("private static void finishDisable"):]
-    fin = fin[:fin.index("private static final class DisableBroadcastReceiver")]
-    sync = fin[fin.index("synchronized (LOCK)"):]
+    fin = ex[ex.index("private fun finishDisable("):]
+    fin = fin[:fin.index("private class DisableBroadcastReceiver")]
+    sync = fin[fin.index("synchronized(LOCK)"):]
     sync = sync[:sync.index("}\n        if (toUnregister != null)")]
     assert "if (!disableInProgress || opGen != disableGeneration)" in sync
-    assert "return;" in sync
-    assert "disableInProgress = false;" in sync
+    assert "return" in sync
+    assert "disableInProgress = false" in sync
     assert "currentReceiverGen == opGen" in sync
-    assert "toUnregister = currentReceiver;" in sync
-    assert "currentReceiver = null;" in sync
-    assert "currentReceiverGen = 0;" in sync
+    assert "toUnregister = currentReceiver" in sync
+    assert "currentReceiver = null" in sync
+    assert "currentReceiverGen = 0" in sync
     # unregister + toast happen after the lock is released, once
     assert fin.count("unregisterReceiver(toUnregister)") == 1
     assert fin.count("Toast.makeText(app, toastRes, Toast.LENGTH_LONG)") == 1
     # completion notifies the open tile and the widget
     assert "TileService.requestListeningState(app," in fin
-    assert "A11yOffTileService.class" in fin
+    assert "A11yOffTileService::class.java" in fin
     assert "ACTION_A11Y_STATE_CHANGED" in fin
-    assert ".setPackage(app.getPackageName())" in fin
-    assert "BridgeWidgetProvider.updateAllWidgets(app);" in fin
+    assert ".setPackage(app.packageName)" in fin
+    assert "BridgeWidgetProvider.updateAllWidgets(app)" in fin
     # the completion trigger is logged
-    assert '" via " + trigger' in fin
+    assert '" via $trigger"' in fin
 
 
 def test_a11yoff002_d11_per_generation_receiver():
@@ -4701,17 +4701,17 @@ def test_a11yoff002_d11_per_generation_receiver():
     together, and finishDisable unregisters only its own
     generation's receiver."""
     ex = _executor()
-    assert "private static BroadcastReceiver currentReceiver = null;" in ex
-    assert "private static int currentReceiverGen = 0;" in ex
-    body = ex[ex.index("public static void execute"):]
+    assert "private var currentReceiver: BroadcastReceiver? = null" in ex
+    assert "private var currentReceiverGen: Int = 0" in ex
+    body = ex[ex.index("fun execute("):]
     body = body[:body.index("// Stage A")]
-    assert "currentReceiver = receiver;" in body
-    assert "currentReceiverGen = opGen;" in body
-    fin = ex[ex.index("private static void finishDisable"):]
-    fin = fin[:fin.index("private static final class DisableBroadcastReceiver")]
+    assert "currentReceiver = receiver" in body
+    assert "currentReceiverGen = opGen" in body
+    fin = ex[ex.index("private fun finishDisable("):]
+    fin = fin[:fin.index("private class DisableBroadcastReceiver")]
     assert "if (currentReceiverGen == opGen)" in fin
     # the receiver reference is captured, not re-read, for unregister
-    assert "toUnregister = currentReceiver;" in fin
+    assert "toUnregister = currentReceiver" in fin
 
 
 def test_a11yoff002_d11_executor_receiver_not_exported():
@@ -4720,7 +4720,7 @@ def test_a11yoff002_d11_executor_receiver_not_exported():
     double-unregister guarded."""
     ex = _executor()
     assert "Context.RECEIVER_NOT_EXPORTED" in ex
-    assert "catch (IllegalArgumentException ignored)" in ex
+    assert "catch (ignored: IllegalArgumentException)" in ex
 
 
 def test_a11yoff002_d11_stage_exceptions():
@@ -4731,30 +4731,30 @@ def test_a11yoff002_d11_stage_exceptions():
     too — not just an exception."""
     ex = _executor()
     # stage A
-    assert "rollback(app, opGen, false);" in ex
+    assert "rollback(app, opGen, false)" in ex
     # stage B
-    assert "rollback(app, opGen, true);" in ex
-    assert "service.disableSelf();" in ex
+    assert "rollback(app, opGen, true)" in ex
+    assert "service!!.disableSelf()" in ex
     # stage C: the polling registration's boolean return is checked
     stage_c = ex[ex.index("// Stage C"):]
-    stage_c = stage_c[:stage_c.index("private static void stageCFallback")]
+    stage_c = stage_c[:stage_c.index("private fun stageCFallback(")]
     assert "if (!scheduleDisableCheck(app, opGen, 1))" in stage_c
-    assert "stageCFallback(app, opGen);" in stage_c
+    assert "stageCFallback(app, opGen)" in stage_c
     assert "rollback(" not in stage_c
     # scheduleDisableCheck returns the postDelayed() result
-    assert "private static boolean scheduleDisableCheck" in ex
+    assert "private fun scheduleDisableCheck(" in ex
     assert "return MAIN_HANDLER.postDelayed(" in ex
     # a failed re-registration (attempt 2/3) also moves to fallback
-    poll = ex[ex.index("private static boolean scheduleDisableCheck"):]
-    poll = poll[:poll.index("private static void finishDisable")]
+    poll = ex[ex.index("private fun scheduleDisableCheck("):]
+    poll = poll[:poll.index("private fun finishDisable(")]
     assert "if (!scheduleDisableCheck(app, opGen, attempt + 1))" in poll
-    assert "stageCFallback(app, opGen);" in poll
+    assert "stageCFallback(app, opGen)" in poll
     # rollback releases the guard and clears the receiver
-    rb = ex[ex.index("private static void rollback"):]
-    rb = rb[:rb.index("private static boolean scheduleDisableCheck")]
-    assert "disableInProgress = false;" in rb
-    assert "currentReceiver = null;" in rb
-    assert "currentReceiverGen = 0;" in rb
+    rb = ex[ex.index("private fun rollback("):]
+    rb = rb[:rb.index("private fun scheduleDisableCheck(")]
+    assert "disableInProgress = false" in rb
+    assert "currentReceiver = null" in rb
+    assert "currentReceiverGen = 0" in rb
 
 
 def test_a11yoff002_d11_stage_c_fallback():
@@ -4766,11 +4766,11 @@ def test_a11yoff002_d11_stage_c_fallback():
     immediately with a final state check. The state is logged
     distinctly (DISABLED / ENABLED / UNKNOWN)."""
     ex = _executor()
-    assert "private static void stageCFallback" in ex
-    fb = ex[ex.index("private static void stageCFallback"):]
-    fb = fb[:fb.index("private static void rollback")]
+    assert "private fun stageCFallback(" in ex
+    fb = ex[ex.index("private fun stageCFallback("):]
+    fb = fb[:fb.index("private fun rollback(")]
     # immediate re-check first, with the state logged distinctly
-    assert 'Log.i(TAG, "stage C fallback state=" + now);' in fb
+    assert 'Log.i(TAG, "stage C fallback state=$now")' in fb
     assert "if (now == A11yState.DISABLED)" in fb
     # one-shot delayed re-check at the 6 s mark
     assert "DISABLE_CHECK_INTERVAL_MS * DISABLE_CHECK_MAX" in fb
@@ -4784,8 +4784,8 @@ def test_a11yoff002_d11_stage_c_fallback():
     assert "R.string.toast_a11y_off_done" in fb
     assert "R.string.toast_a11y_off_unconfirmed" in fb
     # the fallback logs the state distinctly (P2-01)
-    assert 'Log.i(TAG, "fallback state=" + state);' in fb
-    assert 'Log.i(TAG, "fallback immediate state=" + state);' in fb
+    assert 'Log.i(TAG, "fallback state=$state")' in fb
+    assert 'Log.i(TAG, "fallback immediate state=$state")' in fb
 
 
 def test_a11yoff002_d11_no_token_no_server_stop():
@@ -4804,13 +4804,13 @@ def test_a11yoff002_d11_polling_and_broadcast():
     ex = _executor()
     assert "DISABLE_CHECK_INTERVAL_MS = 2000L" in ex
     assert "DISABLE_CHECK_MAX = 3" in ex
-    poll = ex[ex.index("private static boolean scheduleDisableCheck"):]
-    poll = poll[:poll.index("private static void finishDisable")]
+    poll = ex[ex.index("private fun scheduleDisableCheck("):]
+    poll = poll[:poll.index("private fun finishDisable(")]
     assert "if (!disableInProgress || opGen != disableGeneration)" in poll
     assert "A11yState.DISABLED" in poll
     assert "attempt < DISABLE_CHECK_MAX" in poll
     assert "if (!scheduleDisableCheck(app, opGen, attempt + 1))" in poll
-    bc = ex[ex.index("private static final class DisableBroadcastReceiver"):]
+    bc = ex[ex.index("private class DisableBroadcastReceiver"):]
     assert "if (getAccessibilityState(app) == A11yState.DISABLED)" in bc
     assert 'finishDisable(app, opGen, R.string.toast_a11y_off_done, "broadcast")' in bc
 
@@ -4820,34 +4820,35 @@ def test_a11yoff002_d11_logs():
     ignored-during-execution / success / timeout, with the
     completion trigger type."""
     ex = _executor()
-    assert 'private static final String TAG = "A11yOff";' in ex
-    assert 'Log.i(TAG, "request");' in ex
-    assert 'Log.i(TAG, "already-off");' in ex
-    assert 'Log.i(TAG, "UNKNOWN");' in ex
-    assert 'Log.i(TAG, "ignored-during-execution");' in ex
-    assert 'Log.i(TAG, "not-connected");' in ex
-    assert '(success ? "success" : "timeout") + " via " + trigger' in ex
+    assert 'private const val TAG = "A11yOff"' in ex
+    assert 'Log.i(TAG, "request")' in ex
+    assert 'Log.i(TAG, "already-off")' in ex
+    assert 'Log.i(TAG, "UNKNOWN")' in ex
+    assert 'Log.i(TAG, "ignored-during-execution")' in ex
+    assert 'Log.i(TAG, "not-connected")' in ex
+    assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_11():
-    """The build now carries v2.9.11 / code 64 (was v2.9.10 / code 63
+def test_a11yoff002_version_2_9_12():
+    """The build now carries v2.9.12 / code 65 (was v2.9.11 / code 64
     at SPEC-UI-003)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.11"' in build
-    assert "VERSION_CODE=64" in build
+    assert 'VERSION_NAME="2.9.12"' in build
+    assert "VERSION_CODE=65" in build
 
 
 def test_a11yoff002_attribution_first_line():
-    """New Java files carry the required attribution as line 1."""
-    ex = _executor().splitlines()[0]
-    assert ex == ("// Implemented by MUSE-Koyuki (Muse Spark) "
-                  "\u2014 SPEC-A11Y-OFF-002 v6, 2026-11-09")
-    tile = _a11y_tile().splitlines()[0]
-    assert tile == ("// Implemented by MUSE-Koyuki (Muse Spark) "
-                    "\u2014 SPEC-A11Y-OFF-002 v6, 2026-11-09")
+    """Kotlin migration: the two .kt files carry the migration
+    attribution as line 1 (the SPEC-A11Y-OFF-002 v6 reference
+    stays in the class KDoc, as in batch B)."""
+    for src in (_executor(), _a11y_tile()):
+        first = src.splitlines()[0]
+        assert first == ("// Implemented by MUSE-Koyuki (Muse Spark) "
+                         "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+        assert "SPEC-A11Y-OFF-002 v6" in src
 
 def _locale():
     return _kotlin_source("LocaleTileService.kt")
@@ -5266,15 +5267,54 @@ def test_kotlin_batch_b_java_callers_unchanged():
         assert "BridgeService.pendingStopReason" in src, name
 
 
+_KOTLIN_BATCH_C_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-12")
+
+
+def test_kotlin_batch_c_a11yoff_are_kotlin():
+    """Batch C: the two .java files are gone, the .kt files are
+    the source, and each carries the migration attribution as
+    line 1."""
+    for name in ("A11yOffExecutor", "A11yOffTileService"):
+        assert not _java_source_exists(name + ".java"), name
+        assert _kotlin_source_exists(name + ".kt"), name
+        first = _kotlin_source(name + ".kt").splitlines()[0]
+        assert first == _KOTLIN_BATCH_C_ATTRIBUTION, name
+
+
+def test_kotlin_batch_c_executor_thread_safety():
+    """Batch C (D4 checklist): @JvmStatic on execute() and
+    getAccessibilityState() so the Java widget caller keeps
+    compiling; the LOCK guard and the synchronized entry/completion
+    are preserved (no volatile fields — the guard fields are
+    LOCK-guarded, not volatile)."""
+    src = _kotlin_source("A11yOffExecutor.kt")
+    assert "    @JvmStatic\n    fun execute(" in src
+    assert "    @JvmStatic\n    fun getAccessibilityState(" in src
+    assert "private val LOCK = Any()" in src
+    assert "synchronized(LOCK)" in src
+    assert "private var disableInProgress = false" in src
+    assert "private var disableGeneration = 0" in src
+
+
+def test_kotlin_batch_c_java_callers_unchanged():
+    """Batch C: the Java caller was NOT modified — the widget
+    receiver still calls A11yOffExecutor.execute(context), which
+    only compiles because the Kotlin member is @JvmStatic."""
+    src = _java_source("BridgeWidgetActionReceiver.java")
+    assert "A11yOffExecutor.execute(context);" in src
+
+
 def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     """Pilot (D2): build.sh runs the two-compiler pipeline —
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is Stage 1 batch B's v2.9.11 / code 64."""
+    kotlin-stdlib.jar. Version is Stage 2 batch C's v2.9.12 / code 65."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.11"' in build
-    assert "VERSION_CODE=64" in build
+    assert 'VERSION_NAME="2.9.12"' in build
+    assert "VERSION_CODE=65" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
