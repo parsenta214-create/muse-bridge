@@ -1983,11 +1983,11 @@ def test_p1_01_collect_nodes_early_returns_recycle():
     the region from the method start to the first Node
     allocation (i.e. both early-return branches) must contain
     exactly two node.recycle() calls."""
-    src = _java_source("BridgeAccessibilityService.java")
-    start = src.index("private boolean collectNodes(")
-    end = src.index("Node n = new Node();", start)
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    start = src.index("private fun collectNodes(")
+    end = src.index("val n = Node()", start)
     region = src[start:end]
-    assert region.count("node.recycle();") == 2, region
+    assert region.count("node.recycle()") == 2, region
 
 
 def test_p1_06_accept_loop_checks_generation():
@@ -2352,11 +2352,11 @@ def test_widget_a11y_broadcast_is_explicit():
     widget receiver — since API 26 a manifest receiver cannot
     receive an implicit broadcast, so the send must be explicit
     (setPackage). Runtime receivers in this app are unaffected."""
-    src = _java_source("BridgeAccessibilityService.java")
-    start = src.index("private void broadcastA11yStateChanged()")
-    end = src.index("@Override", start)
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    start = src.index("private fun broadcastA11yStateChanged()")
+    end = src.index("override fun onServiceConnected()", start)
     region = src[start:end]
-    assert ".setPackage(getPackageName())" in region
+    assert ".setPackage(packageName)" in region
 
 
 # --------------------------------------------------------------------------
@@ -4120,15 +4120,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_23():
+def test_locale_tile_version_2_9_24():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.23 / code 76 (was v2.9.22 / code 75 at Stage 3 batch 1)."""
+    carries v2.9.24 / code 77 (was v2.9.23 / code 76 at Stage 3 batch 2)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.23"' in build
-    assert "VERSION_CODE=76" in build
+    assert 'VERSION_NAME="2.9.24"' in build
+    assert "VERSION_CODE=77" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4912,15 +4912,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_23():
-    """The build now carries v2.9.23 / code 76 (was v2.9.22 / code 75
-    at Stage 3 batch 1)."""
+def test_a11yoff002_version_2_9_24():
+    """The build now carries v2.9.24 / code 77 (was v2.9.23 / code 76
+    at Stage 3 batch 2)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.23"' in build
-    assert "VERSION_CODE=76" in build
+    assert 'VERSION_NAME="2.9.24"' in build
+    assert "VERSION_CODE=77" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5760,6 +5760,135 @@ def test_kotlin_stage3_log_activity_in_keyword():
     assert "    var in:" not in body
 
 
+_STAGE3_A11Y_SERVICE_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-13")
+
+
+def test_kotlin_stage3_a11y_service_is_kotlin():
+    """Stage 3 batch 3: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1."""
+    assert not _java_source_exists("BridgeAccessibilityService.java")
+    assert _kotlin_source_exists("BridgeAccessibilityService.kt")
+    first = _kotlin_source("BridgeAccessibilityService.kt").splitlines()[0]
+    assert first == _STAGE3_A11Y_SERVICE_ATTRIBUTION
+
+
+def test_kotlin_stage3_a11y_service_d4_interop():
+    """Stage 3 batch 3 (D4 checklist): the class stays open (the
+    Java original was a non-final public class, CONS-161 P2-02
+    precedent); getInstance() stays a public static via @JvmStatic
+    so the Java caller (HttpBridgeServer) and the Kotlin callers
+    (MainActivity, A11yOffExecutor) keep compiling; the companion
+    stays public for the same reason (CONS-163 P2-01 lesson);
+    ACTION_A11Y_STATE_CHANGED stays a const val so Java and
+    Kotlin keep their field access; the @Volatile instance field
+    and the @Volatile BatchRegistry field stay volatile; the
+    synchronized methods stay @Synchronized (recordEvent,
+    getEvents, the *Internal node actions, runBatchInternal,
+    currentStateInternal, recycleLastNodes). CONS-165 P2-01:
+    the 13 public nested classes stay `open` — the Java
+    originals were non-final public static classes, so closing
+    them would narrow the D4 inheritance contract."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "open class BridgeAccessibilityService : AccessibilityService()" in src
+    for cls in ("ServiceTimeoutException", "BatchMismatchException",
+                "BatchGoneException", "StaleRevisionException",
+                "NodeNotFoundException", "ActionOutcome", "BatchAction",
+                "ActionResult", "BatchResult", "State", "Node",
+                "UiEvent", "EventsResult"):
+        assert "    open class %s" % cls in src, cls
+    assert "    companion object {" in src
+    assert "        @JvmStatic\n        fun getInstance(): BridgeAccessibilityService?" in src
+    assert '        const val ACTION_A11Y_STATE_CHANGED =' in src
+    assert "        @Volatile\n        private var instance: BridgeAccessibilityService?" in src
+    assert "    @Volatile\n    private var batchRegistry: BatchRegistry? = null" in src
+    for name in ("recordEvent(", "getEvents(", "scrollNodeInternal(",
+                 "nodeActionInternal(", "clickNodeInternal(",
+                 "typeNodeInternal(", "runBatchInternal(",
+                 "currentStateInternal(", "recycleLastNodes("):
+        assert "    @Synchronized\n" in src and name in src, name
+    assert src.count("@Synchronized") >= 9
+
+
+def test_kotlin_stage3_a11y_service_jvmfield():
+    """Stage 3 batch 3 (D4): HttpBridgeServer.java reads AND writes
+    the nested data classes' fields directly (br.batchId,
+    ba.actionId = ..., st.texts, e.seq, o.ok, r.hashBefore ...),
+    so every public field of the eight nested classes carries
+    @JvmField — without it Java would see only getters and the
+    server would not compile. The BatchResult copy constructor
+    deliberately does NOT copy `replayed` (the Java original
+    left it at its default and BatchRegistry sets it on the copy
+    afterwards); the lists are shared references, as in Java."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    for field in ("var ok: Boolean", "var snapshotId: Int",
+                  "var actionId: String", "var type: String",
+                  "var nodeId: String", "var x: Int", "var y: Int",
+                  "var durationMs: Long", "var text: String",
+                  "var key: String", "var waitMs: Long",
+                  "var expectChange: Boolean", "var status: String",
+                  "var error: String", "var hashBefore: Int",
+                  "var hashAfter: Int", "var batchId: String",
+                  "var replayed: Boolean",
+                  "var results: MutableList<ActionResult>",
+                  "var stoppedAt: Int", "var stopReason: String",
+                  "var payloadHash: String",
+                  "var completedActionIds: MutableList<String>",
+                  "var failedActionId: String", "var width: Int",
+                  "var height: Int", "var packageName: String",
+                  "var texts: MutableList<String>",
+                  "var revision: Int", "var treeHash: Int",
+                  "var eventSeq: Long", "var snapshotValid: Boolean",
+                  "var snapshotStable: Boolean",
+                  "var nodes: MutableList<Node>",
+                  "var focusedId: String?", "var imeVisible: Boolean",
+                  "var truncated: Boolean", "var parentId: String?",
+                  "var className: String",
+                  "var contentDescription: String", "var left: Int",
+                  "var top: Int", "var right: Int", "var bottom: Int",
+                  "var clickable: Boolean", "var focusable: Boolean",
+                  "var focused: Boolean", "var editable: Boolean",
+                  "var scrollable: Boolean", "var enabled: Boolean",
+                  "var selected: Boolean", "var password: Boolean",
+                  "var inputType: Int", "var resourceId: String",
+                  "var actions: MutableList<String>", "var seq: Long",
+                  "var t: Long", "var desc: String",
+                  "var coalesced: Int",
+                  "var events: MutableList<UiEvent>",
+                  "var latestSeq: Long", "var dropped: Boolean"):
+        assert "        @JvmField " + field in src, field
+    start = src.index("constructor(other: BatchResult)")
+    body = src[start:src.index("\n    }\n", start)]
+    assert "replayed" not in body
+
+
+def test_kotlin_stage3_a11y_service_null_contracts():
+    """Stage 3 batch 3 (D4): the Java original is null-tolerant in
+    these places, so the Kotlin parameters stay nullable — a
+    non-null parameter would throw NPE where Java returned a
+    value or threw a domain exception. pressKey's literal-on-left
+    equalsIgnoreCase returns false for null; takeScreenshot gets
+    the raw ?format= query param (null when absent) and falls
+    back to PNG; nodeAction's actionIdForName(null) is -1, so a
+    null action name is an IllegalArgumentException, not an NPE;
+    resolveFresh's Map.get(null) is a NodeNotFound, not an NPE;
+    runBatch's supersedes is documented nullable (SPEC SS2.6);
+    getForegroundPackage and getBatchRegistry return null when
+    there is no active window / the service has not connected."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "fun pressKey(key: String?): Boolean" in src
+    assert "fun takeScreenshot(scale: Float, format: String?, quality: Int): ByteArray" in src
+    assert "fun typeText(text: String?): Boolean" in src
+    assert "fun scrollNode(nodeId: String?, treeHash: Int, direction: String?): ActionOutcome" in src
+    assert "fun nodeAction(\n        nodeId: String?,\n        treeHash: Int,\n        actionName: String?,\n        args: JSONObject?\n    ): ActionOutcome" in src
+    assert "fun clickNode(nodeId: String?, treeHash: Int): ActionOutcome" in src
+    assert "fun typeNode(nodeId: String?, treeHash: Int, text: String?): ActionOutcome" in src
+    assert "        supersedes: String?\n    ): BatchResult" in src
+    assert "fun getForegroundPackage(): String?" in src
+    assert "fun getBatchRegistry(): BatchRegistry?" in src
+
+
 def test_kotlin_batch_g_bridge_log_interop():
     """Batch G (D4 checklist): an object (all-static Java
     class); @JvmStatic on the ten public methods so the Java
@@ -5848,10 +5977,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the Stage 3 batch 2 build's v2.9.23 / code 76."""
+    kotlin-stdlib.jar. Version is the Stage 3 batch 3 build's v2.9.24 / code 77."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.23"' in build
-    assert "VERSION_CODE=76" in build
+    assert 'VERSION_NAME="2.9.24"' in build
+    assert "VERSION_CODE=77" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -6169,5 +6298,5 @@ def test_cons152_p2_02_batch_registry_volatile():
     """P2-02: the BatchRegistry field is volatile — it is written
     on the service main thread in onServiceConnected() and read
     from HTTP worker threads, so publication must be explicit."""
-    svc = _java_source("BridgeAccessibilityService.java")
-    assert "private volatile BatchRegistry batchRegistry;" in svc
+    svc = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "    @Volatile\n    private var batchRegistry: BatchRegistry? = null" in svc

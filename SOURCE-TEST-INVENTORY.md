@@ -4,8 +4,8 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-13、Stage 3 第2バッチ（LogActivity 変換）時。フルスイート: **540 passed、18 subtests**。
-（test_android_app_client.py は 357 件）
+最終確認: 2026-11-13、Stage 3 第3バッチ（BridgeAccessibilityService 変換）時。フルスイート: **544 passed、18 subtests**。
+（test_android_app_client.py は 361 件）
 内訳：C-01完了時点の実績は 502 passed＋3 failed（build.sh のバージョン断言が
 2.9.16/69 のままだった更新漏れ — 「505 passed」の報告は誤り）→ CONS-152修正で断言を
 2.9.18/71 へ更新（3件復帰）＋新規 15 件（test_batch_outbox.py 8 件＋
@@ -43,6 +43,17 @@ ensureDriveInit 1件のまま。「JVM 上の公開 ABI が1つだけ」とい�
 コメント文の変更によるデバッグ情報の差で、動作は同一）。
 CONS-164 P2-02（未使用 import 3件：UriPermission・OutputStream・Map）を除去。grep で未使用を確認してから削除。ビルド・フルスイートは再実行済み（540 passed）。
 CONS-078 P2-02 のテスト（test_override_p202_drive_init_check_failure_fails_closed）は Kotlin の try 式形式に更新。
+→ Stage 3 第3バッチ（BridgeAccessibilityService 変換）で断言を 2.9.24/77 へ更新（3件リネーム、件数不変）＋新規 4 件
+（test_android_app_client.py の Stage 3 検査 4 件：is_kotlin・D4 interop・jvmfield・null_contracts）。BridgeAccessibilityService.java は削除し
+BridgeAccessibilityService.kt が正本。P1-01・W3・CONS-152 P2-02 の3件は Java ソース読取から Kotlin ソース読取へ切替え。
+CONS-165（琥珀 Tier 1、ADOPT 9.5/10、P0:0/P1:0/P2:3）後の P2-01 修正：公開ネストクラス 13 件を `open` 化（D4 継承契約の維持。CONS-161 P2-02 前例）。
+D4 テストを拡張し 13 クラス全ての `open` を断言（件数不変）。フルスイート 544 passed のまま。再ビルド BUILD OK（v2.9.24/code 77、926,781バイト、
+SHA-256 b3271bd1703f8ad41aeef76f43788cd6e7e995db7392c4dda44e9f37cc10b8df）、javap で 13 クラス全て non-final を確認。P2-02（ループ条件）・P2-03
+（BatchRegistry 公開タイミング）は WON'T FIX として記録（理由は CONS-165 ログ参照）。
+（collectNodes の `node.recycle()` 2件、broadcast の `.setPackage(packageName)`、`@Volatile private var batchRegistry`）。
+ビルドは v2.9.24/code 77 で BUILD OK（926,781バイト、SHA-256 64bcbdd9f41ae8fe1a7c822ed655b0c094cdfea514caaecc557e84c07d886b72）。
+javap で open class＋static getInstance／ACTION_A11Y_STATE_CHANGED＋BatchResult・State の全フィールドが実フィールド（@JvmField）＋BatchResult の2コンストラクタを確認。
+変換中の kotlinc エラー2件：(1) TakeScreenshotCallback は interface のため `object : TakeScreenshotCallback()` は「constructor がない」と拒否される（括弧なし `object : TakeScreenshotCallback` が正解。GestureResultCallback は抽象クラスのため括弧ありのまま）。(2) 二次コンストラクタだけのクラスには無引数コンストラクタが生成されない（`constructor(other) : this()` でも解消せず。明示の空プライマリ `class BatchResult()` が必要）。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
@@ -71,7 +82,7 @@ CONS-078 P2-02 のテスト（test_override_p202_drive_init_check_failure_fails_
 | `BridgeWidgetActionReceiver.java` | 2 | ウィジェットアクション分岐 |
 | `BridgeLog.kt`（バッチGで Java から移行） | 5 | ログ初期化・PII 除去（T-33/T-36は .kt 読取へ更新） |
 | `BatchRegistry.kt`（新規・C-01） | 10 | 永続レジストリ。ソース検査は KNOWN_PATHS ガードとモックの batch 振る舞い（再送禁止・UNKNOWN）。JVM レベルの単一ロックは `javap -c` で確認（monitorenter が lock に集約）。CONS-152修正でソース検査 7 件を追加（P0-01 tombstone 再計算＋admit 順序、P0-02 CORRUPT ガード、P1-01 読み取り不能、P1-04 supersedes 確認必須、P2-01 512KB 上限）。CONS-153修正でソース検査 1 件を追加（P1-01 不存在の積極確認：Files.notExists／undeterminable は CORRUPT／NoSuchFileException 競合は null）。CONS-156修正でソース検査 2 件を追加（P2-1 IN_PROGRESS の payloadHash 照合、P2-3 confirm の 64KB 上限）。javap 再確認（c01-fix3-BatchRegistry.txt）：BatchMismatchException 参照 6 箇所（投げ 3 箇所）、monitorenter 8 箇所のまま |
-| `BridgeAccessibilityService.java` | 3 | P1-01 collectNodes recycle。CONS-152修正で `batchRegistry` の volatile 化（P2-02）をソース検査＋javap で確認 |
+| `BridgeAccessibilityService.kt`（Stage 3 第3バッチで Java から移行） | 7 | P1-01 collectNodes recycle（Kotlin 読取へ切替え）。W3 broadcast の setPackage（Kotlin 読取へ切替え）。CONS-152修正で `batchRegistry` の volatile 化（P2-02、Kotlin 読取へ切替え）＋javap で確認。Stage 3 検査 4 件（is_kotlin・D4 interop・jvmfield・null_contracts）。CONS-165 P2-01：公開ネストクラス 13 件を `open` 化（D4 テストで断言、javap で non-final 確認）。P2-02・P2-03 は WON'T FIX（CONS-165 ログ参照） |
 | `UriPermissionRegistry.kt` | 1 | 権限レジストリ（バッチDで Java から移行） |
 | `PingProber.kt`（バッチEで Java から移行） | 3 | ping 往復測定（※移行前はソース検査ゼロだった） |
 | `BridgeNotificationListener.kt`（バッチFで Java から移行） | 3 | 通知イベント流（※移行前はソース検査ゼロだった） |
