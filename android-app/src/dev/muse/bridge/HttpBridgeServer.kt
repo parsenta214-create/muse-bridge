@@ -1180,7 +1180,13 @@ open class HttpBridgeServer(
             if (head == null || head.isEmpty()) {
                 return status
             }
-            val lines = head.split("\r\n")
+            val lines = head.split("\r\n").dropLastWhile { it.isEmpty() }
+            // Java's String.split drops trailing empty strings, Kotlin's
+            // does not. readHead returns the head ending in "\r\n\r\n",
+            // so without dropLastWhile the trailing "" reaches the header
+            // loop below and every request 400s with "bad header line"
+            // (found by the v2.9.25 smoke test, 2026-11-14). Same idiom
+            // as BridgeLog.kt / VpnBindSelector.kt.
             val req = lines[0].split(" ")
             if (req.size != 3 ||
                 !(req[0] == "GET" || req[0] == "POST") ||

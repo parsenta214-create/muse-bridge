@@ -4207,13 +4207,13 @@ def test_drive001_strings_present():
 
 def test_locale_tile_version_2_9_25():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.25 / code 78 (was v2.9.23 / code 76 at Stage 3 batch 2)."""
+    carries v2.9.26 / code 79 (was v2.9.25 / code 78 at Stage 3 batch 4)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.25"' in build
-    assert "VERSION_CODE=78" in build
+    assert 'VERSION_NAME="2.9.26"' in build
+    assert "VERSION_CODE=79" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -5007,14 +5007,14 @@ def test_a11yoff002_d11_logs():
 
 
 def test_a11yoff002_version_2_9_25():
-    """The build now carries v2.9.25 / code 78 (was v2.9.23 / code 76
+    """The build now carries v2.9.26 / code 79 (was v2.9.25 / code 78
     at Stage 3 batch 2)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.25"' in build
-    assert "VERSION_CODE=78" in build
+    assert 'VERSION_NAME="2.9.26"' in build
+    assert "VERSION_CODE=79" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -6084,10 +6084,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the Stage 3 batch 3 build's v2.9.25 / code 78."""
+    kotlin-stdlib.jar. Version is the v2.9.26 / code 79 smoke-fix build's."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.25"' in build
-    assert "VERSION_CODE=78" in build
+    assert 'VERSION_NAME="2.9.26"' in build
+    assert "VERSION_CODE=79" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -6936,3 +6936,28 @@ def test_cons168_p2_02_no_redundant_null_checks():
     # (The KDoc above mentions `svc!!` in prose; assert on the code line.)
     assert "val registry = svc!!" not in body
     assert "svc ?: throw ServiceUnavailable" in body
+
+
+def test_v2925_smoke_header_split_drops_trailing_empties():
+    """v2.9.25 smoke P0: every HTTP request 400d with "bad header
+    line". Root cause is a Java->Kotlin split trap: Java's
+    String.split drops trailing empty strings, Kotlin's keeps them.
+    readHead returns the head ending in "\\r\\n\\r\\n", so the
+    Kotlin split produced trailing "" lines and the header loop
+    (colon <= 0 -> 400) rejected them — the Java original never saw
+    them. Fix: dropLastWhile { it.isEmpty() } on the header split,
+    the idiom BridgeLog.kt / VpnBindSelector.kt already use for the
+    same trap. The simulation below replays the fixed loop over a
+    well-formed head: no line may trip the 400."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert 'head.split("\\r\\n").dropLastWhile { it.isEmpty() }' in src
+    assert 'val lines = head.split("\\r\\n")\n' not in src
+    head = ("GET /state HTTP/1.1\r\nHost: 100.111.74.42\r\n"
+            "X-Bridge-Token: deadbeef\r\n\r\n")
+    lines = head.split("\r\n")
+    # Kotlin split keeps the trailing empties; the fix drops only them.
+    assert lines[-2:] == ["", ""]
+    while lines and lines[-1] == "":
+        lines.pop()
+    for line in lines[1:]:
+        assert ":" in line and line.index(":") > 0, line
