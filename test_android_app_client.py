@@ -2336,14 +2336,14 @@ def test_widget_updates_pushed_from_service_and_mode_toggle():
     start = svc.index("override fun onDestroy()")
     end = svc.index("override fun onBind(", start)
     assert "BridgeWidgetProvider.updateAllWidgets(this)" in svc[start:end]
-    main = _java_source("MainActivity.java")
+    main = _kotlin_source("MainActivity.kt")
     start = main.index("modeButton.setOnClickListener")
     # NOTE (2026-11-08, v2.8.6): the end marker was the pre-redesign
     # `Button notif = findViewById`; the current code declares the
     # field as `notifButton` and assigns it with
     # `notifButton = findViewById(...)`. Same region, same intent.
     end = main.index("notifButton = findViewById", start)
-    assert ("BridgeWidgetProvider.updateAllWidgets(MainActivity.this)"
+    assert ("BridgeWidgetProvider.updateAllWidgets(this)"
             in main[start:end])
 
 
@@ -4120,23 +4120,23 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_21():
+def test_locale_tile_version_2_9_22():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.21 / code 74 (was v2.9.20 / code 73 at CONS-158)."""
+    carries v2.9.22 / code 75 (was v2.9.21 / code 74 at C-01-4 P0 fix)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.21"' in build
-    assert "VERSION_CODE=74" in build
+    assert 'VERSION_NAME="2.9.22"' in build
+    assert "VERSION_CODE=75" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
     """First-init hooks: MainActivity, BootReceiver and the
     server constructor all run ensureDriveInit before any
     app-owned state file is created."""
-    main = _java_source("MainActivity.java")
-    assert "LogActivity.ensureDriveInit(this);" in main
+    main = _kotlin_source("MainActivity.kt")
+    assert "LogActivity.ensureDriveInit(this)" in main
     boot = _kotlin_source("BootReceiver.kt")
     assert "LogActivity.ensureDriveInit(" in boot
     assert boot.index("ensureDriveInit") < boot.index("BridgeLog.init")
@@ -4351,7 +4351,7 @@ def _a11y_tile():
 
 
 def _a11y_main():
-    return _java_source("MainActivity.java")
+    return _kotlin_source("MainActivity.kt")
 
 
 def _a11y_tile_block():
@@ -4905,15 +4905,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_21():
-    """The build now carries v2.9.21 / code 74 (was v2.9.20 / code 73
-    at CONS-158)."""
+def test_a11yoff002_version_2_9_22():
+    """The build now carries v2.9.22 / code 75 (was v2.9.21 / code 74
+    at C-01-4 P0 fix)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.21"' in build
-    assert "VERSION_CODE=74" in build
+    assert 'VERSION_NAME="2.9.22"' in build
+    assert "VERSION_CODE=75" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5249,12 +5249,16 @@ def test_kotlin_pilot_appversion_thread_safety():
 def test_kotlin_pilot_appversion_java_callers_unchanged():
     """Pilot: the Java callers were NOT modified — they still call
     AppVersion.name(ctx) / AppVersion.code(ctx) as statics, which
-    only compiles because the Kotlin members are @JvmStatic."""
-    for name in ("HttpBridgeServer.java", "LogActivity.java",
-                 "MainActivity.java"):
+    only compiles because the Kotlin members are @JvmStatic.
+    (Stage 3 batch 1: MainActivity is Kotlin now and calls them
+    the same way.)"""
+    for name in ("HttpBridgeServer.java", "LogActivity.java"):
         src = _java_source(name)
         assert "AppVersion.name(" in src, name
         assert "AppVersion.code(" in src, name
+    src = _kotlin_source("MainActivity.kt")
+    assert "AppVersion.name(" in src
+    assert "AppVersion.code(" in src
 
 
 def test_kotlin_pilot_interop_fixture_bidirectional():
@@ -5332,15 +5336,18 @@ def test_kotlin_batch_b_java_callers_unchanged():
     """Batch B: the Java callers were NOT modified — they still call
     BridgeService.isRunning() and set BridgeService.pendingStopReason
     as before, which only compiles because the Kotlin members are
-    @JvmStatic / @JvmField."""
-    for name in ("MainActivity.java", "BridgeWidgetActionReceiver.java",
+    @JvmStatic / @JvmField. (Stage 3 batch 1: MainActivity is Kotlin
+    now and calls them the same way.)"""
+    for name in ("BridgeWidgetActionReceiver.java",
                  "BridgeWidgetProvider.java"):
         src = _java_source(name)
         assert "BridgeService.isRunning()" in src, name
-    for name in ("MainActivity.java",
-                 "BridgeWidgetActionReceiver.java"):
+    for name in ("BridgeWidgetActionReceiver.java",):
         src = _java_source(name)
         assert "BridgeService.pendingStopReason" in src, name
+    main = _kotlin_source("MainActivity.kt")
+    assert "BridgeService.isRunning()" in main
+    assert "BridgeService.pendingStopReason" in main
 
 
 _KOTLIN_BATCH_C_ATTRIBUTION = (
@@ -5496,14 +5503,15 @@ def test_kotlin_batch_e_pingprober_interop():
 
 def test_kotlin_batch_e_java_callers_unchanged():
     """Batch E: the Java callers were NOT modified — MainActivity
-    still probes with a lambda and reads Result fields directly,
+    (Kotlin since Stage 3 batch 1) still probes with a lambda and
+    reads Result fields directly,
     and HttpBridgeServer still records the client IP and reads
     the last result's fields. That only compiles because the
     Kotlin members are @JvmStatic and the Result fields are
     @JvmField."""
-    main = _java_source("MainActivity.java")
-    assert "PingProber.probe(result -> runOnUiThread(this::updatePingDisplay));" in main
-    assert "PingProber.Result r = PingProber.getLastResult();" in main
+    main = _kotlin_source("MainActivity.kt")
+    assert "PingProber.probe { runOnUiThread { updatePingDisplay() } }" in main
+    assert "val r = PingProber.getLastResult()" in main
     assert "PingProber.getLastClientIp()" in main
     assert "PingProber.isProbing()" in main
     assert "r.target" in main
@@ -5574,7 +5582,8 @@ def test_kotlin_batch_f_java_callers_unchanged():
     """Batch F: the Java callers were NOT modified — HttpBridgeServer
     still drives the listener the same way (accepting, quiesce,
     access grant, instance, events, open/reply) and reads the
-    result/event fields directly, and MainActivity still checks
+    result/event fields directly, and MainActivity (Kotlin since
+    Stage 3 batch 1) still checks
     the access grant. That only compiles because the Kotlin
     members are @JvmStatic and the fields are @JvmField."""
     srv = _java_source("HttpBridgeServer.java")
@@ -5592,7 +5601,7 @@ def test_kotlin_batch_f_java_callers_unchanged():
     assert "e.seq" in srv
     assert "e.type" in srv
     assert "e.key" in srv
-    main = _java_source("MainActivity.java")
+    main = _kotlin_source("MainActivity.kt")
     assert "BridgeNotificationListener.isAccessGranted(this)" in main
 
 
@@ -5611,6 +5620,72 @@ def test_kotlin_batch_g_bridge_log_is_kotlin():
     assert _kotlin_source_exists("BridgeLog.kt")
     first = _kotlin_source("BridgeLog.kt").splitlines()[0]
     assert first == _KOTLIN_BATCH_G_ATTRIBUTION
+
+
+_STAGE3_MAIN_ACTIVITY_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-13")
+
+
+def test_kotlin_stage3_main_activity_is_kotlin():
+    """Stage 3 batch 1: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1."""
+    assert not _java_source_exists("MainActivity.java")
+    assert _kotlin_source_exists("MainActivity.kt")
+    first = _kotlin_source("MainActivity.kt").splitlines()[0]
+    assert first == _STAGE3_MAIN_ACTIVITY_ATTRIBUTION
+
+
+def test_kotlin_stage3_main_activity_d4_interop():
+    """Stage 3 batch 1 (D4 checklist): the public statics stay
+    Java-visible — @JvmStatic on the seven public methods so the
+    Java callers (HttpBridgeServer, BridgeWidgetProvider) keep
+    compiling, const val for the five public constants so Java
+    keeps its field access (MainActivity.PREFS, ...); the class
+    still extends Activity, and stays open because the Java
+    original was a non-final public class (CONS-161 P2-02)."""
+    src = _kotlin_source("MainActivity.kt")
+    assert "open class MainActivity : Activity()" in src
+    assert "companion object" in src
+    for name in ("getOrCreateToken(", "getPersistedMode(", "setPersistedMode(",
+                 "isTailscaleIp(", "findTailscaleIps(", "findTailscaleIp(",
+                 "isAccessibilityEnabled("):
+        assert "        @JvmStatic\n        fun " + name in src, name
+    for name in ("PREFS", "KEY_TOKEN", "KEY_MODE", "MODE_MINIMAL",
+                 "MODE_BANKING_SAFE"):
+        assert "        const val " + name + " = " in src, name
+
+
+def test_kotlin_stage3_main_activity_setpersistedmode_null_contract():
+    """CONS-161 P2-01 regression: setPersistedMode keeps the Java
+    null contract — the Java original used
+    MODE_BANKING_SAFE.equals(mode), null-safe, falling back to
+    MODE_MINIMAL. The Kotlin parameter must be String? (a non-null
+    String would throw NPE on a Java null call) and the comparison
+    must stay null-safe (==)."""
+    src = _kotlin_source("MainActivity.kt")
+    assert "fun setPersistedMode(ctx: Context, mode: String?)" in src
+    start = src.index("fun setPersistedMode(ctx: Context, mode: String?)")
+    end = src.index("fun isTailscaleIp(", start)
+    body = src[start:end]
+    assert "MODE_BANKING_SAFE == mode" in body
+    assert "MODE_MINIMAL" in body
+
+
+def test_kotlin_stage3_main_activity_refreshaddress_label():
+    """CONS-162 P1-01 regression: refreshAddress() must drive the
+    address toggle label from addressRevealed, not tokenRevealed.
+    The Java original used addressRevealed; the first Kotlin
+    conversion copied refreshToken's tokenRevealed by mistake
+    (a D5 behavioral regression Mitsuki caught by direct
+    inspection of the original)."""
+    src = _kotlin_source("MainActivity.kt")
+    start = src.index("private fun refreshAddress()")
+    end = src.index("private fun probePing()", start)
+    body = src[start:end]
+    assert ("if (addressRevealed) R.string.token_hide "
+            "else R.string.token_show") in body
+    assert "tokenRevealed" not in body
 
 
 def test_kotlin_batch_g_bridge_log_interop():
@@ -5700,10 +5775,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the C-01-4 P0-fix build's v2.9.21 / code 74."""
+    kotlin-stdlib.jar. Version is the Stage 3 batch 1 build's v2.9.22 / code 75."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.21"' in build
-    assert "VERSION_CODE=74" in build
+    assert 'VERSION_NAME="2.9.22"' in build
+    assert "VERSION_CODE=75" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -5787,7 +5862,7 @@ def test_kotlin_batch_a_java_callers_unchanged():
     assert "decision.bindInterface" in server
     assert "decision.degradedReason" in server
     assert "decision.isBind()" in server
-    main = _java_source("MainActivity.java")
+    main = _kotlin_source("MainActivity.kt")
     assert "VpnBindSelector.isTailscaleRange(ip)" in main
 
 
