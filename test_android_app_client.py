@@ -4120,15 +4120,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_20():
+def test_locale_tile_version_2_9_21():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.20 / code 73 (was v2.9.19 / code 72 at CONS-155)."""
+    carries v2.9.21 / code 74 (was v2.9.20 / code 73 at CONS-158)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.20"' in build
-    assert "VERSION_CODE=73" in build
+    assert 'VERSION_NAME="2.9.21"' in build
+    assert "VERSION_CODE=74" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4905,15 +4905,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_20():
-    """The build now carries v2.9.20 / code 73 (was v2.9.19 / code 72
-    at CONS-155)."""
+def test_a11yoff002_version_2_9_21():
+    """The build now carries v2.9.21 / code 74 (was v2.9.20 / code 73
+    at CONS-158)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.20"' in build
-    assert "VERSION_CODE=73" in build
+    assert 'VERSION_NAME="2.9.21"' in build
+    assert "VERSION_CODE=74" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5700,10 +5700,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the CONS-156 fix build's v2.9.20 / code 73."""
+    kotlin-stdlib.jar. Version is the C-01-4 P0-fix build's v2.9.21 / code 74."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.20"' in build
-    assert "VERSION_CODE=73" in build
+    assert 'VERSION_NAME="2.9.21"' in build
+    assert "VERSION_CODE=74" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build

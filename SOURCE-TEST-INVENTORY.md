@@ -4,7 +4,8 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-13、CONS-157指摘対応時。フルスイート: **532 passed、18 subtests**。
+最終確認: 2026-11-13、C-01-4 P0修正時。フルスイート: **532 passed、18 subtests**。
+（test_android_app_client.py は 349 件）
 内訳：C-01完了時点の実績は 502 passed＋3 failed（build.sh のバージョン断言が
 2.9.16/69 のままだった更新漏れ — 「505 passed」の報告は誤り）→ CONS-152修正で断言を
 2.9.18/71 へ更新（3件復帰）＋新規 15 件（test_batch_outbox.py 8 件＋
@@ -18,7 +19,9 @@ _locked 全適用・VM側 P1-01 判定 2 件、test_android_app_client.py の CO
 の CONS-156 検査 3 件：P2-1 IN_PROGRESS payloadHash ソース検査・P2-2 失敗後の outbox
 未キャッシュ振る舞い・P2-3 confirm 64KB ソース検査）→ CONS-157指摘対応で新規 1 件
 （test_android_app_client.py の CONS-157 成功経路テスト：_batch_outbox() が
-BatchOutbox インスタンスを返すこと。コード変更なし・ビルドは v2.9.20／code 73 のまま）。
+BatchOutbox インスタンスを返すこと。コード変更なし・ビルドは v2.9.20／code 73 のまま）→ C-01-4 P0修正で
+断言を 2.9.21/74 へ更新（3件リネーム、件数不変）。新規テストなし — 修正は Kotlin 側のみで、JVM レベルの
+動作テストは未整備（既知の gap、CONS-130 P2-02）。検証はコンパイル＋フルスイート＋実機 C-01-4 再テスト。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 

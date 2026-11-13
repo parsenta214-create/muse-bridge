@@ -553,12 +553,24 @@ class BatchRegistry(private val dir: File) {
                     "complete: record not IN_PROGRESS for " + batchId)
                 return
             }
-            if (result.status !in TERMINAL_STATUSES) {
+            // BatchResult.status is the wire format (lowercase:
+            // "completed" / "partial" / "failed"); the stored record
+            // status is the SPEC §2.2 vocabulary (uppercase:
+            // COMPLETED / PARTIAL / FAILED). The two were compared
+            // directly, so every result failed this check and was
+            // never persisted (live failure 2026-11-13, C-01-4: a
+            // re-sent completed batch_id answered "running", and a
+            // restart would convert every completed record to
+            // UNKNOWN). Normalize at this boundary; the stored
+            // `result` JSON keeps its lowercase status, identical
+            // to the original HTTP response (§2.2).
+            val recordStatus = result.status.uppercase()
+            if (recordStatus !in TERMINAL_STATUSES) {
                 BridgeLog.log("batch_registry",
                     "complete: non-terminal result status for " + batchId + ": " + result.status)
                 return
             }
-            val updated = existing.copy(status = result.status, result = result)
+            val updated = existing.copy(status = recordStatus, result = result)
             if (recordJsonBytes(updated) > MAX_RECORD_BYTES) {
                 // The completed record exceeds the cap: treat it as
                 // a persist failure (SPEC §2.2) — see below.
@@ -1103,7 +1115,15 @@ class BatchRegistry(private val dir: File) {
         }
         result.snapshotId = requireInt(obj, "snapshot_id")
         result.status = requireString(obj, "status")
-        if (result.status !in TERMINAL_STATUSES) {
+        // The stored result keeps the wire format (lowercase:
+        // "completed" / "partial" / "failed"), identical to the
+        // original HTTP response (§2.2) — so the terminal check
+        // must normalize, like complete() does. Comparing the
+        // lowercase wire status against the uppercase SPEC
+        // vocabulary directly would reject every correctly
+        // persisted result on the next load (live failure
+        // 2026-11-13, C-01-4 follow-up).
+        if (result.status.uppercase() !in TERMINAL_STATUSES) {
             throw IllegalArgumentException("stored result is not terminal: " + batchId)
         }
         result.payloadHash = requireString(obj, "payload_hash")
