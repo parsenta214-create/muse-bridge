@@ -169,6 +169,10 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # batch_id instead of the one in the request, so the adapter's
     # batch_id check can be tested. Reset by the fixture.
     batch_id_override = None
+    # C-01 (SPEC §2.10): when set to "unknown", /batch answers with
+    # the UNKNOWN shape (no results, no payload_hash), so the
+    # adapter's unknown handling can be tested. Reset by the fixture.
+    batch_status_override = None
     # A-3 (v1.9): how /state answers, per test. "normal" always returns
     # a stable snapshot; "unstable_then_same" returns an unstable
     # snapshot first, then the same tree hash stable; "unstable_then_
@@ -512,6 +516,15 @@ class MockAppHandler(BaseHTTPRequestHandler):
                         "/scroll_node", "/node_action"):
                 return self._send_json(503, _a11y_off_body(base))
         if self.path == "/batch":
+            # C-01 (SPEC §2.10): the UNKNOWN shape — no results
+            # array, no payload_hash, just the status and a message.
+            if MockAppHandler.batch_status_override == "unknown":
+                return self._send_json(200, {
+                    "ok": True, "batch_id": payload.get("batch_id"),
+                    "status": "unknown", "replayed": False,
+                    "message": "batch outcome is unknown — do not "
+                    "re-send this batch_id; check the phone and "
+                    "confirm manually"})
             # A-4 (v1.9): a realistic batch response, with the status,
             # payload hash, and completed/failed action ids. Step 4:
             # the payload_hash is the real content hash (computed the
@@ -659,10 +672,11 @@ class MockAppHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def mock_app(monkeypatch):
+def mock_app(monkeypatch, tmp_path):
     MockAppHandler.requests.clear()
     MockAppHandler.fail_next.clear()
     MockAppHandler.batch_id_override = None
+    MockAppHandler.batch_status_override = None
     MockAppHandler.state_mode = "normal"
     MockAppHandler.state_calls = 0
     MockAppHandler.text_after = 0
@@ -676,6 +690,17 @@ def mock_app(monkeypatch):
     MockAppHandler.operation_notifications = 0
     MockAppHandler.disconnect_during_launch = False
     MockAppHandler.launch_delay_s = 0.0
+    # C-01 (SPEC-BATCH-PERSIST-001 §2.9): every test gets a fresh,
+    # initialized outbox in a temp dir — never the real
+    # ~/.muse-bridge. batch() requires an initialized outbox, and
+    # the durability gate ships ON (CONS-152 P1-02), so the
+    # fixture also records the durability verification.
+    outbox_dir = tmp_path / "outbox"
+    monkeypatch.setenv("MUSE_BRIDGE_OUTBOX_DIR", str(outbox_dir))
+    outbox = ab.bridge_protocol.BatchOutbox(str(outbox_dir))
+    outbox.initialize("test fixture — fresh outbox")
+    outbox.record_durability_verified(
+        "file_atomic_v1", "test fixture — crash-durability check passed")
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockAppHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -915,9 +940,12 @@ def test_step3_query_validation_rejects_before_request(mock_app):
 def test_step4_batch_registry_enforced_by_adapter(mock_app):
     """Step 4 (v1.2.0): the adapter's batch() goes through the
     registry. A second call with the same batch_id and different
-    content raises STALE_REVISION and sends NO request; a second
-    call with identical content re-sends (the server replays from
-    its cache) and the registry records the outcome."""
+    content raises STALE_REVISION and sends NO request. C-01
+    (SPEC-BATCH-PERSIST-001 §2.9): a second call with identical
+    content is ALSO refused — the VM never reuses a batch_id
+    (BATCH_ID_REUSED, no request sent). The old behaviour (an
+    identical re-send answered from the server cache) is superseded
+    by the SPEC."""
     adapter = ab.AndroidAdapter(actions_enabled=True)
     ProtocolError = ab.bridge_protocol.ProtocolError
     actions = [{"action_id": "a1", "type": "wait", "wait_ms": 500}]
@@ -936,11 +964,18 @@ def test_step4_batch_registry_enforced_by_adapter(mock_app):
     posts_after = len([r for r in MockAppHandler.requests
                        if r[0] == "POST" and r[1] == "/batch"])
     assert posts_after == posts_before  # nothing was sent
-    # Identical re-send goes out again (the server answers from
-    # its cache); the registry marks it as a replay.
-    result2 = adapter.batch("b-reg", 123456, actions)
-    assert result2["status"] == "completed"
-    assert adapter._batch_registry.get("b-reg")["status"] == "completed"
+    # An identical re-send is refused too (C-01: the VM never
+    # reuses a batch_id), and nothing is sent.
+    with pytest.raises(ProtocolError) as ctx:
+        adapter.batch("b-reg", 123456, actions)
+    assert ctx.value.code == "BATCH_ID_REUSED"
+    posts_after2 = len([r for r in MockAppHandler.requests
+                        if r[0] == "POST" and r[1] == "/batch"])
+    assert posts_after2 == posts_before  # nothing was sent
+    # The outbox still holds the first (completed) outcome.
+    outbox_record = adapter._batch_outbox().get_by_batch_id("b-reg")
+    assert outbox_record is not None
+    assert outbox_record["state"] == "result_received"
 
 
 def test_step4_batch_id_mismatch_rejected(mock_app):
@@ -959,6 +994,35 @@ def test_step4_batch_id_mismatch_rejected(mock_app):
     record = adapter._batch_registry.get("b-mismatch")
     assert record["status"] is None
     assert record["payload_hash"] is None
+    # C-01 (SPEC §2.9): the response is unusable, so our batch's
+    # outcome is unknown — the outbox records it as undetermined.
+    outbox_record = adapter._batch_outbox().get_by_batch_id("b-mismatch")
+    assert outbox_record is not None
+    assert outbox_record["state"] == "outcome_unknown"
+
+
+def test_app_batch_server_unknown_is_never_resent(mock_app):
+    """C-01 (SPEC §2.10): when the server answers status "unknown",
+    batch() raises BATCH_OUTCOME_UNKNOWN, the outbox records the
+    logical batch as undetermined, and nothing is re-sent. The
+    in-memory registry records the unknown outcome (no payload
+    hash)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    ProtocolError = ab.bridge_protocol.ProtocolError
+    MockAppHandler.batch_status_override = "unknown"
+    actions = [{"action_id": "a1", "type": "wait", "wait_ms": 500}]
+    with pytest.raises(ProtocolError) as ctx:
+        adapter.batch("b-unknown", 123456, actions)
+    assert ctx.value.code == "BATCH_OUTCOME_UNKNOWN"
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/batch"]
+    assert len(posts) == 1  # sent once, never re-sent
+    record = adapter._batch_registry.get("b-unknown")
+    assert record["status"] == "unknown"
+    assert record["payload_hash"] is None
+    outbox_record = adapter._batch_outbox().get_by_batch_id("b-unknown")
+    assert outbox_record is not None
+    assert outbox_record["state"] == "outcome_unknown"
 
 
 def test_app_phase2_actions_refused_without_flag(mock_app):
@@ -1120,20 +1184,30 @@ def test_app_get_retries_transient_503(mock_app, monkeypatch):
     assert len(gets) == 3
 
 
-def test_app_batch_retries_transient_503(mock_app, monkeypatch):
-    """Client improvement 1: POST /batch retries with the SAME
-    batch_id (server-side idempotency, A-4), so a transient 503
-    does not lose the batch."""
+def test_app_batch_never_retries_transient_503(mock_app, monkeypatch):
+    """C-01 (SPEC-BATCH-PERSIST-001 §2.9): POST /batch is NEVER
+    retried. A transient 503 means the outcome is undetermined —
+    the batch is sent exactly once, the outbox records
+    "outcome_unknown", and batch() raises BATCH_OUTCOME_UNKNOWN
+    (never re-sending the same batch_id, never re-issuing the
+    logical batch under a new ID). The old A-4 retry behaviour is
+    superseded by the SPEC."""
     monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
     MockAppHandler.fail_next[("POST", "/batch")] = 2
     adapter = ab.AndroidAdapter(actions_enabled=True)
-    result = adapter.batch("retry-1", 123456,
-                           [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
-    assert result["status"] == "completed"
+    ProtocolError = ab.bridge_protocol.ProtocolError
+    with pytest.raises(ProtocolError) as ctx:
+        adapter.batch("retry-1", 123456,
+                      [{"action_id": "a1", "type": "wait", "wait_ms": 100}])
+    assert ctx.value.code == "BATCH_OUTCOME_UNKNOWN"
     posts = [r for r in MockAppHandler.requests
              if r[0] == "POST" and r[1] == "/batch"]
-    assert len(posts) == 3
+    assert len(posts) == 1  # exactly once — no retry
     assert all(p[2]["batch_id"] == "retry-1" for p in posts)
+    # The outbox recorded the undetermined outcome.
+    record = adapter._batch_outbox().get_by_batch_id("retry-1")
+    assert record is not None
+    assert record["state"] == "outcome_unknown"
 
 
 def test_app_click_does_not_retry(mock_app, monkeypatch):
@@ -4046,15 +4120,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_16():
+def test_locale_tile_version_2_9_20():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.16 / code 69 (was v2.9.15 / code 68 at batch F)."""
+    carries v2.9.20 / code 73 (was v2.9.19 / code 72 at CONS-155)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.16"' in build
-    assert "VERSION_CODE=69" in build
+    assert 'VERSION_NAME="2.9.20"' in build
+    assert "VERSION_CODE=73" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4831,15 +4905,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_16():
-    """The build now carries v2.9.16 / code 69 (was v2.9.15 / code 68
-    at batch F)."""
+def test_a11yoff002_version_2_9_20():
+    """The build now carries v2.9.20 / code 73 (was v2.9.19 / code 72
+    at CONS-155)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.16"' in build
-    assert "VERSION_CODE=69" in build
+    assert 'VERSION_NAME="2.9.20"' in build
+    assert "VERSION_CODE=73" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5626,10 +5700,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is Stage 2 batch G's v2.9.16 / code 69."""
+    kotlin-stdlib.jar. Version is the CONS-156 fix build's v2.9.20 / code 73."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.16"' in build
-    assert "VERSION_CODE=69" in build
+    assert 'VERSION_NAME="2.9.20"' in build
+    assert "VERSION_CODE=73" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -5723,3 +5797,229 @@ def test_kotlin_batch_a_attribution_first_line():
     for name in ("BootReceiver.kt", "VpnBindSelector.kt"):
         first = _kotlin_source(name).splitlines()[0]
         assert first == _KOTLIN_PILOT_ATTRIBUTION, name
+
+
+# ---------------------------------------------------------------------------
+# C-01 CONS-152 fixes — BatchRegistry source guards
+#
+# There is no JVM test harness for BatchRegistry (the CONS-130 P2-02
+# gap), so the phone-side fixes are pinned by source inspection
+# here, in the established style of the Kotlin batch tests above.
+# The behaviour itself is covered by the live kill-and-restart /
+# fault-injection tests (P1-05, needs the installed build + user).
+# ---------------------------------------------------------------------------
+
+def _cons152_registry_source():
+    return _kotlin_source("BatchRegistry.kt")
+
+
+def _cons152_admit_source():
+    """The admit() body, from its signature to the next top-level
+    function — the scope the ordering assertions check."""
+    src = _cons152_registry_source()
+    start = src.index("    fun admit(")
+    end = src.index("\n    /**\n     * Step 4 of the fixed order", start)
+    return src[start:end]
+
+
+def test_cons152_p0_01_unknown_tombstone_recomputed():
+    """P0-01: every IN_PROGRESS -> UNKNOWN conversion recomputes
+    the tombstone to max(createdAt + 20 min, unknownAt) + 24 h
+    (SPEC §2.2 / §2.7), through one helper — init(), the
+    result-persist-failure path, and the restore path."""
+    src = _cons152_registry_source()
+    assert "private fun unknownTombstoneUntil(createdAt: Long, unknownAt: Long): Long" in src
+    assert "maxOf(createdAt + RESULT_TTL_MS + TOMBSTONE_MS, unknownAt) + UNKNOWN_RETENTION_MS" in src
+    assert "private fun toUnknown(rec: BatchRecord, unknownAt: Long): BatchRecord" in src
+    # All three conversion sites go through toUnknown(), never a
+    # bare copy() that leaves the old tombstone in place.
+    assert src.count("toUnknown(") >= 4  # definition + init + restore + markUnknown
+    assert 'rec.copy(status = "UNKNOWN", result = null, unknownAt = now)' not in src
+    assert 'existing.copy(\n            status = "UNKNOWN"' not in src
+    # Load-time migration: an UNKNOWN record written by the
+    # pre-fix build gets its stale tombstone recomputed on load.
+    assert "Load-time migration (CONS-152 P0-01)" in src
+
+
+def test_cons152_p0_01_admit_unknown_before_tombstone():
+    """P0-01: in admit(), the UNKNOWN branch (with its hash check)
+    is evaluated BEFORE the `now > tombstoneUntil` expiry
+    fall-through, so an UNKNOWN record is always answered UNKNOWN
+    and never treated as a new record."""
+    admit = _cons152_admit_source()
+    unknown_at = admit.index('existing.status == "UNKNOWN"')
+    tombstone_at = admit.index("now > existing.tombstoneUntil")
+    assert unknown_at < tombstone_at
+    assert "UNKNOWN is always answered UNKNOWN, before" in admit
+
+
+def test_cons152_p0_02_durability_verify_corrupt_guard():
+    """P0-02: recordDurabilityVerified() refuses on a CORRUPT store
+    (503 batch_store_unavailable) and never persists over it.
+    The same guard applies to confirm() and completeRecovery();
+    the recovery paths (restore / clear) are deliberately exempt."""
+    src = _cons152_registry_source()
+    start = src.index("    fun recordDurabilityVerified(")
+    end = src.index("\n    /** The durability gate", start)
+    body = src[start:end]
+    assert "requireNotCorruptLocked()" in body
+    assert "private fun requireNotCorruptLocked()" in src
+    assert 'throw BatchStoreException("batch_store_unavailable"' in src
+    confirm_start = src.index("    ): ManualConfirmation {")
+    confirm_body = src[confirm_start:confirm_start + 600]
+    assert "requireNotCorruptLocked()" in confirm_body
+    recovery_start = src.index("    fun completeRecovery(")
+    recovery_body = src[recovery_start:recovery_start + 600]
+    assert "requireNotCorruptLocked()" in recovery_body
+    # restoreFromBackup and clearStore must NOT take the guard —
+    # they are how a corrupt store is recovered.
+    restore_start = src.index("    fun restoreFromBackup(")
+    restore_body = src[restore_start:src.index("    /**\n     * Deliberately clear", restore_start)]
+    assert "requireNotCorruptLocked()" not in restore_body
+
+
+def test_cons152_p1_01_unreadable_is_corrupt():
+    """P1-01: readFileText() returns null only when the file does
+    not exist; a file that exists but cannot be read throws, and
+    init() classifies that as CORRUPT (fail-closed), never EMPTY."""
+    src = _cons152_registry_source()
+    assert "return null\n        }\n        } catch" not in src
+    assert "catch (_: Exception) {\n            return null" not in src
+    assert "store unreadable: " in src
+    assert "The file exists but cannot be read: CORRUPT" in src
+
+
+def test_cons153_p1_01_absence_positively_confirmed():
+    """CONS-153 P1-01: readFileText() returns null ONLY when
+    absence is positively confirmed (Files.notExists() — the
+    ENOENT equivalent). File.exists() / Files.exists() return
+    false both when the file does not exist AND when its
+    existence cannot be determined, so neither may decide "new
+    store": an undeterminable status throws, and init() still
+    classifies that throw as CORRUPT, never EMPTY. A
+    NoSuchFileException on open (deleted between the check and
+    the open) is the ENOENT race and returns null."""
+    src = _cons152_registry_source()
+    start = src.index("    private fun readFileText(")
+    end = src.index("\n    /**\n     * The admission unit", start)
+    body = src[start:end]
+    assert "Files.notExists(path)" in body
+    assert "if (!file.exists()) return null" not in body
+    assert "Files.exists(path)" in body
+    assert "undeterminable status" in body
+    assert "NoSuchFileException" in body
+    assert "Files.newInputStream(path)" in body
+    assert "FileInputStream" not in body
+    init_start = src.index("    fun init() {")
+    init_body = src[init_start:src.index("    private fun ensureInitialized()", init_start)]
+    assert "store unreadable: " in init_body
+    assert "StoreState.CORRUPT" in init_body
+
+
+def test_cons156_p2_01_in_progress_checks_payload_hash():
+    """CONS-156 P2-1: admit() must compare payloadHash for an
+    IN_PROGRESS record before answering RUNNING — a re-send of the
+    same batch_id with different content is a 409
+    (BatchMismatchException), not "running". The same batch_id must
+    never name two payloads."""
+    admit = _cons152_admit_source()
+    start = admit.index('if (existing.status == "IN_PROGRESS")')
+    branch = admit[start:admit.index('if (existing.status == "UNKNOWN")', start)]
+    assert "existing.payloadHash != payloadHash" in branch
+    assert "BatchMismatchException" in branch
+    assert "is already in use with different content" in branch
+    assert branch.index("existing.payloadHash != payloadHash") < branch.index(
+        "AdmitKind.RUNNING")
+
+
+def test_cons156_p2_02_failed_ready_leaves_outbox_unset(mock_app, tmp_path):
+    """CONS-156 P2-2 (behavioral): _batch_outbox() must not cache
+    the outbox when require_ready() fails. A failed startup check
+    must leave adapter._outbox None, so the next batch() call runs
+    the startup decision table again (OUTBOX_NOT_INITIALIZED)
+    instead of skipping it and failing later as OUTBOX_CORRUPT."""
+    uninitialized = tmp_path / "outbox-p2-02-uninit"
+    adapter = ab.AndroidAdapter(actions_enabled=True,
+                                outbox_dir=str(uninitialized))
+    actions = [{"action_id": "a1", "type": "tap", "x": 1, "y": 2}]
+    with pytest.raises(ab.bridge_protocol.ProtocolError) as first:
+        adapter.batch("b-p2-02-first", 123456, actions)
+    assert first.value.code == "OUTBOX_NOT_INITIALIZED"
+    assert adapter._outbox is None
+    with pytest.raises(ab.bridge_protocol.ProtocolError) as second:
+        adapter.batch("b-p2-02-second", 123456, actions)
+    assert second.value.code == "OUTBOX_NOT_INITIALIZED"
+
+
+def test_cons157_p2_02_success_path_returns_outbox_instance(mock_app, tmp_path):
+    """CONS-157 (CONS-156 P2-2 follow-up): the success path of
+    _batch_outbox() must return the BatchOutbox instance. The
+    CONS-157 excerpt ended at line 998 and cut off the
+    `return self._outbox` line (999), so Kohaku could not verify
+    it from the excerpt alone — this test verifies it by
+    execution: the first call returns a BatchOutbox, the adapter
+    caches it, and the second call returns the same instance."""
+    outbox_dir = tmp_path / "outbox-p2-02-ready"
+    ready = ab.bridge_protocol.BatchOutbox(str(outbox_dir))
+    ready.initialize("test — fresh outbox")
+    ready.record_durability_verified(
+        "file_atomic_v1", "test — crash-durability check passed")
+    adapter = ab.AndroidAdapter(actions_enabled=True,
+                                outbox_dir=str(outbox_dir))
+    first = adapter._batch_outbox()
+    assert isinstance(first, ab.bridge_protocol.BatchOutbox)
+    assert adapter._outbox is first
+    second = adapter._batch_outbox()
+    assert second is first
+
+
+def test_cons156_p2_03_confirm_checks_record_size():
+    """CONS-156 P2-3: confirm() must apply the 64 KB per-record cap
+    (MAX_RECORD_BYTES) to the updated record before persistLocked(),
+    like admit() and complete() do. An oversize confirmation is a
+    persist failure (BatchStoreException persist_failed), not a 400
+    — the confirmation is not recorded."""
+    src = _cons152_registry_source()
+    start = src.index("    fun confirm(")
+    body = src[start:src.index("\n    fun restoreFromBackup(", start)]
+    assert "recordJsonBytes(updated) > MAX_RECORD_BYTES" in body
+    check = body.index("recordJsonBytes(updated)")
+    persist = body.index("persistLocked(next", check)
+    assert check < persist
+    segment = body[check:persist]
+    assert "BatchStoreException" in segment
+    assert "persist_failed" in segment
+    assert "64 KB" in segment
+    assert "BatchBadRequestException" not in segment
+
+
+def test_cons152_p1_04_supersedes_needs_confirmation():
+    """P1-04: admit() supersedes validation also requires the
+    target UNKNOWN record to carry a recorded manualConfirmation."""
+    admit = _cons152_admit_source()
+    assert "target.manualConfirmation == null" in admit
+    assert "no recorded manual confirmation" in admit
+
+
+def test_cons152_p2_01_file_cap_on_all_persists():
+    """P2-01: the 512 KB whole-store cap is enforced on every
+    persist path (a central guard in persistLocked()) and on load
+    (record count in storeFromJson(), byte size via
+    checkStoreSize())."""
+    src = _cons152_registry_source()
+    persist_start = src.index("    private fun persistLocked(")
+    persist_body = src[persist_start:src.index("\n    /** The serialized size", persist_start)]
+    assert "MAX_FILE_BYTES" in persist_body
+    assert "persist refused: store would exceed 512 KB" in persist_body
+    assert "private fun checkStoreSize(text: String)" in src
+    assert "store file exceeds 512 KB" in src
+    assert "if (arr.length() > MAX_RECORDS)" in src
+    assert "too many records: " in src
+
+
+def test_cons152_p2_02_batch_registry_volatile():
+    """P2-02: the BatchRegistry field is volatile — it is written
+    on the service main thread in onServiceConnected() and read
+    from HTTP worker threads, so publication must be explicit."""
+    svc = _java_source("BridgeAccessibilityService.java")
+    assert "private volatile BatchRegistry batchRegistry;" in svc

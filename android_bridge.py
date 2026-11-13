@@ -53,6 +53,7 @@ import sys
 import threading
 import time
 import urllib.error
+import uuid
 
 import bridge_protocol  # Local sibling: protocol error codes (Step 2 wiring).
 import retry  # Local sibling (retry.py): backoff math only; the bridge
@@ -189,7 +190,22 @@ def cmd_proxy(host: str, port: int) -> int:
 # --------------------------------------------------------------------------
 
 class TransportError(RuntimeError):
-    pass
+    """A failed HTTP call to the bridge app.
+
+    .http_status is the HTTP status when the server answered (None
+    when the request never reached it — a connection failure or a
+    timeout). .error_id is the server's SPEC error id from the
+    response body when one was present (e.g. "persist_failed" or
+    "batch_store_unavailable" for a 503 from the BatchRegistry,
+    C-01). Both default to None. batch() uses them to tell a
+    definitive not-executed rejection apart from an undetermined
+    outcome (SPEC-BATCH-PERSIST-001 §2.9).
+    """
+
+    def __init__(self, message, http_status=None, error_id=None):
+        super().__init__(message)
+        self.http_status = http_status
+        self.error_id = error_id
 
 
 class AccessibilityUnavailableError(TransportError):
@@ -337,7 +353,15 @@ def _call_with_bridge_retry(fn, method: str, path: str,
 
 
 def ssh_base_cmd() -> list:
-    """ssh invocation for Termux over the tunnel proxy (no interactive auth)."""
+    """ssh invocation for Termux over the tunnel proxy (no interactive auth).
+
+    Session reuse is the default (2026-11-12, user decision): the first
+    connection becomes a ControlMaster and lingers 300 s after the last
+    use, so later commands reuse it instead of paying a fresh
+    handshake (~3.8 s fresh vs ~1.1 s reused, measured 2026-11-12).
+    ControlPersist matches the 5-min health-check cadence. A stale
+    master falls back to a fresh connection automatically.
+    """
     if not PHONE_IP or not TERMUX_USER:
         raise TransportError(
             "ANDROID_PHONE_IP and ANDROID_TERMUX_USER are not set; put them "
@@ -350,6 +374,9 @@ def ssh_base_cmd() -> list:
         "-o", f"ConnectTimeout={os.environ.get('ANDROID_SSH_TIMEOUT', '20')}",
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", f"ProxyCommand={proxy_cmd}",
+        "-o", "ControlMaster=auto",
+        "-o", "ControlPath=/tmp/termux_mux_%r@%h:%p",
+        "-o", "ControlPersist=300",
         "-p", str(TERMUX_SSH_PORT),
         "-i", os.path.expanduser("~/.ssh/id_ed25519"),
         f"{TERMUX_USER}@{PHONE_IP}",
@@ -543,6 +570,40 @@ def _is_stale_click_error(exc: BaseException) -> bool:
     return "stale snapshot" in str(exc)
 
 
+# C-01 (SPEC-BATCH-PERSIST-001 §2.9): the SPEC error ids that mean
+# the BatchRegistry refused a batch BEFORE any execution. A 503
+# carrying one of these is a definitive not-executed rejection;
+# a 503 without one is an overload, and the outcome is undetermined.
+_BATCH_NOT_EXECUTED_ERROR_IDS = frozenset({
+    "persist_failed",
+    "batch_store_unavailable",
+    "batch_store_full",
+    "batch_store_recovery_pending",
+    "batch_store_durability_unverified",
+})
+
+
+def _is_definitive_not_executed(exc: BaseException) -> bool:
+    """True when the failure proves the batch did NOT execute, so
+    the outbox may record "not_executed": the accessibility service
+    was off (requireService failed before the handler ran), the
+    request was rejected before execution (400/401/403/409/410/
+    413/422/431), or a 503 with a SPEC error id (the Registry
+    refused it). Anything else — a lost response, a timeout, a
+    bare 503 overload, a 5xx — is undetermined, and the outbox
+    records "outcome_unknown"."""
+    if isinstance(exc, AccessibilityUnavailableError):
+        return True
+    status = retry.extract_status(exc)
+    if status is None:
+        return False
+    if status in (400, 401, 403, 409, 410, 413, 422, 431):
+        return True
+    if status == 503:
+        return getattr(exc, "error_id", None) in _BATCH_NOT_EXECUTED_ERROR_IDS
+    return False
+
+
 # --------------------------------------------------------------------------
 # Android adapter (common interface for Playwright / Android execution)
 # --------------------------------------------------------------------------
@@ -556,8 +617,15 @@ class AndroidAdapter:
     explicit action on the command line.
     """
 
-    def __init__(self, actions_enabled: bool = False):
+    def __init__(self, actions_enabled: bool = False,
+                 outbox_dir: str | None = None):
         self.actions_enabled = actions_enabled
+        # C-01 (SPEC-BATCH-PERSIST-001 §2.9): the persistent batch
+        # outbox directory. None means the BatchOutbox default
+        # ($MUSE_BRIDGE_OUTBOX_DIR, else ~/.muse-bridge). Tests pass
+        # a temp dir here so they never touch the real outbox.
+        self._outbox_dir = outbox_dir
+        self._outbox: bridge_protocol.BatchOutbox | None = None
         # A-3 (v1.9): the most recent /state, so node actions can tell
         # whether that snapshot was stable before acting on it.
         self._last_state: dict | None = None
@@ -919,48 +987,135 @@ class AndroidAdapter:
             body["text"] = text
         return self._app_post("/notification_action", body)
 
-    def batch(self, batch_id: str, tree_hash: int, actions: list) -> dict:
+    def _batch_outbox(self) -> bridge_protocol.BatchOutbox:
+        """The persistent batch outbox (C-01, SPEC §2.9), created
+        lazily and checked ready on first use. Fail-closed: when the
+        outbox is not initialized or is corrupt, require_ready()
+        raises and no batch is sent."""
+        if self._outbox is None:
+            outbox = bridge_protocol.BatchOutbox(self._outbox_dir)
+            outbox.require_ready()
+            self._outbox = outbox
+        return self._outbox
+
+    def batch(self, batch_id=None, tree_hash=0, actions=None,
+              supersedes=None, logical_id=None) -> dict:
         """Run several actions in one request (Phase 2).
 
         actions is a list of dicts, each with action_id, type, and the
-        fields its type needs. A re-sent batch_id returns the cached
-        result without re-executing (server-side idempotency, A-4).
+        fields its type needs. At most 20 actions per batch.
 
-        Resend rules (A-5): if the request fails with a transport
-        error and the outcome is unknown, re-send the SAME batch_id
-        and the SAME payload — the server answers from its cache
-        instead of executing twice. Never reuse a batch_id with
-        different content (409), and never reuse one after a 410
-        (expired: use a NEW batch_id). At most 20 actions per batch.
+        C-01 (SPEC-BATCH-PERSIST-001 §2.9): the client half of the
+        batch safety mechanism. A fresh batch_id (UUID v4) is
+        generated per batch unless the caller supplies one, and a
+        fresh logical batch id (UUID v4) is generated per batch
+        unless supplied. The VM never reuses a batch_id and never
+        automatically re-issues a logical batch under a new ID while
+        its outcome is undetermined.
+
+        Fixed send order: the logical batch is registered in the
+        persistent outbox (and the persist is confirmed) BEFORE the
+        network send. A persist failure means no send. The outbox
+        is the authority for "was this sent"; the in-memory
+        BatchRegistry only validates the payload and mirrors the
+        outcome.
+
+        On a definitive not-executed rejection (400/409/410/422, or
+        a 503 with a SPEC error id), the outbox records
+        "not_executed" and the error is raised. On any other failure
+        (a transport error, a timeout, a lost response) or on the
+        server's "unknown" status, the outbox records
+        "outcome_unknown" and a ProtocolError (code
+        BATCH_OUTCOME_UNKNOWN) is raised — the operator must check
+        the phone before deciding anything. POST /batch is never
+        retried (see _app_post).
         """
+        actions = actions or []
         self._require_actions(f"batch({batch_id}, {len(actions)} actions)")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
-        # Step 3: the request body is built (and validated) by the
-        # protocol module — actions are type-checked, capped at 20,
-        # and protocol_version: 1 is explicit. The response is
-        # validated by parse_batch_result (ok, batch_id, replayed,
-        # results, stopped_at, stop_reason). The "transport" key is
-        # added by _app_post before parsing and survives in the
-        # returned dict (extra keys are tolerated).
-        # Step 4: the registry enforces the A-4 id rules client-side
-        # before anything is sent (same id + different content ->
-        # STALE_REVISION; expired id -> BATCH_EXPIRED) and records
-        # the server's outcome (status incl. partial/running,
-        # payload_hash verified against what was sent).
-        submission = self._batch_registry.submit(batch_id, tree_hash, actions)
-        result = self._app_post("/batch", submission["body"])
+        # Step 1: validate the payload and compute the content hash
+        # (the in-memory registry). This happens before any outbox
+        # interaction, so an invalid input raises before anything is
+        # recorded or sent. (A wart: submit() creates an in-memory
+        # record even when the outbox then refuses the send — the
+        # record expires after 20 minutes and the outbox, not the
+        # registry, is the authority for what was sent.)
+        if batch_id is None or batch_id == "":
+            batch_id = str(uuid.uuid4())
+        if logical_id is None or logical_id == "":
+            logical_id = str(uuid.uuid4())
+        submission = self._batch_registry.submit(
+            batch_id, tree_hash, actions, supersedes=supersedes)
+        # Step 2: the persistent outbox (fail-closed when it is not
+        # initialized or is corrupt) and the reuse ban.
+        outbox = self._batch_outbox()
+        if outbox.get_by_batch_id(batch_id) is not None:
+            raise bridge_protocol.ProtocolError(
+                f"batch_id {batch_id!r} was already sent; the VM "
+                "never reuses a batch_id",
+                code="BATCH_ID_REUSED",
+            )
+        # Step 3: register the logical batch (durable commit) BEFORE
+        # the network send. A persist failure means no send.
+        outbox.register(
+            logical_id, batch_id, submission["content_hash"],
+            tree_hash, actions, supersedes)
+        try:
+            result = self._app_post("/batch", submission["body"])
+        except TransportError as exc:
+            if _is_definitive_not_executed(exc):
+                outbox.mark_not_executed(logical_id, exc.error_id)
+                raise
+            outbox.mark_unknown(
+                logical_id, f"transport failure: {exc}"[:200])
+            raise bridge_protocol.ProtocolError(
+                f"batch {batch_id!r} (logical {logical_id}) outcome is "
+                f"UNKNOWN: {exc}; do not re-send this batch_id and do "
+                "not re-issue the logical batch under a new ID until a "
+                "human checks the phone and approves a new operation",
+                code="BATCH_OUTCOME_UNKNOWN",
+            ) from exc
         parsed = bridge_protocol.parse_batch_result(result)
         # Step 4 (CONS-020 P0-04): the response must be for the
         # batch that was asked for. batch_id is NOT in the hash, so
         # a result for a different id could otherwise pass the
         # payload_hash check. Never record a mismatched id.
         if parsed["batch_id"] != batch_id:
+            # The response is unusable; our batch's outcome is
+            # unknown (the server may or may not have executed it).
+            outbox.mark_unknown(
+                logical_id,
+                f"batch_id mismatch: asked for {batch_id!r}, server "
+                f"answered for {parsed['batch_id']!r}",
+            )
             raise bridge_protocol.ProtocolError(
                 f"batch_id mismatch: asked for {batch_id!r}, "
                 f"server answered for {parsed['batch_id']!r}",
                 code="BATCH_ID_MISMATCH",
             )
+        status = parsed["status"]
+        if status == "unknown":
+            # The server says the outcome is unknown: never
+            # re-execute, never re-send.
+            self._batch_registry.record_result(batch_id, parsed)
+            outbox.mark_unknown(
+                logical_id,
+                parsed.get("message", "server reported an unknown outcome"),
+            )
+            raise bridge_protocol.ProtocolError(
+                f"batch {batch_id!r} (logical {logical_id}) outcome is "
+                f"UNKNOWN: {parsed.get('message', '')}; do not re-send "
+                "this batch_id and do not re-issue the logical batch "
+                "under a new ID until a human checks the phone and "
+                "approves a new operation",
+                code="BATCH_OUTCOME_UNKNOWN",
+            )
         self._batch_registry.record_result(batch_id, parsed)
+        if status == "running":
+            # Still in flight: the outcome is not final.
+            outbox.mark_unknown(logical_id, "server reported status 'running'")
+        else:
+            outbox.mark_result(logical_id, parsed)
         return parsed
 
     def notify(self, title: str, text: str) -> dict:
@@ -1180,16 +1335,21 @@ class AndroidAdapter:
 
         The token comes from the ANDROID_APP_TOKEN env var only and is
         never logged. Raises TransportError on any failure.
-        Reads (GET) and POST /batch retry transient failures (see the
-        retry policy above the TransportError class); every other POST
-        runs exactly once, so an action is never double-executed.
+        Reads (GET) retry transient failures (see the retry policy
+        above the TransportError class); every POST runs exactly once,
+        so an action is never double-executed. C-01
+        (SPEC-BATCH-PERSIST-001 §2.9): POST /batch is NOT retried —
+        a lost response means the outcome is unknown, and re-sending
+        the same batch_id is banned (the VM never reuses a batch_id
+        and never automatically re-issues a logical batch under a
+        new ID while its outcome is undetermined).
         Decision 59: after every call, self.last_call holds
         {"method", "path", "seconds" (wall incl. retries),
         "attempts", "ok", "status" (None when unavailable), "error"
         (str or None, no confidential info)}; it is cleared when a
         call starts. No timing keys are added to returned dicts.
         """
-        retryable = (method == "GET") or (method == "POST" and path == "/batch")
+        retryable = (method == "GET")
         max_attempts = APP_MAX_ATTEMPTS if retryable else 1
         self.last_call = None
         stats: dict = {}
@@ -1257,6 +1417,16 @@ class AndroidAdapter:
             # so callers and logs can classify without re-parsing
             # the status.
             code = bridge_protocol.error_code_for_status(exc.code)
+            # C-01 (SPEC-BATCH-PERSIST-001 §2.9): for a 503, the
+            # response body may carry the BatchRegistry's SPEC error
+            # id ("persist_failed", "batch_store_unavailable",
+            # "batch_store_full", "batch_store_recovery_pending",
+            # "batch_store_durability_unverified") — a definitive
+            # not-executed rejection. A bare 503 without one is an
+            # overload, and the outcome is undetermined. The id is
+            # carried on the TransportError so batch() can tell
+            # them apart without re-parsing the message.
+            error_id = None
             # P0-1 (v2.0): a structured a11y-off 503 raises the
             # dedicated subclass so callers can tell "a11y off"
             # from "server down" / "overloaded" without parsing
@@ -1267,6 +1437,8 @@ class AndroidAdapter:
                     body = json.loads(detail) if detail else {}
                 except (ValueError, TypeError):
                     body = {}
+                if isinstance(body, dict) and isinstance(body.get("error"), str):
+                    error_id = body["error"]
                 if isinstance(body, dict) and body.get("reason") == "ACCESSIBILITY_DISABLED":
                     raise AccessibilityUnavailableError(
                         f"app returned HTTP 503 [{code}] for {method} {path}: "
@@ -1293,7 +1465,8 @@ class AndroidAdapter:
                 hint = "unexpected bridge error"
             raise TransportError(
                 f"app returned HTTP {exc.code} [{code}] for {method} {path}: "
-                f"{detail} ({hint})") from exc
+                f"{detail} ({hint})",
+                http_status=exc.code, error_id=error_id) from exc
         except Exception as exc:  # noqa: BLE001 - report the failure
             raise TransportError(
                 f"cannot reach the app at {APP_URL}: {exc}") from exc
@@ -1363,7 +1536,8 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Android bridge (Phase 4, read-only by default)")
     parser.add_argument("command", choices=[
         "check", "screenshot", "state", "tap", "swipe", "type", "key", "notify",
-        "click-node", "type-node", "batch", "events", "_proxy",
+        "click-node", "type-node", "batch", "batch-outbox-init",
+        "batch-outbox-status", "batch-outbox-durability-verify", "events", "_proxy",
     ])
     parser.add_argument("--out", default="/tmp/android-screen.png")
     parser.add_argument("--x", type=int, default=0)
@@ -1376,6 +1550,21 @@ def main(argv=None) -> int:
     parser.add_argument("--node-id", default="")
     parser.add_argument("--tree-hash", type=int, default=0)
     parser.add_argument("--batch-id", default="")
+    parser.add_argument("--supersedes", default="",
+                        help="Batch id of the UNKNOWN record this batch "
+                        "replaces (C-01; optional)")
+    parser.add_argument("--attestation", default="",
+                        help="REQUIRED for batch-outbox-init: who verified "
+                        "from external records that no logical batch was "
+                        "sent from this client, when, and on what basis "
+                        "(C-01; running the command does not by itself "
+                        "prove that)")
+    parser.add_argument("--method", default="",
+                        help="Storage method for batch-outbox-durability-"
+                        "verify (e.g. file_atomic_v1; C-01)")
+    parser.add_argument("--note", default="",
+                        help="Free-text note for batch-outbox-durability-"
+                        "verify (e.g. which crash test was run; C-01)")
     parser.add_argument("--actions", default="")
     parser.add_argument("--since", type=int, default=0,
                         help="Events after this seq (v1.6; default 0 = all buffered)")
@@ -1446,8 +1635,56 @@ def main(argv=None) -> int:
             return 0
         if args.command == "batch":
             actions = json.loads(args.actions) if args.actions else []
-            print(json.dumps(adapter.batch(args.batch_id, args.tree_hash, actions),
+            print(json.dumps(adapter.batch(
+                args.batch_id, args.tree_hash, actions,
+                supersedes=args.supersedes or None),
+                ensure_ascii=False))
+            return 0
+        if args.command == "batch-outbox-init":
+            # C-01 (SPEC §2.9): the explicit operator initialization.
+            # The operator must first verify from external records
+            # that no logical batch was sent from this client.
+            # CONS-152 P2-03: the attestation is REQUIRED — the CLI
+            # must not auto-generate wording that asserts a fact
+            # (that the operator checked) which running the command
+            # does not by itself prove.
+            if not args.attestation.strip():
+                print("batch-outbox-init requires --attestation: who "
+                      "verified from external records that no logical "
+                      "batch was sent from this client, when, and on "
+                      "what basis (e.g. 'fresh install' or 'loss "
+                      "accepted after checking the phone history'). "
+                      "Running the command does not by itself prove that.",
+                      file=sys.stderr)
+                return 2
+            outbox = bridge_protocol.BatchOutbox()
+            marker = outbox.initialize(args.attestation)
+            print(json.dumps({"ok": True, "initialized": marker},
                              ensure_ascii=False))
+            return 0
+        if args.command == "batch-outbox-durability-verify":
+            # C-01 (SPEC §2.9, CONS-152 P1-02): record that the
+            # outbox storage durability was demonstrated (the
+            # C-01-15 crash test). Until this is recorded, batch()
+            # refuses to send (the gate ships ON).
+            if not args.method:
+                print("batch-outbox-durability-verify requires "
+                      "--method (e.g. file_atomic_v1) and an optional "
+                      "--note saying which crash test was run.",
+                      file=sys.stderr)
+                return 2
+            outbox = bridge_protocol.BatchOutbox()
+            marker = outbox.record_durability_verified(
+                args.method, args.note)
+            print(json.dumps({"ok": True, "durability_verified": marker},
+                             ensure_ascii=False))
+            return 0
+        if args.command == "batch-outbox-status":
+            # C-01 (SPEC §2.9): the outbox state for the operator —
+            # counts by outcome, and how many logical batches are
+            # still undetermined (those need a human decision).
+            outbox = bridge_protocol.BatchOutbox()
+            print(json.dumps(outbox.summary(), indent=2, ensure_ascii=False))
             return 0
         if args.command == "events":
             print(json.dumps(adapter.events(since=args.since, limit=args.limit),
@@ -1458,6 +1695,9 @@ def main(argv=None) -> int:
         return 3
     except TransportError as exc:
         print(f"TRANSPORT ERROR: {exc}", file=sys.stderr)
+        return 2
+    except bridge_protocol.ProtocolError as exc:
+        print(f"PROTOCOL ERROR [{exc.code}]: {exc}", file=sys.stderr)
         return 2
     return 0
 

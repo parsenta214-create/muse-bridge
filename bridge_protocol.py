@@ -5,10 +5,18 @@ Pure standard-library implementation with no network or socket operations.
 
 from __future__ import annotations
 
+import functools
+try:
+    import fcntl  # Unix-only: the cross-process outbox lock (CONS-153 P1-03)
+except ImportError:  # pragma: no cover - non-Unix platforms
+    fcntl = None  # type: ignore[assignment]
 import hashlib
 import ipaddress
 import json
 import math
+import os
+import tempfile
+import threading
 import time
 from typing import Any
 
@@ -63,6 +71,11 @@ VALID_BATCH_OUTCOME_STATUSES = (
     "completed",
     "partial",
     "failed",
+    # C-01 (SPEC-BATCH-PERSIST-001 §2.10): the server returns
+    # "unknown" when a batch_id names a record whose outcome is not
+    # known. It carries no results array and no payload_hash, and
+    # it is never re-executed.
+    "unknown",
 )
 MAX_QUEUE = 8
 MAX_CONNECTIONS = 16
@@ -476,6 +489,7 @@ def build_batch(
     tree_hash: int,
     actions: list[dict[str, Any]],
     protocol_version: int = PROTOCOL_VERSION,
+    supersedes: str | None = None,
 ) -> dict[str, Any]:
     _require_str(batch_id, "batch_id", non_empty=True)
     # Step 4 (CONS-020 P1-01): tree_hash is a Java int (signed
@@ -493,18 +507,28 @@ def build_batch(
     validated_actions = [
         _validate_batch_action(action, idx) for idx, action in enumerate(actions)
     ]
+    # C-01 (SPEC-BATCH-PERSIST-001 §2.6): an optional supersedes
+    # names the UNKNOWN record this batch replaces. It is NOT part
+    # of the content hash (the server's canonicalBatchPayload hashes
+    # protocol_version, tree_hash, and actions only), so it is added
+    # to the body after the hash inputs are fixed.
+    if supersedes is not None:
+        _require_str(supersedes, "supersedes", non_empty=True)
+        if len(supersedes) > 128:
+            raise ProtocolError("supersedes must be at most 128 chars")
+    body: dict[str, Any] = {
+        "protocol_version": protocol_version,
+        "batch_id": batch_id,
+        "tree_hash": tree_hash,
+        "actions": validated_actions,
+    }
+    if supersedes is not None:
+        body["supersedes"] = supersedes
     # Step 2 (v1.0.1, MERGE_PLAN_A item 2): the protocol version is
     # now explicit in the batch body. The server defaults it to 1 and
     # rejects anything else with 400, and the A-5 client rule says the
     # client sends protocol_version: 1.
-    return validate_body_size(
-        {
-            "protocol_version": protocol_version,
-            "batch_id": batch_id,
-            "tree_hash": tree_hash,
-            "actions": validated_actions,
-        }
-    )
+    return validate_body_size(body)
 
 
 def build_notify(title: str, text: str) -> dict[str, Any]:
@@ -1074,6 +1098,21 @@ def _validate_batch_result_item(item: Any, index: int) -> dict[str, Any]:
 
 def parse_batch_result(data: dict[str, Any]) -> dict[str, Any]:
     d = _require_dict(data, "batch_result")
+    # C-01 (SPEC-BATCH-PERSIST-001 §2.10): an UNKNOWN response
+    # carries no results array — only ok, batch_id, status,
+    # replayed, and a message. It is validated on its own shape;
+    # the full shape below still applies to every other status.
+    if d.get("status") == "unknown":
+        for key in ("ok", "batch_id", "replayed", "status", "message"):
+            if key not in d:
+                raise ProtocolError(f"batch_result missing required field {key!r}")
+        if _require_bool(d["ok"], "batch_result.ok") is not True:
+            raise ProtocolError("batch_result.ok must be True")
+        _require_str(d["batch_id"], "batch_result.batch_id", non_empty=True)
+        _require_bool(d["replayed"], "batch_result.replayed")
+        _require_batch_outcome_status(d["status"], "batch_result.status")
+        _require_str(d["message"], "batch_result.message", non_empty=True)
+        return dict(d)
     required_keys = (
         "ok",
         "batch_id",
@@ -1281,6 +1320,7 @@ class BatchRegistry:
         tree_hash: int,
         actions: list[dict[str, Any]],
         protocol_version: int = PROTOCOL_VERSION,
+        supersedes: str | None = None,
     ) -> dict[str, Any]:
         """Register a batch by its content hash.
 
@@ -1299,7 +1339,9 @@ class BatchRegistry:
         now = self._clock()
         self._purge_expired(now)
         _require_int(protocol_version, "protocol_version", min_value=1, max_value=1)
-        validated = build_batch(batch_id, tree_hash, actions, protocol_version)
+        validated = build_batch(
+            batch_id, tree_hash, actions, protocol_version, supersedes
+        )
         content_hash = self.compute_content_hash(
             validated["protocol_version"],
             validated["tree_hash"],
@@ -1376,9 +1418,16 @@ class BatchRegistry:
         status = _require_batch_outcome_status(
             result.get("status"), "batch_result.status"
         )
-        payload_hash = _require_payload_hash(
-            result.get("payload_hash"), "batch_result.payload_hash"
-        )
+        if status == "unknown":
+            # C-01 (SPEC §2.10): an UNKNOWN response carries no
+            # payload_hash and no results — the server has no result
+            # to report. Record the unknown outcome without a hash
+            # check.
+            payload_hash = None
+        else:
+            payload_hash = _require_payload_hash(
+                result.get("payload_hash"), "batch_result.payload_hash"
+            )
         record = self._records.get(batch_id)
         if record is None:
             raise ProtocolError(
@@ -1395,7 +1444,8 @@ class BatchRegistry:
             "stop_reason": result.get("stop_reason"),
         }
         if (
-            record["content_hash"] is not None
+            payload_hash is not None
+            and record["content_hash"] is not None
             and payload_hash != record["content_hash"]
         ):
             # Keep the server's outcome as a diagnostic (it is not
@@ -1443,3 +1493,736 @@ class BatchRegistry:
             # Step 4 (CONS-020 P0-01): ">" mirrors the server.
             "expired": age > BATCH_RESULT_TTL_S,
         }
+
+
+# C-01 (SPEC-BATCH-PERSIST-001 §2.9): the VM-side half of the batch
+# safety mechanism. The phone-side BatchRegistry cannot prevent a
+# double execution if the VM forgets what it sent and re-issues the
+# same logical batch under a new ID — so the VM keeps a persistent
+# record (an outbox) of every logical batch it has sent, with each
+# batch's identity, its batch_id, and its outcome state.
+#
+# Fixed send order (SPEC §2.9): (1) generate the logical batch's
+# persistent ID; (2) register the logical batch and its batch_id in
+# the outbox; (3) confirm the outbox persist succeeded; (4) only
+# then allow the network send; (5) after receiving the result,
+# persistently update the outbox state. If the outbox persist
+# fails, the batch is NOT sent. If the outbox is corrupt, missing,
+# or unreadable, sending stops (fail-closed) — the outbox is never
+# treated as an empty queue.
+#
+# A durable commit (SPEC §2.9, P1-B) is a crash-recoverable write:
+# atomic write (temp file + flush + fsync + rename) plus a directory
+# fsync. A write that only reaches the OS buffer is NOT a
+# successful persist.
+OUTBOX_FORMAT_VERSION = 1
+OUTBOX_FILE = "batch_outbox.json"
+OUTBOX_MARKER_FILE = "batch_outbox_initialized"
+OUTBOX_DURABILITY_FILE = "batch_outbox_durability_verified"
+OUTBOX_LOCK_FILE = "batch_outbox.lock"
+# The storage method this build uses (SPEC §2.9): the durability
+# marker must name this method; if the method ever changes,
+# re-verification is required before sending resumes.
+OUTBOX_STORAGE_METHOD = "file_atomic_v1"
+OUTBOX_MAX_RECORDS = 1000
+OUTBOX_DETERMINED_RETENTION_S = 24 * 60 * 60
+OUTBOX_STATES = ("registered", "result_received", "outcome_unknown", "not_executed")
+
+
+def default_outbox_dir() -> str:
+    """The outbox directory: $MUSE_BRIDGE_OUTBOX_DIR, else
+    ~/.muse-bridge. Runtime state, deliberately outside the git
+    working tree."""
+    override = os.environ.get("MUSE_BRIDGE_OUTBOX_DIR")
+    if override:
+        return override
+    return os.path.expanduser("~/.muse-bridge")
+
+
+def _atomic_write_json(path: str, data: dict[str, Any]) -> None:
+    """Write a JSON file as a crash-recoverable durable commit: temp
+    file in the same directory, flush, fsync the file, rename over
+    the live file, fsync the directory entry. Raises OSError on any
+    failure (the caller treats that as a persist failure).
+
+    The temp file has a unique name per call (CONS-152 P1-03): two
+    threads writing the same live path must not share one .tmp file
+    and race the rename. A failed write unlinks its own temp file.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    fd, tmp_path = tempfile.mkstemp(
+        dir=directory, prefix=os.path.basename(path) + ".", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.rename(tmp_path, path)
+    except OSError:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    # The directory-entry fsync makes the rename itself durable.
+    # It is best-effort on platforms that do not support it, but on
+    # this VM (Linux) it is expected to work; a failure here is a
+    # persist failure, not something to silently ignore.
+    dir_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _locked(method: Any) -> Any:
+    """Run a BatchOutbox method under the instance RLock AND the
+    cross-process file lock (CONS-153 P1-03): the RLock serializes
+    threads sharing one instance; the file lock (flock LOCK_EX on
+    batch_outbox.lock, held for the whole method) serializes
+    separate instances and separate processes, so two processes
+    registering different batches cannot lose each other's record
+    in the read-modify-write. The file lock is re-entrant per
+    thread (a depth counter): a @_locked method calling another
+    @_locked method on the same thread does not deadlock on its
+    own lock. A lock that cannot be acquired is fail-closed
+    (OUTBOX_LOCK_FAILED) — never silently proceed unlocked."""
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._lock:
+            self._acquire_file_lock()
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                self._release_file_lock()
+    return wrapper
+
+
+class BatchOutbox:
+    """Persistent outbox of logical batches (SPEC §2.9).
+
+    One record per logical batch: its persistent logical_id, the
+    batch_id sent for it, the content hash, the payload (tree_hash,
+    actions, supersedes), and the outcome state:
+    "registered" (persisted before the send; no outcome yet — an
+    ambiguous record, treated as undetermined), "result_received"
+    (a determined outcome), "outcome_unknown" (the outcome could
+    not be determined — a lost response, a timeout, or the server's
+    "unknown"), "not_executed" (a definitive rejection before any
+    execution: 400/409/410/422, or a 503 with a SPEC error id).
+
+    A record whose outcome is undetermined ("registered" or
+    "outcome_unknown") is NEVER automatically re-issued under a new
+    ID; a human decides. Undetermined records are never purged.
+    """
+
+    def __init__(
+        self,
+        directory: str | None = None,
+        clock: Any = None,
+    ) -> None:
+        # clock is a zero-arg callable returning epoch seconds
+        # (default time.time). It is injectable so tests can move
+        # time forward without waiting. Epoch seconds, not a
+        # monotonic clock: the outbox persists across restarts.
+        self._clock = clock if clock is not None else time.time
+        self._directory = directory if directory is not None else default_outbox_dir()
+        self._outbox_path = os.path.join(self._directory, OUTBOX_FILE)
+        self._marker_path = os.path.join(self._directory, OUTBOX_MARKER_FILE)
+        self._durability_path = os.path.join(self._directory, OUTBOX_DURABILITY_FILE)
+        self._lock_path = os.path.join(self._directory, OUTBOX_LOCK_FILE)
+        # CONS-152 P1-03: one RLock serializes every file mutation
+        # (initialize / require_ready / register / _update). Reads
+        # go through the atomic rename, so they always see a whole
+        # old or new file, never a torn one.
+        self._lock = threading.RLock()
+        # CONS-153 P1-03: the cross-process file lock (flock) held
+        # while a @_locked method runs. _file_lock_fd is the open
+        # lock-file descriptor (None when unlocked); _file_lock_depth
+        # makes the lock re-entrant on the same thread. Both fields
+        # are only touched while self._lock is held, so no extra
+        # synchronization is needed for them.
+        self._file_lock_fd: int | None = None
+        self._file_lock_depth = 0
+
+    def _acquire_file_lock(self) -> None:
+        """Acquire the exclusive cross-process lock for this outbox
+        directory (CONS-153 P1-03). Blocking LOCK_EX: the holder
+        runs a whole read-modify-write; waiters queue behind it.
+        The lock is released automatically if the holder process
+        dies (the fd closes), so there is no stale-lock state to
+        recover. Raises ProtocolError (fail-closed) when the lock
+        cannot be opened or acquired."""
+        if self._file_lock_depth > 0:
+            self._file_lock_depth += 1
+            return
+        if fcntl is None:
+            raise ProtocolError(
+                "batch outbox file locking is unavailable on this "
+                "platform — sending stops (fail-closed)",
+                code="OUTBOX_LOCK_UNAVAILABLE",
+            )
+        os.makedirs(self._directory, exist_ok=True)
+        try:
+            fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        except OSError as exc:
+            raise ProtocolError(
+                f"outbox lock file cannot be opened: {exc}",
+                code="OUTBOX_LOCK_FAILED",
+            ) from exc
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise ProtocolError(
+                f"outbox file lock cannot be acquired: {exc}",
+                code="OUTBOX_LOCK_FAILED",
+            ) from exc
+        self._file_lock_fd = fd
+        self._file_lock_depth = 1
+
+    def _release_file_lock(self) -> None:
+        """Release one level of the cross-process lock (CONS-153
+        P1-03). The underlying flock is only released when the
+        re-entrancy depth reaches zero."""
+        if self._file_lock_depth > 1:
+            self._file_lock_depth -= 1
+            return
+        if self._file_lock_depth == 0:
+            return
+        self._file_lock_depth = 0
+        fd = self._file_lock_fd
+        self._file_lock_fd = None
+        if fd is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    # ---- initialization and the startup decision table (SPEC §2.9) ----
+
+    @_locked
+    def initialize(self, attestation: str) -> dict[str, Any]:
+        """The explicit operator initialization (for the both-missing
+        case). Before calling this, the operator must verify from
+        external records — the phone's execution history, or the
+        operator's own logs — that NO logical batch was sent from
+        this client. If that cannot be verified, do NOT initialize
+        as fresh; recover the outbox from a backup instead. The
+        initialization is logged in the marker (who/when/basis).
+
+        Order: (1) create the outbox file (empty, with a format
+        header) via a durable commit; (2) create the marker file
+        (with the creation time and format version) via a durable
+        commit. Because the marker is created AFTER the outbox,
+        "marker exists" implies "outbox was created".
+        """
+        if not isinstance(attestation, str) or not attestation.strip():
+            raise ProtocolError(
+                "outbox initialization needs an attestation "
+                "(who, when, and the basis — e.g. 'fresh install' or "
+                "'loss accepted after checking the phone history')",
+                code="OUTBOX_ATTESTATION_REQUIRED",
+            )
+        marker = self._load_marker()
+        if marker is not None:
+            raise ProtocolError(
+                "outbox is already initialized",
+                code="OUTBOX_ALREADY_INITIALIZED",
+            )
+        records = self._load_records()
+        if records:
+            # Marker missing + a non-empty outbox: contradictory.
+            # The marker was lost after sends happened. Fail-closed.
+            raise ProtocolError(
+                "outbox has records but no init marker — the marker "
+                "was lost after sends happened; refusing to initialize "
+                "as fresh (recover the outbox from a backup instead)",
+                code="OUTBOX_CONTRADICTORY",
+            )
+        self._persist_records([])
+        marker_data = {
+            "format_version": OUTBOX_FORMAT_VERSION,
+            "created_at": int(self._clock()),
+            "attestation": attestation.strip(),
+        }
+        try:
+            _atomic_write_json(self._marker_path, marker_data)
+        except OSError as exc:
+            raise ProtocolError(
+                f"outbox init marker persist failed: {exc}",
+                code="OUTBOX_PERSIST_FAILED",
+            ) from exc
+        return dict(marker_data)
+
+    @_locked
+    def require_ready(self) -> dict[str, Any]:
+        """The startup decision table (SPEC §2.9). Returns a summary
+        when sending is allowed; raises ProtocolError otherwise.
+
+        marker + readable outbox -> normal operation.
+        marker + missing/corrupt/unreadable outbox -> fail-closed.
+        neither -> explicit operator initialization required
+            (the client does NOT auto-initialize).
+        marker missing + empty outbox -> complete initialization by
+            creating the marker, then start with an empty outbox.
+        marker missing + non-empty outbox -> fail-closed.
+
+        On top of the table, the storage-durability gate (CONS-152
+        P1-02): sending is allowed only after the operator records
+        the durability verification (see record_durability_verified).
+        The gate ships ON.
+        """
+        marker = self._load_marker()
+        records = self._load_records()
+        if marker is not None:
+            if records is None:
+                raise ProtocolError(
+                    "outbox is initialized but the outbox file is "
+                    "missing, corrupt, or unreadable — sending stops "
+                    "(fail-closed); recover the outbox from a backup",
+                    code="OUTBOX_CORRUPT",
+                )
+            self._require_durability_verified()
+            return self._summary(records, initialized=True,
+                                 durability_verified=True,
+                                 durability_method=OUTBOX_STORAGE_METHOD)
+        # No marker.
+        if records is None:
+            raise ProtocolError(
+                "batch outbox is not initialized (no init marker and "
+                "no outbox file) — sending is refused until the "
+                "operator performs an explicit initialization "
+                "(batch-outbox-init) after verifying from external "
+                "records that no logical batch was sent from this "
+                "client",
+                code="OUTBOX_NOT_INITIALIZED",
+            )
+        if records:
+            raise ProtocolError(
+                "outbox has records but no init marker — the marker "
+                "was lost after sends happened; sending stops "
+                "(fail-closed); recover the outbox from a backup",
+                code="OUTBOX_CONTRADICTORY",
+            )
+        # Marker missing + an empty outbox: initialization stopped
+        # midway (the outbox was created but the marker was not).
+        # No sends could have happened before initialization
+        # completed, so completing it is safe.
+        marker_data = {
+            "format_version": OUTBOX_FORMAT_VERSION,
+            "created_at": int(self._clock()),
+            "attestation": "initialization completed at startup: "
+            "outbox existed and was empty, so no batch could have been sent",
+        }
+        try:
+            _atomic_write_json(self._marker_path, marker_data)
+        except OSError as exc:
+            raise ProtocolError(
+                f"outbox init marker persist failed: {exc}",
+                code="OUTBOX_PERSIST_FAILED",
+            ) from exc
+        self._require_durability_verified()
+        return self._summary(records, initialized=True,
+                             durability_verified=True,
+                             durability_method=OUTBOX_STORAGE_METHOD)
+
+    # ---- storage-durability gate (SPEC §2.9, CONS-152 P1-02) ----
+
+    @_locked
+    def record_durability_verified(self, method: str, note: str) -> dict[str, Any]:
+        """Record that the outbox storage durability has been
+        demonstrated (the C-01-15 crash test: kill the VM process
+        after an outbox write and confirm the record survives, on
+        this VM's filesystem). The marker records the storage
+        method it was verified for; if the method changes,
+        re-verification is required before sending resumes. The
+        gate ships ON: no marker means no send."""
+        if method != OUTBOX_STORAGE_METHOD:
+            raise ProtocolError(
+                f"unknown outbox storage method: {method!r} "
+                f"(this build uses {OUTBOX_STORAGE_METHOD!r})",
+                code="OUTBOX_UNKNOWN_STORAGE_METHOD",
+            )
+        marker_data = {
+            "format_version": OUTBOX_FORMAT_VERSION,
+            "method": method,
+            "verified_at": int(self._clock()),
+            "note": note,
+        }
+        try:
+            _atomic_write_json(self._durability_path, marker_data)
+        except OSError as exc:
+            raise ProtocolError(
+                f"outbox durability marker persist failed: {exc}",
+                code="OUTBOX_PERSIST_FAILED",
+            ) from exc
+        return dict(marker_data)
+
+    def is_durability_verified(self) -> bool:
+        """True when a valid durability marker names this build's
+        storage method. A missing, unreadable, or invalid marker
+        means unverified (fail-closed)."""
+        marker = self._load_durability_marker()
+        return marker is not None and marker.get("method") == OUTBOX_STORAGE_METHOD
+
+    def _require_durability_verified(self) -> None:
+        if not self.is_durability_verified():
+            raise ProtocolError(
+                "batch outbox storage durability is not verified — "
+                "sending is refused until the operator records it "
+                "(batch-outbox-durability-verify) after the C-01-15 "
+                "crash-durability check",
+                code="OUTBOX_DURABILITY_UNVERIFIED",
+            )
+
+    def _load_durability_marker(self) -> dict[str, Any] | None:
+        """Read the durability marker. Returns None when it is
+        missing, unreadable, or invalid (all mean unverified).
+        Missing is decided by the open itself (FileNotFoundError):
+        os.path.exists() returns False both when the file does not
+        exist AND when its existence cannot be determined, so it
+        must never decide absence (CONS-153 P1-01, same class as
+        the phone-side readFileText fix). An undeterminable status
+        also lands here as None — unverified — which is the
+        fail-closed direction for this marker."""
+        try:
+            with open(self._durability_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        if data.get("format_version") != OUTBOX_FORMAT_VERSION:
+            return None
+        if not isinstance(data.get("method"), str):
+            return None
+        if not isinstance(data.get("verified_at"), int):
+            return None
+        return data
+
+    # ---- the fixed send order (SPEC §2.9) ----
+
+    @_locked
+    def register(
+        self,
+        logical_id: str,
+        batch_id: str,
+        content_hash: str,
+        tree_hash: int,
+        actions: list[dict[str, Any]],
+        supersedes: str | None = None,
+    ) -> dict[str, Any]:
+        """Step (2) of the fixed send order: register the logical
+        batch and its batch_id in the outbox and confirm the durable
+        persist succeeded. Only then may the caller send (step 4).
+        Raises on a persist failure (no send) and on a reused
+        batch_id (the permanent reuse ban, SPEC §2.9). Refuses to
+        register while the storage durability is unverified
+        (CONS-152 P1-02)."""
+        records = self._load_records()
+        if records is None:
+            raise ProtocolError(
+                "outbox file is missing or unreadable — sending stops "
+                "(fail-closed)",
+                code="OUTBOX_CORRUPT",
+            )
+        self._require_durability_verified()
+        for record in records:
+            if record["batch_id"] == batch_id:
+                raise ProtocolError(
+                    f"batch_id {batch_id!r} was already sent; the VM "
+                    "never reuses a batch_id",
+                    code="BATCH_ID_REUSED",
+                )
+            if record["logical_id"] == logical_id:
+                raise ProtocolError(
+                    f"logical batch {logical_id!r} is already registered",
+                    code="LOGICAL_BATCH_REUSED",
+                )
+        now = int(self._clock())
+        record = {
+            "logical_id": logical_id,
+            "batch_id": batch_id,
+            "content_hash": content_hash,
+            "tree_hash": tree_hash,
+            "actions": actions,
+            "supersedes": supersedes,
+            "state": "registered",
+            "created_at": now,
+            "sent_at": None,
+            "result": None,
+            "note": None,
+        }
+        records.append(record)
+        self._purge_determined_old(records, now)
+        self._persist_records(records)
+        return dict(record)
+
+    def mark_result(self, logical_id: str, result: dict[str, Any]) -> bool:
+        """A determined outcome was received (completed / partial /
+        failed). Returns False when the persist failed — the record
+        stays undetermined, which is the safe state."""
+        return self._update(
+            logical_id,
+            {"state": "result_received", "result": result, "sent_at": int(self._clock())},
+        )
+
+    def mark_unknown(self, logical_id: str, note: str | None = None) -> bool:
+        """The outcome could not be determined (a lost response, a
+        timeout, or the server's "unknown"). The logical batch stays
+        undetermined and is never automatically re-issued."""
+        update: dict[str, Any] = {"state": "outcome_unknown", "sent_at": int(self._clock())}
+        if note is not None:
+            update["note"] = note
+        return self._update(logical_id, update)
+
+    def mark_not_executed(self, logical_id: str, error_id: str | None = None) -> bool:
+        """A definitive rejection before any execution (400/409/410/
+        422, or a 503 with a SPEC error id). The batch is known not
+        to have run."""
+        update: dict[str, Any] = {"state": "not_executed", "sent_at": int(self._clock())}
+        if error_id is not None:
+            update["note"] = error_id
+        return self._update(logical_id, update)
+
+    # ---- reads (for the operator and for batch()) ----
+
+    def get(self, logical_id: str) -> dict[str, Any] | None:
+        """Return the outbox record for a logical batch, or None."""
+        records = self._load_records()
+        if records is None:
+            return None
+        for record in records:
+            if record["logical_id"] == logical_id:
+                return dict(record)
+        return None
+
+    def get_by_batch_id(self, batch_id: str) -> dict[str, Any] | None:
+        """Return the outbox record for a batch_id, or None."""
+        records = self._load_records()
+        if records is None:
+            return None
+        for record in records:
+            if record["batch_id"] == batch_id:
+                return dict(record)
+        return None
+
+    def list_undetermined(self) -> list[dict[str, Any]]:
+        """Records whose outcome is undetermined ("registered" or
+        "outcome_unknown") — the ones a human must decide about.
+        An empty outbox (or an unreadable one) returns []."""
+        records = self._load_records()
+        if records is None:
+            return []
+        return [
+            dict(record)
+            for record in records
+            if record["state"] in ("registered", "outcome_unknown")
+        ]
+
+    def summary(self) -> dict[str, Any]:
+        """Counts by state, for the operator. An unreadable outbox
+        reports initialized=False and no counts. The durability
+        gate state is included (it never raises here — status must
+        stay readable even when sending is refused)."""
+        marker = self._load_marker()
+        records = self._load_records()
+        durability = self._load_durability_marker()
+        if records is None:
+            return {
+                "initialized": marker is not None,
+                "directory": self._directory,
+                "records": 0,
+                "by_state": {},
+                "undetermined": 0,
+                "durability_verified": False,
+                "durability_method": None,
+            }
+        return self._summary(
+            records,
+            initialized=marker is not None,
+            durability_verified=durability is not None
+            and durability.get("method") == OUTBOX_STORAGE_METHOD,
+            durability_method=durability.get("method")
+            if durability is not None else None,
+        )
+
+    # ---- internals ----
+
+    def _summary(
+        self, records: list[dict[str, Any]], initialized: bool,
+        durability_verified: bool = False,
+        durability_method: str | None = None,
+    ) -> dict[str, Any]:
+        by_state: dict[str, int] = {}
+        for record in records:
+            by_state[record["state"]] = by_state.get(record["state"], 0) + 1
+        return {
+            "initialized": initialized,
+            "directory": self._directory,
+            "records": len(records),
+            "by_state": by_state,
+            "undetermined": sum(
+                1
+                for record in records
+                if record["state"] in ("registered", "outcome_unknown")
+            ),
+            "durability_verified": durability_verified,
+            "durability_method": durability_method,
+        }
+
+    @_locked
+    def _update(self, logical_id: str, update: dict[str, Any]) -> bool:
+        """Apply an update to one record and persist it. Returns
+        False (instead of raising) when the record is missing or
+        the persist failed — the record stays in its previous state,
+        which is the safe direction for an undetermined outcome."""
+        records = self._load_records()
+        if records is None:
+            return False
+        for record in records:
+            if record["logical_id"] == logical_id:
+                record.update(update)
+                try:
+                    self._persist_records(records)
+                except ProtocolError:
+                    return False
+                return True
+        return False
+
+    def _purge_determined_old(
+        self, records: list[dict[str, Any]], now: int
+    ) -> None:
+        """Capacity: keep the outbox bounded without ever deleting
+        an undetermined record. When over the cap, drop determined
+        records older than 24 h, oldest first."""
+        if len(records) <= OUTBOX_MAX_RECORDS:
+            return
+        determined_old = [
+            record
+            for record in records
+            if record["state"] in ("result_received", "not_executed")
+            and now - record["created_at"] > OUTBOX_DETERMINED_RETENTION_S
+        ]
+        determined_old.sort(key=lambda r: r["created_at"])
+        excess = len(records) - OUTBOX_MAX_RECORDS
+        for record in determined_old[:excess]:
+            records.remove(record)
+
+    def _persist_records(self, records: list[dict[str, Any]]) -> None:
+        """Write the whole outbox as a durable commit. Raises
+        ProtocolError (code OUTBOX_PERSIST_FAILED) on failure —
+        the caller must not send when this fails."""
+        try:
+            _atomic_write_json(
+                self._outbox_path,
+                {"format_version": OUTBOX_FORMAT_VERSION, "records": records},
+            )
+        except OSError as exc:
+            raise ProtocolError(
+                f"outbox persist failed: {exc}",
+                code="OUTBOX_PERSIST_FAILED",
+            ) from exc
+
+    def _load_records(self) -> list[dict[str, Any]] | None:
+        """Read and validate the outbox file. Returns None when the
+        file is missing; raises ProtocolError (OUTBOX_CORRUPT) when
+        it is unreadable or invalid. Unknown extra fields are
+        ignored (forward compatibility). Missing is decided by the
+        open itself (FileNotFoundError): os.path.exists() returns
+        False both when the file does not exist AND when its
+        existence cannot be determined, so it must never decide
+        absence (CONS-153 P1-01, same class as the phone-side
+        readFileText fix) — an undeterminable outbox must raise
+        OUTBOX_CORRUPT, never be treated as an empty queue."""
+        try:
+            with open(self._outbox_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise ProtocolError(
+                f"outbox file is unreadable: {exc}",
+                code="OUTBOX_CORRUPT",
+            ) from exc
+        if not isinstance(data, dict):
+            raise ProtocolError("outbox file must be a JSON object", code="OUTBOX_CORRUPT")
+        if data.get("format_version") != OUTBOX_FORMAT_VERSION:
+            raise ProtocolError(
+                f"unsupported outbox format_version: {data.get('format_version')!r}",
+                code="OUTBOX_CORRUPT",
+            )
+        records = data.get("records")
+        if not isinstance(records, list):
+            raise ProtocolError("outbox records must be a list", code="OUTBOX_CORRUPT")
+        seen_logical: set[str] = set()
+        seen_batch: set[str] = set()
+        for record in records:
+            if not isinstance(record, dict):
+                raise ProtocolError("outbox record must be an object", code="OUTBOX_CORRUPT")
+            for key in ("logical_id", "batch_id", "content_hash", "state", "created_at"):
+                if key not in record:
+                    raise ProtocolError(
+                        f"outbox record missing required field {key!r}",
+                        code="OUTBOX_CORRUPT",
+                    )
+            if record["state"] not in OUTBOX_STATES:
+                raise ProtocolError(
+                    f"outbox record has an invalid state: {record['state']!r}",
+                    code="OUTBOX_CORRUPT",
+                )
+            if record["logical_id"] in seen_logical or record["batch_id"] in seen_batch:
+                raise ProtocolError(
+                    "outbox has a duplicate logical_id or batch_id",
+                    code="OUTBOX_CORRUPT",
+                )
+            seen_logical.add(record["logical_id"])
+            seen_batch.add(record["batch_id"])
+        return records
+
+    def _load_marker(self) -> dict[str, Any] | None:
+        """Read the init marker. Returns None when it is missing;
+        raises ProtocolError (OUTBOX_CORRUPT) when it is unreadable
+        or invalid. Missing is decided by the open itself
+        (FileNotFoundError) — see _load_records for why
+        os.path.exists() must not decide absence (CONS-153 P1-01)."""
+        try:
+            with open(self._marker_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            raise ProtocolError(
+                f"outbox init marker is unreadable: {exc}",
+                code="OUTBOX_CORRUPT",
+            ) from exc
+        if not isinstance(data, dict):
+            raise ProtocolError(
+                "outbox init marker must be a JSON object", code="OUTBOX_CORRUPT"
+            )
+        if data.get("format_version") != OUTBOX_FORMAT_VERSION:
+            raise ProtocolError(
+                f"unsupported outbox marker format_version: {data.get('format_version')!r}",
+                code="OUTBOX_CORRUPT",
+            )
+        if not isinstance(data.get("attestation"), str) or not data["attestation"].strip():
+            raise ProtocolError(
+                "outbox init marker has no attestation", code="OUTBOX_CORRUPT"
+            )
+        return data

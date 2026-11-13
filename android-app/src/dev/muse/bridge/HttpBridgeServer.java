@@ -178,7 +178,10 @@ public class HttpBridgeServer {
             "/click_node", "/type_node", "/scroll_node",
             "/node_action", "/launch_app", "/open", "/clipboard",
             "/install_status", "/install_apk", "/repair_termux",
-            "/batch", "/click", "/swipe", "/type_text",
+            "/batch", "/batch/confirm", "/batch/restore",
+            "/batch/clear", "/batch/recovery_complete",
+            "/batch/durability_verify",
+            "/click", "/swipe", "/type_text",
             "/press_key", "/notify", "/operation_end"));
 
     /** Loggable form of a request path: the path itself when it is
@@ -1969,7 +1972,7 @@ public class HttpBridgeServer {
                 requireService(svc);
                 try {
                     rejectUnknownFields(j, "batch_id", "protocol_version",
-                            "tree_hash", "actions");
+                            "tree_hash", "actions", "supersedes");
                     int protocolVersion = j.optInt("protocol_version", 1);
                     if (protocolVersion != 1) {
                         throw new org.json.JSONException(
@@ -2009,11 +2012,33 @@ public class HttpBridgeServer {
                     }
                     String batchId = j.getString("batch_id");
                     int batchTreeHash = j.getInt("tree_hash");
+                    // C-01 (SPEC-BATCH-PERSIST-001 §2.6): an optional
+                    // supersedes names the UNKNOWN record this batch
+                    // replaces. Absent, null, or empty means none.
+                    String supersedes = j.optString("supersedes", null);
+                    if (supersedes != null && supersedes.isEmpty()) {
+                        supersedes = null;
+                    }
                     // v2.1: the actions parsed — show "操作中" for
                     // the whole batch (never a per-action summary).
                     opGeneration = noteOperation(lifecycleGeneration, "複数の操作を実行中");
                     BridgeAccessibilityService.BatchResult br = svc.runBatch(
-                            batchId, protocolVersion, batchTreeHash, actions);
+                            batchId, protocolVersion, batchTreeHash, actions, supersedes);
+                    // C-01 (SPEC §2.10): an UNKNOWN response carries
+                    // no results array — only the batch_id, the
+                    // status, and a message. The batch is NOT
+                    // re-executed; the client must not re-send this
+                    // batch_id and must report to the operator.
+                    if ("unknown".equals(br.status)) {
+                        status = 200;
+                        sendJson(out, status, new JSONObject()
+                                .put("ok", true)
+                                .put("batch_id", br.batchId)
+                                .put("status", "unknown")
+                                .put("replayed", false)
+                                .put("message", "batch outcome is unknown — do not re-send this batch_id; check the phone and confirm manually"));
+                        return status;
+                    }
                     JSONArray results = new JSONArray();
                     for (BridgeAccessibilityService.ActionResult r : br.results) {
                         results.put(new JSONObject()
@@ -2057,6 +2082,200 @@ public class HttpBridgeServer {
                             .put("error", e.getMessage()));
                 } catch (BridgeAccessibilityService.NodeNotFoundException e) {
                     status = 422;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchStoreException e) {
+                    // C-01 (SPEC §2.4, §2.5, §2.7): the Registry
+                    // fail-closed errors. "error" carries the SPEC
+                    // error id so the client can tell them apart.
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getErrorId())
+                            .put("message", e.getMessage()));
+                } catch (BatchBadRequestException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchNotFoundException e) {
+                    status = 404;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                }
+            } else if ("/batch/confirm".equals(path) && "POST".equals(method)) {
+                // C-01 (SPEC-BATCH-PERSIST-001 §2.6): record a manual
+                // confirmation on an UNKNOWN record. A management
+                // operation, not a screen operation — no "操作中"
+                // notification. Behind the existing token auth (the
+                // VM's authorized client) until SPEC-AUTH-001
+                // defines the tier.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                try {
+                    rejectUnknownFields(j, "batch_id", "confirmed_by",
+                            "confirmed_via", "outcome", "note");
+                    String batchId = j.getString("batch_id");
+                    String confirmedBy = j.getString("confirmed_by");
+                    String confirmedVia = j.optString("confirmed_via", "vm");
+                    String outcome = j.getString("outcome");
+                    String note = j.optString("note", "");
+                    if (confirmedBy.isEmpty()) {
+                        throw new BatchBadRequestException("confirmed_by must not be empty");
+                    }
+                    if (confirmedVia.isEmpty()) {
+                        throw new BatchBadRequestException("confirmed_via must not be empty");
+                    }
+                    BatchRegistry registry = requireBatchRegistry(svc);
+                    ManualConfirmation mc = registry.confirm(
+                            batchId, confirmedBy, confirmedVia, outcome, note);
+                    status = 200;
+                    sendJson(out, status, new JSONObject()
+                            .put("ok", true)
+                            .put("batch_id", batchId)
+                            .put("status", "unknown")
+                            .put("manual_confirmation", new JSONObject()
+                                    .put("confirmed_at", mc.getConfirmedAt())
+                                    .put("confirmed_by", mc.getConfirmedBy())
+                                    .put("confirmed_via", mc.getConfirmedVia())
+                                    .put("outcome", mc.getOutcome())
+                                    .put("note", mc.getNote())));
+                } catch (BatchStoreException e) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getErrorId())
+                            .put("message", e.getMessage()));
+                } catch (BatchBadRequestException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchNotFoundException e) {
+                    status = 404;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                }
+            } else if ("/batch/restore".equals(path) && "POST".equals(method)) {
+                // C-01 (SPEC §2.5): restore from the backup file.
+                // Operator-explicit only — never automatic. Sets
+                // recoveryPending, so /batch stays refused until the
+                // operator completes verification.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                try {
+                    rejectUnknownFields(j, "note");
+                    String note = j.optString("note", "");
+                    BatchRegistry registry = requireBatchRegistry(svc);
+                    RestoreSummary summary = registry.restoreFromBackup(note);
+                    status = 200;
+                    sendJson(out, status, new JSONObject()
+                            .put("ok", true)
+                            .put("restored_records", summary.getRestoredRecords())
+                            .put("converted_to_unknown", summary.getConvertedToUnknown())
+                            .put("recovery_pending", true));
+                } catch (BatchStoreException e) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getErrorId())
+                            .put("message", e.getMessage()));
+                } catch (BatchBadRequestException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchNotFoundException e) {
+                    status = 404;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                }
+            } else if ("/batch/clear".equals(path) && "POST".equals(method)) {
+                // C-01 (SPEC §2.5): deliberately clear the store.
+                // One atomic transition to a gated-empty store; the
+                // clear alone does NOT resume /batch (the recovery
+                // gate stays on until verification completes).
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                try {
+                    rejectUnknownFields(j, "note");
+                    String note = j.optString("note", "");
+                    BatchRegistry registry = requireBatchRegistry(svc);
+                    registry.clearStore(note);
+                    status = 200;
+                    sendJson(out, status, new JSONObject()
+                            .put("ok", true)
+                            .put("recovery_pending", true));
+                } catch (BatchStoreException e) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getErrorId())
+                            .put("message", e.getMessage()));
+                } catch (BatchBadRequestException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchNotFoundException e) {
+                    status = 404;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                }
+            } else if ("/batch/recovery_complete".equals(path) && "POST".equals(method)) {
+                // C-01 (SPEC §2.5): the operator has checked the
+                // phone's execution history; the recovery gate lifts
+                // and /batch resumes.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                try {
+                    rejectUnknownFields(j, "completed_by");
+                    String completedBy = j.getString("completed_by");
+                    if (completedBy.isEmpty()) {
+                        throw new BatchBadRequestException("completed_by must not be empty");
+                    }
+                    BatchRegistry registry = requireBatchRegistry(svc);
+                    registry.completeRecovery(completedBy);
+                    status = 200;
+                    sendJson(out, status, new JSONObject()
+                            .put("ok", true)
+                            .put("recovery_pending", false));
+                } catch (BatchStoreException e) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getErrorId())
+                            .put("message", e.getMessage()));
+                } catch (BatchBadRequestException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchNotFoundException e) {
+                    status = 404;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                }
+            } else if ("/batch/durability_verify".equals(path) && "POST".equals(method)) {
+                // C-01 (SPEC §2.2, C-01-18): record that the
+                // phone-side storage durability has been demonstrated
+                // by the §5 real-device power-loss-equivalent test.
+                // Only after this does /batch resume. The method
+                // must name this build's storage method.
+                JSONObject j = new JSONObject(new String(body, StandardCharsets.UTF_8));
+                requireService(svc);
+                try {
+                    rejectUnknownFields(j, "method", "note");
+                    String storageMethod = j.getString("method");
+                    String note = j.optString("note", "");
+                    BatchRegistry registry = requireBatchRegistry(svc);
+                    registry.recordDurabilityVerified(storageMethod, note);
+                    status = 200;
+                    sendJson(out, status, new JSONObject()
+                            .put("ok", true)
+                            .put("method", storageMethod)
+                            .put("durability_verified", true));
+                } catch (BatchStoreException e) {
+                    status = 503;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getErrorId())
+                            .put("message", e.getMessage()));
+                } catch (BatchBadRequestException e) {
+                    status = 400;
+                    sendJson(out, status, new JSONObject().put("ok", false)
+                            .put("error", e.getMessage()));
+                } catch (BatchNotFoundException e) {
+                    status = 404;
                     sendJson(out, status, new JSONObject().put("ok", false)
                             .put("error", e.getMessage()));
                 }
@@ -2802,6 +3021,21 @@ public class HttpBridgeServer {
         if (svc == null) {
             throw new ServiceUnavailable("accessibility service not enabled");
         }
+    }
+
+    /** C-01 (SPEC-BATCH-PERSIST-001 §2.1): the BatchRegistry for
+     * the batch management endpoints. The service exists (the
+     * caller already required it), but the Registry is created in
+     * onServiceConnected, so a request in the narrow window before
+     * it exists gets a fail-closed 503 instead of a crash. */
+    private static BatchRegistry requireBatchRegistry(BridgeAccessibilityService svc)
+            throws BatchStoreException {
+        BatchRegistry registry = svc.getBatchRegistry();
+        if (registry == null) {
+            throw new BatchStoreException("batch_store_unavailable",
+                    "batch registry is not ready — the accessibility service is still connecting");
+        }
+        return registry;
     }
 
     /** P0-3 (v2.0): the current startup mode. a11y on wins

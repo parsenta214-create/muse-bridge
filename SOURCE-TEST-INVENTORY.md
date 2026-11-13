@@ -4,16 +4,30 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-13、バッチG完了時。フルスイート: **482 passed、18 subtests**
-（バッチF時の 479 件 ＋ バッチG新規 3 件）。
+最終確認: 2026-11-13、CONS-157指摘対応時。フルスイート: **532 passed、18 subtests**。
+内訳：C-01完了時点の実績は 502 passed＋3 failed（build.sh のバージョン断言が
+2.9.16/69 のままだった更新漏れ — 「505 passed」の報告は誤り）→ CONS-152修正で断言を
+2.9.18/71 へ更新（3件復帰）＋新規 15 件（test_batch_outbox.py 8 件＋
+test_android_app_client.py の CONS-152 ソース検査 7 件）→ CONS-153修正で断言を
+2.9.19/72 へ更新（3件リネーム、件数不変）＋新規 7 件（test_batch_outbox.py 6 件：
+別プロセス同時 register・別インスタンス同時 register・失敗後のロック解放・
+_locked 全適用・VM側 P1-01 判定 2 件、test_android_app_client.py の CONS-153
+ソース検査 1 件）→ CONS-154修正で新規 1 件（test_batch_outbox.py のファイルロック
+初期化固定テスト。コード変更なし・ビルドは v2.9.19／code 72 のまま）→ CONS-156修正で
+断言を 2.9.20/73 へ更新（3件リネーム、件数不変）＋新規 3 件（test_android_app_client.py
+の CONS-156 検査 3 件：P2-1 IN_PROGRESS payloadHash ソース検査・P2-2 失敗後の outbox
+未キャッシュ振る舞い・P2-3 confirm 64KB ソース検査）→ CONS-157指摘対応で新規 1 件
+（test_android_app_client.py の CONS-157 成功経路テスト：_batch_outbox() が
+BatchOutbox インスタンスを返すこと。コード変更なし・ビルドは v2.9.20／code 73 のまま）。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
 | ファイル | `def test_` 数 | 検査対象 |
 |---|---|---|
-| `test_android_app_client.py` | 308 | 下記の Android ソース検査（`_java_source` / `_kotlin_source`）＋ VM 側クライアントの振る舞い（モックサーバー） |
+| `test_android_app_client.py` | 349 | 下記の Android ソース検査（`_java_source` / `_kotlin_source`）＋ VM 側クライアントの振る舞い（モックサーバー） |
 | `test_bridge_protocol.py` | 88 | VM 側プロトコル検証（`bridge_protocol.py`）。Android ソースは検査しない |
 | `test_android_bridge.py` | 8 | VM 側クライアント（`android_bridge.py`）。Android ソースは検査しない |
+| `test_batch_outbox.py` | 37 | C-01 新規：VM 側 outbox（`bridge_protocol.py` の `BatchOutbox`）の判定表・固定送信順・再利用禁止・永続失敗・容量 purge・UNKNOWN 形状・supersedes・確定/未確定分類。CONS-152修正で耐久ゲート 4 件・並行性 2 件・CLI 2 件を追加。CONS-153修正で 6 件を追加（別プロセス同時 register・別インスタンス同時 register・失敗後のロック解放・`_locked` 全適用・VM側 P1-01 判定 2 件）。CONS-154修正で 1 件を追加（ファイルロック初期化固定テスト） |
 | `test_agent.py` | 11 | 上流 computer-use のテスト。Bridge 対象外 |
 | `test_agent_pages.py` | 7 | 上流 computer-use のテスト。Bridge 対象外 |
 | `test_page_manager.py` | 13 | 上流 computer-use のテスト。Bridge 対象外 |
@@ -27,12 +41,13 @@ res の対応を記す。バッチごとに更新する。
 
 | Android ソース | 参照数 | 主なテスト（代表） |
 |---|---|---|
-| `HttpBridgeServer.java` | 7 | P1-06 世代チェック、リクエストログ、サーバー設定 |
+| `HttpBridgeServer.java` | 11 | P1-06 世代チェック、リクエストログ（KNOWN_PATHS ガード：C-01 で管理エンドポイント 5 つを追加）、サーバー設定 |
 | `BridgeWidgetProvider.java` | 4 | ウィジェットボタン／PendingIntent |
 | `MainActivity.java` | 3 | Drive 初期化フック、AppVersion 呼び出し（Kotlin パイロットで不変） |
 | `BridgeWidgetActionReceiver.java` | 2 | ウィジェットアクション分岐 |
 | `BridgeLog.kt`（バッチGで Java から移行） | 5 | ログ初期化・PII 除去（T-33/T-36は .kt 読取へ更新） |
-| `BridgeAccessibilityService.java` | 2 | P1-01 collectNodes recycle |
+| `BatchRegistry.kt`（新規・C-01） | 10 | 永続レジストリ。ソース検査は KNOWN_PATHS ガードとモックの batch 振る舞い（再送禁止・UNKNOWN）。JVM レベルの単一ロックは `javap -c` で確認（monitorenter が lock に集約）。CONS-152修正でソース検査 7 件を追加（P0-01 tombstone 再計算＋admit 順序、P0-02 CORRUPT ガード、P1-01 読み取り不能、P1-04 supersedes 確認必須、P2-01 512KB 上限）。CONS-153修正でソース検査 1 件を追加（P1-01 不存在の積極確認：Files.notExists／undeterminable は CORRUPT／NoSuchFileException 競合は null）。CONS-156修正でソース検査 2 件を追加（P2-1 IN_PROGRESS の payloadHash 照合、P2-3 confirm の 64KB 上限）。javap 再確認（c01-fix3-BatchRegistry.txt）：BatchMismatchException 参照 6 箇所（投げ 3 箇所）、monitorenter 8 箇所のまま |
+| `BridgeAccessibilityService.java` | 3 | P1-01 collectNodes recycle。CONS-152修正で `batchRegistry` の volatile 化（P2-02）をソース検査＋javap で確認 |
 | `UriPermissionRegistry.kt` | 1 | 権限レジストリ（バッチDで Java から移行） |
 | `PingProber.kt`（バッチEで Java から移行） | 3 | ping 往復測定（※移行前はソース検査ゼロだった） |
 | `BridgeNotificationListener.kt`（バッチFで Java から移行） | 3 | 通知イベント流（※移行前はソース検査ゼロだった） |
@@ -52,7 +67,7 @@ res の対応を記す。バッチごとに更新する。
 
 | 検査 | テスト |
 |---|---|
-| `VERSION_NAME="2.9.16"` / `VERSION_CODE=69`（バッチG） | `test_locale_tile_version_2_9_16`、`test_a11yoff002_version_2_9_16`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
+| `VERSION_NAME="2.9.19"` / `VERSION_CODE=72`（CONS-153修正） | `test_locale_tile_version_2_9_19`、`test_a11yoff002_version_2_9_19`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
 | kotlinc ステップ（`-jvm-target 17`、256m、2 コンパイラ・パイプライン）、javac の `-cp` に `$KOTLIN_STDLIB`、d8 に stdlib を 1 個だけ | `test_kotlin_pilot_build_sh_two_compiler_pipeline` |
 
 ## 運用ルール（D6）

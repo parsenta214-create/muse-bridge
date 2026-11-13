@@ -124,22 +124,23 @@ public class BridgeAccessibilityService extends AccessibilityService {
     private int lastRevision = -1;
     private int lastTreeHash = 0;
 
-    /** Batch results by batch_id for idempotency (Phase 2).
-     * Phase C-1 (P0-03): entries are NEVER evicted by count —
-     * a live entry (inside its 10-min result + 10-min tombstone
-     * window) must survive, or a re-sent batch_id would
-     * re-execute as a new batch. Expired entries (past
-     * tombstoneUntil) are purged lazily on insert, so the map
-     * stays bounded by the batches created in the last
-     * 20 minutes. */
-    private final Map<String, BatchCacheEntry> batchCache =
-            new LinkedHashMap<>();
+    /** SPEC-BATCH-PERSIST-001 v2.8 (C-01, Decision 103): the
+     * BatchRegistry is the sole authority for batch identity, state,
+     * and persistence. The old in-memory batchCache is gone (SPEC
+     * §2.1: no dual management). The Registry is created when the
+     * service connects; the HTTP server reaches it through
+     * getBatchRegistry(). Volatile (CONS-152 P2-02): the field is
+     * written on the service main thread in onServiceConnected()
+     * and read from HTTP worker threads, so the publication must
+     * be explicit. */
+    private volatile BatchRegistry batchRegistry;
 
-    /** A-4: batch result lifetime (Codex Phase A initial values). */
-    private static final long BATCH_TTL_MS = 10 * 60 * 1000;
-    /** After the result expires, the id + hash stay as a tombstone
-     * for another TTL; reuse is refused (410) while it lives. */
-    private static final long BATCH_TOMBSTONE_MS = 10 * 60 * 1000;
+    /** The BatchRegistry for this service (null until the service
+     * connects). The HTTP server uses it for admission and for the
+     * batch management endpoints. */
+    public BatchRegistry getBatchRegistry() {
+        return batchRegistry;
+    }
 
     /** A-4: same batch_id, different payload — the id is in use. */
     public static class BatchMismatchException extends Exception {
@@ -153,17 +154,6 @@ public class BridgeAccessibilityService extends AccessibilityService {
         public BatchGoneException(String message) {
             super(message);
         }
-    }
-
-    /** A-4: one cache entry. result is null while RUNNING. */
-    private static class BatchCacheEntry {
-        String payloadHash = "";
-        BatchResult result;
-        /** "running", "completed", "partial", or "failed". */
-        String status = "running";
-        long createdAt = 0;
-        long expiresAt = 0;
-        long tombstoneUntil = 0;
     }
 
     /**
@@ -217,6 +207,16 @@ public class BridgeAccessibilityService extends AccessibilityService {
         // A-3: the main-thread handler is the single execution
         // context for accessibility work.
         mainHandler = new Handler(Looper.getMainLooper());
+        // C-01 (SPEC-BATCH-PERSIST-001 §2.1): the BatchRegistry is
+        // the sole authority for batch records. Created once; a
+        // reconnect reuses it (init() is idempotent and the
+        // Registry keeps its state across a disconnect — a batch
+        // that was executing stays IN_PROGRESS until it reports
+        // back or the process restarts, SPEC §2.8).
+        if (batchRegistry == null) {
+            batchRegistry = new BatchRegistry(getFilesDir());
+            batchRegistry.init();
+        }
         broadcastA11yStateChanged();
     }
 
@@ -1170,26 +1170,41 @@ public class BridgeAccessibilityService extends AccessibilityService {
 
     /**
      * Runs a batch against one snapshot (Phase 2, coordinator in
-     * A-4). Steps execute in order; the first failure stops the
-     * batch. A step with expectChange waits up to 2 s for the tree
-     * hash to move: when it moves, the batch stops after that step
-     * (the screen changed, so later node ids are invalid — the
-     * client refetches /state and sends the next batch).
+     * A-4; C-01: the BatchRegistry is now the sole authority for
+     * batch identity and persistence, SPEC-BATCH-PERSIST-001 §2.1).
+     * Steps execute in order; the first failure stops the batch. A
+     * step with expectChange waits up to 2 s for the tree hash to
+     * move: when it moves, the batch stops after that step (the
+     * screen changed, so later node ids are invalid — the client
+     * refetches /state and sends the next batch).
      *
-     * Idempotency (A-4): the batch_id + payload_hash decides. A
-     * re-send with the same id AND the same hash returns the cached
-     * result (replayed: true) without re-executing; while the first
-     * run is still in flight it returns status "running" (replayed:
-     * true). The same id with a different hash is a 409; an id whose
-     * result expired is a 410 until its tombstone lapses. Results
-     * live 10 minutes in memory only — no exactly-once across a
-     * process restart (a stated design constraint).
+     * Fixed order (SPEC §2.3): the A-3 entry check below, then the
+     * Registry admission (ID check + IN_PROGRESS persist, under the
+     * Registry lock); execution on the main thread, outside the
+     * Registry lock; the result persist; respond. A re-send with
+     * the same id AND the same hash returns the stored result
+     * (replayed: true) without re-executing; while the first run is
+     * still in flight it returns status "running" (replayed: true);
+     * an UNKNOWN id returns status "unknown" (replayed: false) and
+     * is never re-executed. The same id with a different hash is a
+     * 409; an id whose result expired is a 410 until its tombstone
+     * lapses. Records now survive a process restart (decision 49's
+     * memory-only constraint is superseded for the batch-record
+     * scope by SPEC-BATCH-PERSIST-001).
+     *
+     * @param supersedes the batch_id of the UNKNOWN record this
+     * batch replaces, or null (SPEC §2.6).
      */
     public BatchResult runBatch(final String batchId, final int protocolVersion,
-            final int treeHash, final List<BatchAction> actions) throws Exception {
+            final int treeHash, final List<BatchAction> actions,
+            final String supersedes) throws Exception {
         final String payloadHash =
                 sha256Hex(canonicalBatchPayload(protocolVersion, treeHash, actions));
-        final long now = System.currentTimeMillis();
+        // A-3 entry check (unchanged): the snapshot the batch was
+        // built against must still be current. This runs before the
+        // Registry admission, so a stale batch never creates a
+        // record — and a replay with a moved tree hash still gets a
+        // 409, as before.
         final int entrySnapshotId;
         synchronized (this) {
             if (lastRevision < 0) {
@@ -1200,48 +1215,43 @@ public class BridgeAccessibilityService extends AccessibilityService {
                 throw new StaleRevisionException(
                         "screen changed since that /state (tree hash moved) — refetch state");
             }
-            BatchCacheEntry entry = batchCache.get(batchId);
-            if (entry != null) {
-                if (now > entry.tombstoneUntil) {
-                    batchCache.remove(batchId);
-                    entry = null;
-                } else if (now > entry.expiresAt) {
-                    throw new BatchGoneException(
-                            "batch_id " + batchId + " expired — use a new batch_id");
-                } else if (!entry.payloadHash.equals(payloadHash)) {
-                    throw new BatchMismatchException(
-                            "batch_id " + batchId + " is already in use with different content");
-                } else if ("running".equals(entry.status)) {
-                    BatchResult running = new BatchResult();
-                    running.batchId = batchId;
-                    running.replayed = true;
-                    running.status = "running";
-                    running.payloadHash = payloadHash;
-                    running.snapshotId = lastRevision;
-                    return running;
-                } else {
-                    BatchResult replay = new BatchResult(entry.result);
-                    replay.replayed = true;
-                    return replay;
-                }
-            }
             entrySnapshotId = lastRevision;
-            BatchCacheEntry fresh = new BatchCacheEntry();
-            fresh.payloadHash = payloadHash;
-            fresh.status = "running";
-            fresh.createdAt = now;
-            fresh.expiresAt = now + BATCH_TTL_MS;
-            fresh.tombstoneUntil = now + BATCH_TTL_MS + BATCH_TOMBSTONE_MS;
-            // Phase C-1 (P0-03): drop entries past their tombstone
-            // so the map stays bounded without ever evicting a
-            // live one.
-            for (Iterator<Map.Entry<String, BatchCacheEntry>> it =
-                    batchCache.entrySet().iterator(); it.hasNext(); ) {
-                if (now > it.next().getValue().tombstoneUntil) {
-                    it.remove();
-                }
+        }
+        if (batchRegistry == null) {
+            throw new BatchStoreException("batch_store_unavailable",
+                    "batch registry is not ready — the accessibility service is still connecting");
+        }
+        // Registry admission (SPEC §2.3): the ID check and the
+        // IN_PROGRESS persist, serialized under the Registry lock.
+        // The 409/410/503 cases throw here; nothing has executed.
+        AdmitDecision decision =
+                batchRegistry.admit(batchId, payloadHash, supersedes);
+        switch (decision.getKind()) {
+            case REPLAY:
+                return decision.getResult();
+            case RUNNING: {
+                BatchResult running = new BatchResult();
+                running.batchId = batchId;
+                running.replayed = true;
+                running.status = "running";
+                running.payloadHash = payloadHash;
+                running.snapshotId = entrySnapshotId;
+                return running;
             }
-            batchCache.put(batchId, fresh);
+            case UNKNOWN: {
+                BatchResult unknown = new BatchResult();
+                unknown.batchId = batchId;
+                unknown.replayed = false;
+                unknown.status = "unknown";
+                unknown.payloadHash = payloadHash;
+                unknown.snapshotId = entrySnapshotId;
+                return unknown;
+            }
+            case NEW:
+                break;
+            default:
+                throw new IllegalStateException(
+                        "unknown admission decision: " + decision.getKind());
         }
         final int snapshotId = entrySnapshotId;
         BatchResult result = runOnMainThread(new Callable<BatchResult>() {
@@ -1251,13 +1261,11 @@ public class BridgeAccessibilityService extends AccessibilityService {
             }
         });
         result.payloadHash = payloadHash;
-        synchronized (this) {
-            BatchCacheEntry entry = batchCache.get(batchId);
-            if (entry != null && entry.payloadHash.equals(payloadHash)) {
-                entry.result = result;
-                entry.status = result.status;
-            }
-        }
+        // Step 4: persist the result. If that persist fails, the
+        // Registry marks the record UNKNOWN in memory (a re-send
+        // gets "unknown", never a re-execution); the result is
+        // still returned to this caller (SPEC §2.4).
+        batchRegistry.complete(batchId, payloadHash, result);
         return result;
     }
 
