@@ -969,6 +969,129 @@ open class BridgeAccessibilityService : AccessibilityService() {
     }
 
     // ---------------------------------------------------------------
+    // C-04: foreground guard (SPEC-FOREGROUND-GUARD-001 §2.2).
+    // ---------------------------------------------------------------
+
+    /** C-04 guard failure. `errorId` is the machine-readable
+     * 409/503 identifier the server returns
+     * (`foreground_mismatch`, `tree_hash_mismatch`,
+     * `generation_mismatch`, `session_mismatch`,
+     * `foreground_unverifiable`, `snapshot_unavailable`). A
+     * thrown guard means nothing was dispatched. For a
+     * foreground_mismatch the expected/current packages ride
+     * along so the 409 response can name both (SPEC §2.2). */
+    open class OperationGuardException(
+        val errorId: String,
+        message: String,
+        val expectedPackage: String? = null,
+        val currentPackage: String? = null
+    ) : Exception(message)
+
+    /**
+     * Shared guard check (C-04 §2.2). The caller supplies the
+     * foreground package — a fresh root read on the main thread,
+     * or the getForegroundPackage() round-trip from a worker
+     * thread. The snapshot pair (tree hash, revision) is read as
+     * one unit under synchronized(this), so the two can never
+     * come from different snapshots. `generation` is compared
+     * against the LATEST snapshot revision (lastRevision), not a
+     * fresh walk: a fresh walk would increment the revision and
+     * the supplied generation could never match. A new snapshot
+     * taken between the VM's /state read and this check is itself
+     * the staleness signal.
+     * @throws OperationGuardException on the first failing check.
+     * @return the snapshot revision the checks validated against.
+     */
+    @Throws(OperationGuardException::class)
+    fun checkGuard(
+        foregroundPackage: String?,
+        expectedPackage: String,
+        treeHash: Int?,
+        generation: Int?,
+        isSessionValid: () -> Boolean
+    ): Int {
+        if (foregroundPackage == null) {
+            throw OperationGuardException("foreground_unverifiable",
+                "the foreground package cannot be determined")
+        }
+        val snapshotTreeHash: Int
+        val snapshotRevision: Int
+        synchronized(this) {
+            snapshotTreeHash = lastTreeHash
+            snapshotRevision = lastRevision
+        }
+        if (snapshotRevision < 0) {
+            throw OperationGuardException("snapshot_unavailable",
+                "no snapshot yet — fetch /state first")
+        }
+        if (foregroundPackage != expectedPackage) {
+            throw OperationGuardException("foreground_mismatch",
+                "foreground is $foregroundPackage, expected $expectedPackage",
+                expectedPackage, foregroundPackage)
+        }
+        if (treeHash != null && treeHash != snapshotTreeHash) {
+            throw OperationGuardException("tree_hash_mismatch",
+                "screen changed since that /state (tree hash moved) — refetch state")
+        }
+        if (generation != null && generation != snapshotRevision) {
+            throw OperationGuardException("generation_mismatch",
+                "screen changed since that /state (generation moved) — refetch state")
+        }
+        if (!isSessionValid()) {
+            throw OperationGuardException("session_mismatch",
+                "the operation session is not active")
+        }
+        return snapshotRevision
+    }
+
+    /**
+     * C-04 §2.2: the serialized execution admission boundary for
+     * a non-node operation. The whole guard — fresh foreground
+     * read, snapshot validation, session check, and the dispatch
+     * itself — runs inside ONE runOnMainThread task, so no other
+     * Bridge operation can interleave between validation and
+     * dispatch (the main thread is the single execution context,
+     * decision 48). The HTTP worker posts here and waits without
+     * holding any lock (A-3, 20 s timeout → 503). The root is read
+     * directly (not via getForegroundPackage(), which would be a
+     * second main-thread round-trip from inside this task).
+     * @throws OperationGuardException (nothing dispatched).
+     */
+    @Throws(Exception::class)
+    fun <T> runGuardedOperation(
+        expectedPackage: String,
+        treeHash: Int?,
+        generation: Int?,
+        isSessionValid: () -> Boolean,
+        action: () -> T
+    ): T {
+        return runOnMainThread(Callable {
+            val root = rootInActiveWindow
+            val currentPackage: String?
+            try {
+                currentPackage = root?.packageName?.toString()
+            } finally {
+                root?.recycle()
+            }
+            val validatedRevision = checkGuard(
+                currentPackage, expectedPackage, treeHash, generation, isSessionValid)
+            // Re-check: the SPEC's invalidation point. No snapshot
+            // can be produced inside this main-thread task (snapshots
+            // are taken on the main thread only), so this read cannot
+            // differ — it documents the boundary.
+            val revisionAfter: Int
+            synchronized(this) {
+                revisionAfter = lastRevision
+            }
+            if (revisionAfter != validatedRevision) {
+                throw OperationGuardException("generation_mismatch",
+                    "a new snapshot appeared between validation and dispatch")
+            }
+            action()
+        })
+    }
+
+    // ---------------------------------------------------------------
     // Phase 2: node-targeted actions and batches.
     // ---------------------------------------------------------------
 
@@ -1194,7 +1317,17 @@ open class BridgeAccessibilityService : AccessibilityService() {
         protocolVersion: Int,
         treeHash: Int,
         actions: List<BatchAction>,
-        supersedes: String?
+        supersedes: String?,
+        guardExpectedPackage: String? = null,
+        guardTreeHash: Int? = null,
+        guardGeneration: Int? = null,
+        guardSessionValid: (() -> Boolean)? = null,
+        // CONS-167 P1-02: invoked inside runBatchInternal, after the
+        // final in-task guard passes and inside the same main-thread
+        // task as the actions — the server's operation hook
+        // (noteOperation) runs there, never before. Null means no
+        // hook (a direct runBatch caller with no session to start).
+        onFinalGuardPassed: (() -> Unit)? = null
     ): BatchResult {
         val payloadHash = sha256Hex(canonicalBatchPayload(protocolVersion, treeHash, actions))
         // A-3 entry check (unchanged): the snapshot the batch was
@@ -1217,6 +1350,19 @@ open class BridgeAccessibilityService : AccessibilityService() {
             ?: throw BatchStoreException(
                 "batch_store_unavailable",
                 "batch registry is not ready — the accessibility service is still connecting")
+        // C-04 (SPEC-FOREGROUND-GUARD-001 §2.2): the worker-side
+        // guard validation, next to the A-3 entry check and before
+        // admission, so a guard-rejected batch never creates a
+        // record. The foreground comes from the getForegroundPackage()
+        // round-trip (a worker cannot read the root directly); the
+        // snapshot pair is read inside checkGuard. This is the
+        // pre-admission check only — runBatchInternal re-validates
+        // inside the execution task, which is the true boundary.
+        if (guardExpectedPackage != null) {
+            val foregroundPackage = getForegroundPackage()
+            checkGuard(foregroundPackage, guardExpectedPackage, guardTreeHash,
+                guardGeneration, guardSessionValid ?: { true })
+        }
         // Registry admission (SPEC §2.3): the ID check and the
         // IN_PROGRESS persist, serialized under the Registry lock.
         // The 409/410/503 cases throw here; nothing has executed.
@@ -1247,9 +1393,25 @@ open class BridgeAccessibilityService : AccessibilityService() {
             else -> throw IllegalStateException("unknown admission decision: ${decision.kind}")
         }
         val snapshotId = entrySnapshotId
-        val result = runOnMainThread(Callable {
-            runBatchInternal(batchId, treeHash, actions, snapshotId)
-        })
+        val result = try {
+            runOnMainThread(Callable {
+                runBatchInternal(batchId, treeHash, actions, snapshotId,
+                    guardExpectedPackage, guardTreeHash, guardGeneration, guardSessionValid,
+                    onFinalGuardPassed)
+            })
+        } catch (e: OperationGuardException) {
+            // C-04: the in-task guard refused the batch after
+            // admission — remove the IN_PROGRESS record so a re-send
+            // does not answer "running" for a batch that never ran.
+            // CONS-167 P2-01: a failed discard is logged, not silent
+            // — the record is UNKNOWN in memory then (see
+            // discard()), never "running".
+            if (!registry.discard(batchId, payloadHash)) {
+                BridgeLog.log("batch_registry",
+                    "discard did not remove the record for " + batchId + "; see registry log")
+            }
+            throw e
+        }
         result.payloadHash = payloadHash
         // Step 4: persist the result. If that persist fails, the
         // Registry marks the record UNKNOWN in memory (a re-send
@@ -1265,8 +1427,39 @@ open class BridgeAccessibilityService : AccessibilityService() {
         batchId: String,
         treeHash: Int,
         actions: List<BatchAction>,
-        entrySnapshotId: Int
+        entrySnapshotId: Int,
+        guardExpectedPackage: String? = null,
+        guardTreeHash: Int? = null,
+        guardGeneration: Int? = null,
+        guardSessionValid: (() -> Boolean)? = null,
+        onFinalGuardPassed: (() -> Unit)? = null
     ): BatchResult {
+        // C-04: the in-task guard — the true admission boundary.
+        // This runs inside the same main-thread task as the actions
+        // below, so no other Bridge operation can change the context
+        // between validation and the first dispatch. A failure here
+        // throws before any action executes; runBatch() discards the
+        // admitted record on the way out.
+        if (guardExpectedPackage != null) {
+            val root = rootInActiveWindow
+            val currentPackage: String?
+            try {
+                currentPackage = root?.packageName?.toString()
+            } finally {
+                root?.recycle()
+            }
+            checkGuard(currentPackage, guardExpectedPackage, guardTreeHash,
+                guardGeneration, guardSessionValid ?: { true })
+        }
+        // CONS-167 P1-02: the operation hook runs here, after the
+        // final guard passed and inside the same main-thread task as
+        // the actions — a guard-refused batch starts no session and
+        // posts no notification. When there is no guard to pass, the
+        // hook still runs at this same point: the start of execution.
+        // Lock order: this method holds the service monitor
+        // (@Synchronized); the hook takes operationLock — the same
+        // order checkGuard uses, so no new lock cycle.
+        onFinalGuardPassed?.invoke()
         val result = BatchResult()
         result.batchId = batchId
         result.snapshotId = entrySnapshotId

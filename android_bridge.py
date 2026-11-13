@@ -629,6 +629,13 @@ class AndroidAdapter:
         # A-3 (v1.9): the most recent /state, so node actions can tell
         # whether that snapshot was stable before acting on it.
         self._last_state: dict | None = None
+        # C-04 (SPEC-FOREGROUND-GUARD-001 §2.4): the server-issued
+        # operation session id, retained from the last guarded
+        # response that carried one. None until the first guarded
+        # operation bootstraps a session; cleared by operation_end()
+        # and when a session_mismatch proves it stale (see
+        # _app_request).
+        self._operation_session_id: str | None = None
         # Decision 59: the latest logical call's measurement
         # (cleared when a call starts, filled when it finishes).
         self.last_call: dict | None = None
@@ -657,6 +664,34 @@ class AndroidAdapter:
                 "/state — refetch state and re-plan the action")
         return fresh.get("tree_hash", tree_hash)
 
+    # -- C-04 foreground guard (§2.1, §2.2) --------------------------------
+    def _guard_context(self, state: dict, tree_hash: int | None = None) -> dict:
+        """Build the operation_context for a guarded action from a
+        /state snapshot. expected_package / generation are that
+        snapshot's (generation is the /state revision — the server's
+        snapshot_id is the same number by construction,
+        BridgeAccessibilityService sets snapshotId = lastRevision);
+        tree_hash defaults to the snapshot's, or to the caller's
+        tree_hash for /batch (the batch's own tree_hash, which the
+        server's entry check compares separately); session_id is
+        the retained server-issued id (None on the first operation
+        — the server bootstraps the session and returns its id in
+        the response, which _app_post retains). Raises
+        ProtocolError when the snapshot has no foreground package —
+        fail fast client-side instead of sending a context the
+        server would 400."""
+        package = state.get("package")
+        if not package:
+            raise bridge_protocol.ProtocolError(
+                "cannot guard this action: /state has no foreground package")
+        if tree_hash is None:
+            tree_hash = state.get("tree_hash")
+        return bridge_protocol.build_operation_context(
+            package,
+            tree_hash=tree_hash,
+            generation=state.get("revision"),
+            session_id=self._operation_session_id)
+
     # -- read-only -----------------------------------------------------------
     def capture_screen(self, scale: float = 0.5, format: str = "jpeg",
                        quality: int = 80) -> bytes:
@@ -683,20 +718,29 @@ class AndroidAdapter:
 
     def click(self, x: int, y: int) -> dict:
         self._require_actions(f"click({x}, {y})")
-        # Step 3: the request body is built (and validated) by the
-        # protocol module — coordinates must be >= 0, body size capped.
-        return self._app_post("/click", bridge_protocol.build_click(x, y))
+        # C-04 (§2.2): a guarded action carries the operation_context
+        # of a fresh snapshot — the server refuses (409/503) when the
+        # screen moved or the foreground cannot be verified. The
+        # /state fetch is a GET (retried on transient failure, like
+        # any read); the POST itself still runs exactly once.
+        state = self.get_current_state()
+        return self._app_post("/click", bridge_protocol.build_click(
+            x, y, operation_context=self._guard_context(state)))
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
         self._require_actions(f"swipe({x1}, {y1} -> {x2}, {y2})")
-        # Step 3: validated by the protocol module.
+        # C-04 (§2.2): fresh snapshot + operation_context, as in click().
+        state = self.get_current_state()
         return self._app_post("/swipe", bridge_protocol.build_swipe(
-            x1, y1, x2, y2, duration_ms))
+            x1, y1, x2, y2, duration_ms,
+            operation_context=self._guard_context(state)))
 
     def type_text(self, text: str) -> dict:
         self._require_actions(f"type_text({text!r})")
-        # Step 3: validated by the protocol module.
-        return self._app_post("/type_text", bridge_protocol.build_type_text(text))
+        # C-04 (§2.2): fresh snapshot + operation_context, as in click().
+        state = self.get_current_state()
+        return self._app_post("/type_text", bridge_protocol.build_type_text(
+            text, operation_context=self._guard_context(state)))
 
     def press_key(self, key: str) -> dict:
         """key is a keyevent name or code, e.g. 'BACK', 'HOME', '4', '3',
@@ -706,9 +750,12 @@ class AndroidAdapter:
         effect, which depends on the app."""
         self._require_actions(f"press_key({key})")
         app_key = {"3": "HOME", "4": "BACK"}.get(key, key)
+        # C-04 (§2.2): fresh snapshot + operation_context, as in click().
         # Step 3: validated by the protocol module (VALID_KEYS now
         # includes the DPAD keys, matching the server's pressKey).
-        return self._app_post("/press_key", bridge_protocol.build_press_key(app_key))
+        state = self.get_current_state()
+        return self._app_post("/press_key", bridge_protocol.build_press_key(
+            app_key, operation_context=self._guard_context(state)))
 
     def click_node(self, node_id: str, tree_hash: int) -> dict:
         """Click a node by id (Phase 2)."""
@@ -887,8 +934,15 @@ class AndroidAdapter:
         if not package:
             raise ValueError("package must not be empty")
         self._require_actions(f"launch_app({package})")
+        # C-04 (§2.5): a launch joins the active session when one is
+        # retained (session_id only — expected_package does not apply,
+        # the launch itself changes the foreground); omitted otherwise
+        # (bootstrap — the server creates the session).
+        body: dict = {"package": package}
+        if self._operation_session_id is not None:
+            body["operation_context"] = {"session_id": self._operation_session_id}
         return bridge_protocol.parse_launch_app(
-            self._app_post("/launch_app", {"package": package}))
+            self._app_post("/launch_app", body))
 
     def repair_termux(self) -> dict:
         """Repair Termux's sshd (Decision 95, v2.5.0, TARMUX_KICKASS
@@ -918,7 +972,12 @@ class AndroidAdapter:
         if not uri:
             raise ValueError("uri must not be empty")
         self._require_actions(f"open({uri})")
-        return self._app_post("/open", {"uri": uri})
+        # C-04 (§2.5): as in launch_app — session_id only, omitted
+        # when no session is retained (bootstrap).
+        body: dict = {"uri": uri}
+        if self._operation_session_id is not None:
+            body["operation_context"] = {"session_id": self._operation_session_id}
+        return self._app_post("/open", body)
 
     def install_apk(self, url=None, path=None) -> dict:
         """Install an APK (decision 75, v1.9.16): POST
@@ -982,7 +1041,15 @@ class AndroidAdapter:
         if action == "reply" and not text:
             raise ValueError("text is required for reply")
         self._require_actions(f"notification_action({action})")
-        body = {"key": key, "action": action}
+        # C-04 (§2.2): /notification_action is a guarded ordinary
+        # screen operation (SPEC table §2.2) — it needs the service
+        # and the operation_context of a fresh snapshot, exactly
+        # like click(). (The pre-C-04 mock listed it as
+        # a11y-off-available; that was stale — the SPEC fail-closes
+        # it with 503 foreground_unverifiable when a11y is off.)
+        state = self.get_current_state()
+        body = {"key": key, "action": action,
+                "operation_context": self._guard_context(state)}
         if text is not None:
             body["text"] = text
         return self._app_post("/notification_action", body)
@@ -1033,6 +1100,18 @@ class AndroidAdapter:
         actions = actions or []
         self._require_actions(f"batch({batch_id}, {len(actions)} actions)")
         tree_hash = self._ensure_fresh_snapshot(tree_hash)
+        # C-04 (§2.2, §2.8): the batch carries the operation_context
+        # of the snapshot it acts on — checked once, before the batch
+        # executes, so a guard refusal means no action runs. The
+        # context's tree_hash is the batch's own tree_hash (the
+        # server's entry check compares the same value); the package
+        # and generation come from the snapshot. _ensure_fresh_snapshot
+        # may have refreshed _last_state; fetch one when there is
+        # none yet (a fresh GET — the POST itself is still sent once).
+        state = self._last_state
+        if state is None:
+            state = self._state_app()
+        guard_context = self._guard_context(state, tree_hash=tree_hash)
         # Step 1: validate the payload and compute the content hash
         # (the in-memory registry). This happens before any outbox
         # interaction, so an invalid input raises before anything is
@@ -1045,7 +1124,8 @@ class AndroidAdapter:
         if logical_id is None or logical_id == "":
             logical_id = str(uuid.uuid4())
         submission = self._batch_registry.submit(
-            batch_id, tree_hash, actions, supersedes=supersedes)
+            batch_id, tree_hash, actions, supersedes=supersedes,
+            operation_context=guard_context)
         # Step 2: the persistent outbox (fail-closed when it is not
         # initialized or is corrupt) and the reuse ban.
         outbox = self._batch_outbox()
@@ -1140,8 +1220,15 @@ class AndroidAdapter:
         auto-ends after 10 s.
         """
         # Step 3: validated by the protocol module.
-        return self._app_post("/operation_end",
+        result = self._app_post("/operation_end",
                               bridge_protocol.build_operation_end())
+        # C-04 (§2.4): ending the session invalidates the id
+        # server-side; drop the retained copy so the next guarded
+        # action bootstraps a fresh session instead of 409ing on a
+        # dead id. (_app_post retains nothing here — /operation_end
+        # carries no session_id.)
+        self._operation_session_id = None
+        return result
 
     @contextlib.contextmanager
     def operation_session(self):
@@ -1367,6 +1454,16 @@ class AndroidAdapter:
                 "ok": False, "status": status,
                 "error": str(exc)[:200],
             }
+            # C-04 (§2.4): a session_mismatch proves the retained
+            # session id is not the active one (the server restarted,
+            # the session auto-ended after 10 s idle, or another
+            # client ended it). Drop it so the next guarded action
+            # bootstraps a fresh session instead of 409ing again on
+            # the same stale id. Without this the mismatch is sticky:
+            # the server 409s any non-null id that is not active,
+            # including when no session is active at all.
+            if getattr(exc, "error_id", None) == "session_mismatch":
+                self._operation_session_id = None
             raise
         self.last_call = {
             "method": method, "path": path,
@@ -1426,20 +1523,31 @@ class AndroidAdapter:
             # overload, and the outcome is undetermined. The id is
             # carried on the TransportError so batch() can tell
             # them apart without re-parsing the message.
+            # C-04: the same extraction now runs for every error
+            # status — the guarded endpoints report their SPEC error
+            # id ("foreground_mismatch", "session_mismatch", ...) in
+            # "error", and the client needs it structured (see
+            # _app_request: a session_mismatch drops the retained
+            # session id). A non-JSON body, or an "error" that is
+            # not a string, leaves error_id None.
             error_id = None
+            body: dict = {}
+            if detail:
+                try:
+                    parsed = json.loads(detail)
+                except (ValueError, TypeError):
+                    parsed = {}
+                if isinstance(parsed, dict):
+                    body = parsed
+            if isinstance(body.get("error"), str):
+                error_id = body["error"]
             # P0-1 (v2.0): a structured a11y-off 503 raises the
             # dedicated subclass so callers can tell "a11y off"
             # from "server down" / "overloaded" without parsing
             # the message. A bare 503 (no reason field) keeps the
             # old behaviour — it may be overload, which retries.
             if exc.code == 503:
-                try:
-                    body = json.loads(detail) if detail else {}
-                except (ValueError, TypeError):
-                    body = {}
-                if isinstance(body, dict) and isinstance(body.get("error"), str):
-                    error_id = body["error"]
-                if isinstance(body, dict) and body.get("reason") == "ACCESSIBILITY_DISABLED":
+                if body.get("reason") == "ACCESSIBILITY_DISABLED":
                     raise AccessibilityUnavailableError(
                         f"app returned HTTP 503 [{code}] for {method} {path}: "
                         f"accessibility service not enabled "
@@ -1509,6 +1617,14 @@ class AndroidAdapter:
     def _app_post(self, path: str, payload: dict) -> dict:
         result = self._app_request("POST", path, payload)
         result["transport"] = "app"
+        # C-04 (§2.4): guarded endpoints return the server-issued
+        # session id; retain it so the next guarded action joins the
+        # same session instead of bootstrapping a new one. A response
+        # without one (/notify, /operation_end, /install_apk, ...)
+        # leaves the retained id untouched.
+        sid = result.get("session_id")
+        if isinstance(sid, str) and sid:
+            self._operation_session_id = sid
         return result
 
 # --------------------------------------------------------------------------

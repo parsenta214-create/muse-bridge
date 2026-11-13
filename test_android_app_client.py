@@ -250,6 +250,17 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # before the /launch_app answer, modelling a slow
     # verification window. Reset by the fixture.
     launch_delay_s = 0.0
+    # C-04 (SPEC-FOREGROUND-GUARD-001 §2.1): when set to a dict,
+    # the next failing POST (fail_next tuple hook) answers with
+    # this body instead of the generic simulated body — so a test
+    # can make the mock return a real SPEC error id (e.g. 409
+    # {"ok": false, "error": "session_mismatch"}). Reset by the
+    # fixture.
+    fail_body = None
+    # C-04: the server-issued session id the mock returns on
+    # guarded responses, mirroring the real server (which returns
+    # session_id on every guarded success). Reset by the fixture.
+    mock_session_id = "mock-session-1"
 
     def log_message(self, *args):  # keep test output quiet
         pass
@@ -500,6 +511,11 @@ class MockAppHandler(BaseHTTPRequestHandler):
             status, n = fail
             if n > 0:
                 MockAppHandler.fail_next[key] = (status, n - 1)
+                # C-04: a test-set fail_body replaces the generic
+                # simulated body, so the client sees a real SPEC
+                # error id (e.g. "session_mismatch").
+                if MockAppHandler.fail_body is not None:
+                    return self._send_json(status, MockAppHandler.fail_body)
                 return self._send_json(status, {"ok": False, "error": "simulated (test hook)"})
         elif fail > 0:
             MockAppHandler.fail_next[key] -= 1
@@ -507,13 +523,16 @@ class MockAppHandler(BaseHTTPRequestHandler):
         # P0-1 (v2.0): a11y-off mode. The a11y-dependent POSTs
         # answer the structured 503 body; the available POSTs
         # (/launch_app, /open, /install_apk, /notify,
-        # /notification_action, /clipboard, /operation_end) fall
-        # through to normal handling.
+        # /clipboard, /operation_end) fall through to normal handling.
+        # C-04 (SPEC §2.2): /notification_action is a guarded
+        # ordinary screen operation — it needs the service, so it
+        # 503s here too (it was listed as available before C-04).
         if not MockAppHandler.accessibility:
             base = self.path.split("?")[0]
             if base in ("/batch", "/click", "/swipe", "/type_text",
                         "/press_key", "/click_node", "/type_node",
-                        "/scroll_node", "/node_action"):
+                        "/scroll_node", "/node_action",
+                        "/notification_action"):
                 return self._send_json(503, _a11y_off_body(base))
         if self.path == "/batch":
             # C-01 (SPEC §2.10): the UNKNOWN shape — no results
@@ -522,6 +541,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, {
                     "ok": True, "batch_id": payload.get("batch_id"),
                     "status": "unknown", "replayed": False,
+                    "session_id": MockAppHandler.mock_session_id,
                     "message": "batch outcome is unknown — do not "
                     "re-send this batch_id; check the phone and "
                     "confirm manually"})
@@ -544,6 +564,7 @@ class MockAppHandler(BaseHTTPRequestHandler):
             return self._send_json(200, {
                 "ok": True, "batch_id": answered_id,
                 "snapshot_id": 7, "status": "completed",
+                "session_id": MockAppHandler.mock_session_id,
                 "payload_hash": payload_hash, "replayed": False,
                 "results": [{"action_id": a.get("action_id"),
                              "status": "executed", "error": None,
@@ -594,7 +615,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
                     "accepted": True, "package": pkg,
                     "launch_requested": True,
                     "foreground_confirmed": False,
-                    "verification": "accessibility"})
+                    "verification": "accessibility",
+                    "session_id": MockAppHandler.mock_session_id})
             # The operation notification is posted only once the
             # request is accepted (deny check passed).
             with MockAppHandler.counter_lock:
@@ -606,7 +628,8 @@ class MockAppHandler(BaseHTTPRequestHandler):
                     "reason": "VERIFICATION_UNAVAILABLE",
                     "accepted": True, "package": pkg,
                     "launch_requested": True,
-                    "foreground_confirmed": None, "verification": "none"})
+                    "foreground_confirmed": None, "verification": "none",
+                    "session_id": MockAppHandler.mock_session_id})
             outcome = MockAppHandler.launch_outcomes.get(
                 pkg, MockAppHandler.launch_outcome)
             if outcome in ("unconfirmed", "foreground_left", "no_window"):
@@ -616,12 +639,14 @@ class MockAppHandler(BaseHTTPRequestHandler):
                     "accepted": True, "package": pkg,
                     "launch_requested": True,
                     "foreground_confirmed": False,
-                    "verification": "accessibility"})
+                    "verification": "accessibility",
+                    "session_id": MockAppHandler.mock_session_id})
             return self._send_json(200, {
                 "ok": True, "status": "launched", "accepted": True,
                 "package": pkg, "launch_requested": True,
                 "foreground_confirmed": True,
-                "verification": "accessibility"})
+                "verification": "accessibility",
+                "session_id": MockAppHandler.mock_session_id})
         if self.path == "/repair_termux":
             # Decision 95 (v2.5.0): the mock always answers a
             # repaired report — the client test pins the
@@ -668,6 +693,15 @@ class MockAppHandler(BaseHTTPRequestHandler):
             if err is not None:
                 return self._send_json(400, {"ok": False, "error": err})
             return self._send_json(200, {"ok": True, "snapshot_id": 7})
+        # C-04: the guarded endpoints return the server-issued
+        # session id on success (the mock's fixed id); the unguarded
+        # ones (/notify, /install_apk, /clipboard) do not.
+        if self.path.split("?")[0] in ("/click", "/swipe", "/type_text",
+                                       "/press_key", "/notification_action",
+                                       "/open"):
+            return self._send_json(200, {
+                "ok": True, "echo": payload,
+                "session_id": MockAppHandler.mock_session_id})
         return self._send_json(200, {"ok": True, "echo": payload})
 
 
@@ -690,6 +724,7 @@ def mock_app(monkeypatch, tmp_path):
     MockAppHandler.operation_notifications = 0
     MockAppHandler.disconnect_during_launch = False
     MockAppHandler.launch_delay_s = 0.0
+    MockAppHandler.fail_body = None
     # C-01 (SPEC-BATCH-PERSIST-001 §2.9): every test gets a fresh,
     # initialized outbox in a temp dir — never the real
     # ~/.muse-bridge. batch() requires an initialized outbox, and
@@ -776,8 +811,14 @@ def test_app_actions_send_json(mock_app):
     assert adapter.type_text("hello")["ok"] is True
     assert adapter.press_key("HOME")["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
-    assert (("POST", "/click", {"x": 500, "y": 800}) in posts)
-    assert (("POST", "/press_key", {"key": "HOME"}) in posts)
+    # C-04: every guarded POST carries the operation_context of a
+    # fresh /state (mock package com.example, revision 7). The
+    # first action bootstraps (no session_id); later actions carry
+    # the session id the mock returned (retention).
+    assert (("POST", "/click", {"x": 500, "y": 800,
+                                "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7}}) in posts)
+    assert (("POST", "/press_key", {"key": "HOME",
+                                   "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7, "session_id": "mock-session-1"}}) in posts)
 
 
 def test_app_actions_refused_without_flag(mock_app):
@@ -844,9 +885,12 @@ def test_app_batch_posts_actions(mock_app):
     result = adapter.batch("b-001", 123456, actions)
     assert result["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    # C-04: the batch carries the operation_context of the snapshot
+    # it acts on (first action — bootstrap, no session_id).
     assert ("POST", "/batch",
             {"batch_id": "b-001", "protocol_version": 1,
-             "tree_hash": 123456, "actions": actions}) in posts
+             "tree_hash": 123456, "actions": actions,
+             "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7}}) in posts
 
 
 def test_app_batch_response_fields_v19(mock_app):
@@ -906,11 +950,17 @@ def test_step3_wired_paths_post_validated_bodies(mock_app):
     adapter.press_key("DPAD_DOWN")
     adapter.notify("Title", "Body")
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
-    assert ("POST", "/click", {"x": 100, "y": 200}) in posts
+    # C-04: guarded POSTs carry the operation_context (click
+    # bootstraps; the rest carry the retained session id).
+    assert ("POST", "/click", {"x": 100, "y": 200,
+                               "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7}}) in posts
     assert ("POST", "/swipe", {"x1": 0, "y1": 0, "x2": 10, "y2": 20,
-                               "duration_ms": 150}) in posts
-    assert ("POST", "/type_text", {"text": "hi"}) in posts
-    assert ("POST", "/press_key", {"key": "DPAD_DOWN"}) in posts
+                               "duration_ms": 150,
+                               "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7, "session_id": "mock-session-1"}}) in posts
+    assert ("POST", "/type_text", {"text": "hi",
+                                   "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7, "session_id": "mock-session-1"}}) in posts
+    assert ("POST", "/press_key", {"key": "DPAD_DOWN",
+                                   "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7, "session_id": "mock-session-1"}}) in posts
     assert ("POST", "/notify", {"title": "Title", "text": "Body"}) in posts
 
 
@@ -1385,7 +1435,7 @@ def test_app_logs_never_carry_full_ips_or_packages(mock_app):
     the shape itself contains no PII. It does NOT verify the
     Java sanitize behaviour (BridgeLog.sanitize, the call-site
     drops, or the raw android.util.Log calls in
-    HttpBridgeServer.java) and it does NOT read actual Logcat
+    HttpBridgeServer.kt) and it does NOT read actual Logcat
     output. Those are verified by direct code inspection (the
     CONS-032 fix round audited every raw Log call) and by the
     Java build; a live-phone Logcat capture is still the only
@@ -1658,7 +1708,10 @@ def test_app_press_key_dpad(mock_app):
                 "DPAD_CENTER"):
         assert adapter.press_key(key)["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
-    assert ("POST", "/press_key", {"key": "DPAD_DOWN"}) in posts
+    # C-04: DPAD_DOWN is the 2nd press — the 1st bootstrapped the
+    # session, so this one carries the retained session id.
+    assert ("POST", "/press_key", {"key": "DPAD_DOWN",
+                                   "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7, "session_id": "mock-session-1"}}) in posts
 
 
 # --------------------------------------------------------------------------
@@ -1996,8 +2049,8 @@ def test_p1_06_accept_loop_checks_generation():
     stale thread that wakes after stop/restart exits instead
     of spinning on its closed socket. Source-level guard: the
     loop condition must contain the generation equality check."""
-    src = _java_source("HttpBridgeServer.java")
-    assert "&& acceptGeneration == serverLifecycleGeneration" in src
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert "acceptGeneration == serverLifecycleGeneration" in src
 
 
 def test_p1_03_request_log_never_carries_arbitrary_path():
@@ -2023,21 +2076,42 @@ def test_p1_03_request_log_never_carries_arbitrary_path():
     way to observe the real Logcat line.
     """
     import re
-    src = _java_source("HttpBridgeServer.java")
+    src = _kotlin_source("HttpBridgeServer.kt")
     # (1) the request log goes through loggablePath, never raw path.
-    assert 'Log.i(TAG, method + " " + loggablePath(path) + " -> " + status);' in src
-    assert 'Log.i(TAG, method + " " + path + " -> " + status);' not in src
+    assert 'Log.i(TAG, method + " " + loggablePath(path) + " -> " + status)' in src
+    assert 'Log.i(TAG, method + " " + path + " -> " + status)' not in src
     # (2) KNOWN_PATHS matches the handler chain exactly.
-    chain = set(re.findall(r'"(/[^"]*)"\.equals\(path\)', src))
-    start = src.index("KNOWN_PATHS = new HashSet<>(Arrays.asList(")
-    end = src.index("));", start)
+    chain = set(re.findall(r'"(/[^"]*)" == path', src))
+    start = src.index("private val KNOWN_PATHS = setOf(")
+    end = src.index("\n\n        /** Loggable form", start)
     known = set(re.findall(r'"(/[^"]*)"', src[start:end]))
     assert chain, "no endpoints found in the handler chain"
     assert known == chain, (sorted(known - chain), sorted(chain - known))
     # (3) loggablePath maps unknown paths to "UNKNOWN".
-    helper = src[src.index("static String loggablePath("):]
+    helper = src[src.index("fun loggablePath(path: String): String {"):]
     helper = helper[:helper.index("}")]
-    assert 'KNOWN_PATHS.contains(path) ? path : "UNKNOWN"' in helper
+    assert 'if (KNOWN_PATHS.contains(path)) path else "UNKNOWN"' in helper
+
+
+def test_p1_03_handler_chain_has_no_duplicate_branch():
+    """Stage 3 batch 4 (self-found P0 during packet prep): two
+    handlers (/click, /launch_app) were written with a duplicated
+    empty else-if branch — the first (empty) branch matched and
+    the real handler body in the second branch never ran, so POST
+    /click and POST /launch_app would have answered nothing.
+    kotlinc accepts it (syntactically valid) and the mock tests
+    cannot see it (they run against the mock, not this source).
+    Guard: every endpoint path occurs exactly once as `"..." ==
+    path` in the chain — except /clipboard, which legitimately has
+    one branch per method (GET + POST)."""
+    import re
+    from collections import Counter
+    src = _kotlin_source("HttpBridgeServer.kt")
+    counts = Counter(re.findall(r'"(/[a-z_/]+)" == path', src))
+    assert counts, "no endpoints found in the handler chain"
+    for path, n in counts.items():
+        expected = 2 if path == "/clipboard" else 1
+        assert n == expected, (path, n)
 
 
 def test_p2_01_launch_baseline_after_pre_read():
@@ -2052,26 +2126,26 @@ def test_p2_01_launch_baseline_after_pre_read():
     launchApp()'s return value, capturing no timestamp itself;
     (2) inside launchApp(), the Intent fetch precedes the
     baseline capture, which precedes startActivity()."""
-    src = _java_source("HttpBridgeServer.java")
+    src = _kotlin_source("HttpBridgeServer.kt")
     # (1) handler: pre-read first, baseline from launchApp().
-    start = src.index('"/launch_app".equals(path)')
-    end = src.index('} else if ("/open".equals(path)', start)
+    start = src.index('"/launch_app" == path')
+    end = src.index('} else if ("/open" == path', start)
     region = src[start:end]
     pre = region.index("foregroundPackageSafe(svc,")
-    call = region.index("long requestTimeMs = launchApp(pkg);")
+    call = region.index("val requestTimeMs = launchApp(pkg)")
     assert pre < call, (pre, call)
     assert "elapsedRealtime()" not in region
     assert "if (requestTimeMs < 0)" in region
     # (2) launchApp(): Intent fetch < baseline < startActivity.
-    body = src[src.index("private long launchApp(String pkg) {"):]
+    body = src[src.index("private fun launchApp(pkg: String?): Long {"):]
     body = body[:body.index("\n    }\n")]
     fetch = body.index("getLaunchIntentForPackage(pkg)")
     base = body.index(
-        "long requestTimeMs = android.os.SystemClock.elapsedRealtime();")
-    start_activity = body.index("context.startActivity(intent);")
+        "val requestTimeMs = SystemClock.elapsedRealtime()")
+    start_activity = body.index("context.startActivity(intent)")
     assert fetch < base < start_activity, (fetch, base, start_activity)
-    assert "return requestTimeMs;" in body
-    assert "return -1;" in body
+    assert "return requestTimeMs" in body
+    assert "return -1" in body
 
 
 def test_p2_03_launch_state_is_request_local():
@@ -2108,42 +2182,39 @@ def test_p2_03_launch_state_is_request_local():
     still needs live-phone disconnect testing.
     """
     import re
-    src = _java_source("HttpBridgeServer.java")
+    src = _kotlin_source("HttpBridgeServer.kt")
     # (1) locals inside the handler, timestamp local in launchApp.
-    start = src.index('"/launch_app".equals(path)')
-    end = src.index('} else if ("/open".equals(path)', start)
+    start = src.index('"/launch_app" == path')
+    end = src.index('} else if ("/open" == path', start)
     region = src[start:end]
-    assert "long requestTimeMs = launchApp(pkg);" in region
-    assert "boolean wasForeground = svc != null" in region
+    assert "val requestTimeMs = launchApp(pkg)" in region
+    assert "val wasForeground = svc != null" in region
     assert "if (requestTimeMs < 0)" in region
-    launch = src[src.index("private long launchApp(String pkg) {"):]
+    launch = src[src.index("private fun launchApp(pkg: String?): Long {"):]
     launch = launch[:launch.index("\n    }\n")]
-    assert ("long requestTimeMs = android.os.SystemClock.elapsedRealtime();"
+    assert ("val requestTimeMs = SystemClock.elapsedRealtime()"
             in launch)
-    # (2) neither name is an instance field. Fields live at
-    # class level (exactly 4-space indent); method locals are
-    # indented deeper, so anchoring on 4 spaces keeps locals
-    # out. The optional initializer covers `= 0;` style
-    # declarations, and modifiers may appear in any order.
-    for name, typ in (("requestTimeMs", "long"),
-                      ("wasForeground", "boolean")):
+    # (2) neither name is an instance field. Kotlin fields are
+    # `val`/`var` declarations at class level (exactly 4-space
+    # indent); method locals are indented deeper, so anchoring on
+    # 4 spaces keeps locals out. Modifiers may appear in any order.
+    for name in ("requestTimeMs", "wasForeground"):
         assert not re.search(
-            rf"^    (?:(?:public|protected|private|static|final"
-            rf"|volatile|transient)\s+)*{typ}\s+{name}\s*(=[^;]*)?;",
+            rf"^    [^\n]*\b(?:val|var)\s+{name}\s*:",
             src, re.MULTILINE), name
     # (3) verifyLaunchForeground takes the state as parameters.
-    sig = src[src.index("private JSONObject verifyLaunchForeground("):]
+    sig = src[src.index("private fun verifyLaunchForeground("):]
     sig = sig[:sig.index("{")]
-    assert "String pkg" in sig
-    assert "BridgeAccessibilityService svc" in sig
-    assert "long requestTimeMs" in sig
-    assert "boolean wasForeground" in sig
+    assert "pkg: String" in sig
+    assert "svc: BridgeAccessibilityService?" in sig
+    assert "requestTimeMs: Long" in sig
+    assert "wasForeground: Boolean" in sig
     # (4) a dead service degrades to a missed poll, not a throw.
-    fg = src[src.index("private String foregroundPackageSafe("):]
-    fg = fg[:fg.index("private static JSONObject launchResultJson(")]
-    assert "if (svc == null) {\n            return null;\n        }" in fg
-    assert "} catch (Exception e) {" in fg
-    assert "return null;" in fg
+    fg = src[src.index("private fun foregroundPackageSafe("):]
+    fg = fg[:fg.index("private fun verifyLaunchForeground(")]
+    assert "if (svc == null) {\n            return null\n        }" in fg
+    assert "} catch (e: Exception) {" in fg
+    assert "return null" in fg
 
 
 def test_p2_service_unavailable_detail_names_endpoint():
@@ -2160,10 +2231,10 @@ def test_p2_service_unavailable_detail_names_endpoint():
     mock test test_app_a11y_off_structured_503, which asserts
     the endpoint path appears in the raised
     AccessibilityUnavailableError."""
-    src = _java_source("HttpBridgeServer.java")
-    start = src.index("} catch (ServiceUnavailable e) {")
+    src = _kotlin_source("HttpBridgeServer.kt")
+    start = src.index("} catch (e: ServiceUnavailable) {")
     end = src.index(
-        "} catch (BridgeAccessibilityService.ServiceTimeoutException e) {",
+        "} catch (e: BridgeAccessibilityService.ServiceTimeoutException) {",
         start)
     region = src[start:end]
     assert "loggablePath(path)" in region
@@ -2631,6 +2702,7 @@ def test_app_launch_app_slow_verification_does_not_hang(mock_app):
     ("POST", "/type_node", {"node_id": "n1", "tree_hash": 123456, "text": "hi"}),
     ("POST", "/scroll_node", {"node_id": "n1", "tree_hash": 123456, "direction": "forward"}),
     ("POST", "/node_action", {"node_id": "n1", "tree_hash": 123456, "action": "focus"}),
+    ("POST", "/notification_action", {"key": "key-1", "action": "open"}),
     ("POST", "/batch", {"batch_id": "b-1", "protocol_version": 1,
                         "tree_hash": 123456, "actions": []}),
 ])
@@ -2652,8 +2724,10 @@ def test_app_a11y_off_structured_503(mock_app, method, path, payload):
 def test_app_a11y_off_no_retry(mock_app):
     """P0-1: a structured a11y-off 503 is not retried — enabling
     the service is a manual user action, so retrying only burns
-    attempts and backoff time. GET /state and POST /batch each
-    send exactly one request."""
+    attempts and backoff time. GET /state is sent once per call
+    (get_current_state once, and the batch's C-04 guard fetch
+    once); POST /batch is never sent — the guard fetch fails
+    first, so the batch is refused before any action is posted."""
     MockAppHandler.accessibility = False
     adapter = ab.AndroidAdapter(actions_enabled=True)
     with pytest.raises(ab.AccessibilityUnavailableError):
@@ -2663,17 +2737,20 @@ def test_app_a11y_off_no_retry(mock_app):
                       [{"action_id": "a1", "type": "tap", "x": 1, "y": 2}])
     gets = [r for r in MockAppHandler.requests
             if r[0] == "GET" and r[1] == "/state"]
-    assert len(gets) == 1
+    assert len(gets) == 2
     posts = [r for r in MockAppHandler.requests
              if r[0] == "POST" and r[1] == "/batch"]
-    assert len(posts) == 1
+    assert len(posts) == 0
 
 
 def test_app_a11y_off_available_endpoints(mock_app):
     """P0-1: with a11y off, the endpoints that do not need the
     service still answer 200 — /health, /logs, /notifications,
     /open, /install_apk, GET/POST /clipboard, /launch_app,
-    /notify, /notification_action."""
+    /notify. C-04 (SPEC §2.2): /notification_action is NOT in
+    this list anymore — it is a guarded ordinary screen operation
+    and needs the service (see test_app_a11y_off_structured_503,
+    which now covers it)."""
     MockAppHandler.accessibility = False
     adapter = ab.AndroidAdapter(actions_enabled=True)
     assert ab.check_app()["ok"] is None  # reachable, a11y off
@@ -2690,7 +2767,11 @@ def test_app_a11y_off_available_endpoints(mock_app):
     assert launch["status"] == "unconfirmed"
     assert launch["reason"] == "VERIFICATION_UNAVAILABLE"
     assert adapter.notify("Title", "Body")["ok"] is True
-    assert adapter.notification_action("key-1", "open")["ok"] is True
+    # C-04: /notification_action needs the service now — with a11y
+    # off it raises AccessibilityUnavailableError (the /state fetch
+    # inside notification_action() fails first, same error class).
+    with pytest.raises(ab.AccessibilityUnavailableError):
+        adapter.notification_action("key-1", "open")
 
 
 def test_app_launch_blocked_not_misclassified(mock_app):
@@ -3004,8 +3085,11 @@ def test_app_notification_open(mock_app):
     adapter = ab.AndroidAdapter(actions_enabled=True)
     assert adapter.notification_action(NOTIF_KEY, "open")["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    # C-04: guarded — operation_context of a fresh snapshot
+    # (first action, bootstrap, no session_id).
     assert ("POST", "/notification_action",
-            {"key": NOTIF_KEY, "action": "open"}) in posts
+            {"key": NOTIF_KEY, "action": "open",
+             "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7}}) in posts
 
 
 def test_app_notification_reply(mock_app):
@@ -3016,7 +3100,8 @@ def test_app_notification_reply(mock_app):
         NOTIF_KEY, "reply", text="はい")["ok"] is True
     posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
     assert ("POST", "/notification_action",
-            {"key": NOTIF_KEY, "action": "reply", "text": "はい"}) in posts
+            {"key": NOTIF_KEY, "action": "reply", "text": "はい",
+             "operation_context": {"expected_package": "com.example", "tree_hash": 123456, "generation": 7}}) in posts
 
 
 def test_app_notification_action_bad_args(mock_app):
@@ -4120,15 +4205,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_24():
+def test_locale_tile_version_2_9_25():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.24 / code 77 (was v2.9.23 / code 76 at Stage 3 batch 2)."""
+    carries v2.9.25 / code 78 (was v2.9.23 / code 76 at Stage 3 batch 2)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.24"' in build
-    assert "VERSION_CODE=77" in build
+    assert 'VERSION_NAME="2.9.25"' in build
+    assert "VERSION_CODE=78" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4140,7 +4225,7 @@ def test_drive001_main_activity_calls_ensure_init():
     boot = _kotlin_source("BootReceiver.kt")
     assert "LogActivity.ensureDriveInit(" in boot
     assert boot.index("ensureDriveInit") < boot.index("BridgeLog.init")
-    server = _java_source("HttpBridgeServer.java")
+    server = _kotlin_source("HttpBridgeServer.kt")
     assert "LogActivity.ensureDriveInit(" in server
     assert (server.index("ensureDriveInit")
             < server.index("BridgeLog.init(this.context)"))
@@ -4152,7 +4237,7 @@ def test_drive001_main_activity_calls_ensure_init():
 # ----------------------------------------------------------------------
 
 def _override_server():
-    return _java_source("HttpBridgeServer.java")
+    return _kotlin_source("HttpBridgeServer.kt")
 
 
 def test_override_01_click_label_carries_coordinates():
@@ -4218,7 +4303,7 @@ def test_override_07_coordinates_are_operation_metadata():
     enters a label."""
     src = _override_server()
     assert '"タップ " + x + "/" + y' in src
-    assert 'noteOperation(lifecycleGeneration, "リンクを開いています")' in src
+    assert 'noteOperation(lifecycleGeneration, "リンクを開いています", openSessionId)' in src
     assert "j.getInt(\"x\")" in src
     assert "j.getInt(\"y\")" in src
 
@@ -4234,7 +4319,12 @@ def test_override_09_batch_stays_generic():
     """OV-09: /batch notes once with a generic label; no per-step
     coordinates."""
     src = _override_server()
-    assert 'noteOperation(lifecycleGeneration, "複数の操作を実行中")' in src
+    # CONS-167 P1-02: the hook moved into the onFinalGuardPassed
+    # callback — it runs only after the final guard passes, not
+    # before runBatch. The label is still generic, used exactly once.
+    # CONS-168 P1-01: the generation is an AtomicLong now (set in the
+    # callback, copied in the finally around runBatch).
+    assert 'batchOpGeneration.set(noteOperation(' in src
     assert src.count('"複数の操作を実行中"') == 1
 
 
@@ -4256,11 +4346,15 @@ def test_override_11_deferred_post_exists_with_guards():
     posting. (b) The live timing is verified on the phone (OV-L3)."""
     src = _override_server()
     assert "runDeferredPost(capturedGeneration, capturedToken)" in src
-    assert "final long capturedGeneration = operationGeneration" in src
-    assert "final long capturedToken = pendingToken" in src
+    assert "val capturedGeneration = operationGeneration" in src
+    assert "val capturedToken = pendingToken" in src
     assert "capturedGeneration != operationGeneration" in src
     assert "capturedToken != pendingToken" in src
-    assert "operationScheduler.schedule" in src
+    # Kotlin: the nullable scheduler is captured into a local and
+    # null-checked before scheduling (Java called the field
+    # directly — a null there would NPE).
+    assert "val scheduler = operationScheduler" in src
+    assert "scheduler.schedule(" in src
 
 
 def test_override_12_new_session_posts_immediately():
@@ -4276,9 +4370,9 @@ def test_override_13_session_end_discards_pending_label():
     reservation, so no deferred post runs after the session ends.
     (b) Verified live as OV-L4."""
     src = _override_server()
-    start = src.index("private boolean endOperationLocked()")
+    start = src.index("private fun endOperationLocked(): Boolean {")
     seg = src[start:start + 1500]
-    assert "invalidatePendingPostLocked();" in seg
+    assert "invalidatePendingPostLocked()" in seg
 
 
 def test_override_14_old_task_never_touches_new_reservation():
@@ -4295,7 +4389,7 @@ def test_override_14_old_task_never_touches_new_reservation():
     assert "pendingToken = -1" in src
     assert "pendingGeneration = -1" in src
     assert src.count("invalidatePendingPostLocked()") >= 4
-    start = src.index("private void runDeferredPost(")
+    start = src.index("private fun runDeferredPost(")
     seg = src[start:start + 1500]
     assert "touch none of the pending fields" in seg
     assert "pendingLabel = null" in seg
@@ -4912,15 +5006,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_24():
-    """The build now carries v2.9.24 / code 77 (was v2.9.23 / code 76
+def test_a11yoff002_version_2_9_25():
+    """The build now carries v2.9.25 / code 78 (was v2.9.23 / code 76
     at Stage 3 batch 2)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.24"' in build
-    assert "VERSION_CODE=77" in build
+    assert 'VERSION_NAME="2.9.25"' in build
+    assert "VERSION_CODE=78" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5258,9 +5352,11 @@ def test_kotlin_pilot_appversion_java_callers_unchanged():
     AppVersion.name(ctx) / AppVersion.code(ctx) as statics, which
     only compiles because the Kotlin members are @JvmStatic.
     (Stage 3 batch 1: MainActivity is Kotlin now and calls them
-    the same way. Stage 3 batch 2: LogActivity is Kotlin now too.)"""
-    for name in ("HttpBridgeServer.java",):
-        src = _java_source(name)
+    the same way. Stage 3 batch 2: LogActivity is Kotlin now too.
+    Stage 3 batch 4: HttpBridgeServer is Kotlin now and calls them
+    the same way.)"""
+    for name in ("HttpBridgeServer.kt",):
+        src = _kotlin_source(name)
         assert "AppVersion.name(" in src, name
         assert "AppVersion.code(" in src, name
     for name in ("MainActivity.kt", "LogActivity.kt"):
@@ -5526,9 +5622,9 @@ def test_kotlin_batch_e_java_callers_unchanged():
     assert "r.target" in main
     assert "r.rttMs" in main
     assert "r.error" in main
-    srv = _java_source("HttpBridgeServer.java")
-    assert "PingProber.setLastClientIp(remote.getHostAddress());" in srv
-    assert "PingProber.Result r = PingProber.getLastResult();" in srv
+    srv = _kotlin_source("HttpBridgeServer.kt")
+    assert "PingProber.setLastClientIp(remote.hostAddress)" in srv
+    assert "val r = PingProber.getLastResult()" in srv
     assert ".put(\"target\", r.target)" in srv
     assert ".put(\"rtt_ms\", r.rttMs)" in srv
 
@@ -5595,16 +5691,16 @@ def test_kotlin_batch_f_java_callers_unchanged():
     Stage 3 batch 1) still checks
     the access grant. That only compiles because the Kotlin
     members are @JvmStatic and the fields are @JvmField."""
-    srv = _java_source("HttpBridgeServer.java")
-    assert "BridgeNotificationListener.setAccepting(true);" in srv
-    assert "BridgeNotificationListener.setAccepting(false);" in srv
-    assert "BridgeNotificationListener.awaitQuiesce(5000);" in srv
+    srv = _kotlin_source("HttpBridgeServer.kt")
+    assert "BridgeNotificationListener.setAccepting(true)" in srv
+    assert "BridgeNotificationListener.setAccepting(false)" in srv
+    assert "BridgeNotificationListener.awaitQuiesce(5000)" in srv
     assert "BridgeNotificationListener.inFlightCount()" in srv
     assert "BridgeNotificationListener.isAccessGranted(context)" in srv
     assert "BridgeNotificationListener.getInstance()" in srv
-    assert "BridgeNotificationListener.getEvents(since, limit, pkg);" in srv
-    assert "BridgeNotificationListener.openNotification(key);" in srv
-    assert "BridgeNotificationListener.replyNotification(key, text);" in srv
+    assert "BridgeNotificationListener.getEvents(since, limit, pkg)" in srv
+    assert "BridgeNotificationListener.openNotification(key)" in srv
+    assert "BridgeNotificationListener.replyNotification(key, text)" in srv
     assert ".put(\"latest_seq\", nr.latestSeq)" in srv
     assert ".put(\"dropped\", nr.dropped)" in srv
     assert "e.seq" in srv
@@ -5812,7 +5908,7 @@ def test_kotlin_stage3_a11y_service_d4_interop():
 
 
 def test_kotlin_stage3_a11y_service_jvmfield():
-    """Stage 3 batch 3 (D4): HttpBridgeServer.java reads AND writes
+    """Stage 3 batch 3 (D4): HttpBridgeServer.kt reads AND writes
     the nested data classes' fields directly (br.batchId,
     ba.actionId = ..., st.texts, e.seq, o.ok, r.hashBefore ...),
     so every public field of the eight nested classes carries
@@ -5873,7 +5969,9 @@ def test_kotlin_stage3_a11y_service_null_contracts():
     back to PNG; nodeAction's actionIdForName(null) is -1, so a
     null action name is an IllegalArgumentException, not an NPE;
     resolveFresh's Map.get(null) is a NodeNotFound, not an NPE;
-    runBatch's supersedes is documented nullable (SPEC SS2.6);
+    runBatch's supersedes is documented nullable (SPEC SS2.6),
+    and its C-04 guard params are nullable with defaults (a batch
+    without a guard context still type-checks);
     getForegroundPackage and getBatchRegistry return null when
     there is no active window / the service has not connected."""
     src = _kotlin_source("BridgeAccessibilityService.kt")
@@ -5884,7 +5982,16 @@ def test_kotlin_stage3_a11y_service_null_contracts():
     assert "fun nodeAction(\n        nodeId: String?,\n        treeHash: Int,\n        actionName: String?,\n        args: JSONObject?\n    ): ActionOutcome" in src
     assert "fun clickNode(nodeId: String?, treeHash: Int): ActionOutcome" in src
     assert "fun typeNode(nodeId: String?, treeHash: Int, text: String?): ActionOutcome" in src
-    assert "        supersedes: String?\n    ): BatchResult" in src
+    assert ("        supersedes: String?,\n"
+            "        guardExpectedPackage: String? = null,\n"
+            "        guardTreeHash: Int? = null,\n"
+            "        guardGeneration: Int? = null,\n"
+            "        guardSessionValid: (() -> Boolean)? = null,\n") in src
+    # CONS-167 P1-02: the batch operation hook runs only after the
+    # final guard — both runBatch and runBatchInternal carry it as a
+    # nullable callback with a default (a batch without a guard
+    # context still type-checks).
+    assert src.count("onFinalGuardPassed: (() -> Unit)? = null") == 2
     assert "fun getForegroundPackage(): String?" in src
     assert "fun getBatchRegistry(): BatchRegistry?" in src
 
@@ -5953,8 +6060,8 @@ def test_kotlin_batch_g_bridge_log_java_callers_unchanged():
     BootReceiver still inits and logs. That only compiles because
     the Kotlin members are @JvmStatic (and atomicWriteText /
     fsyncDirectory public)."""
-    srv = _java_source("HttpBridgeServer.java")
-    assert "BridgeLog.init(this.context);" in srv
+    srv = _kotlin_source("HttpBridgeServer.kt")
+    assert "BridgeLog.init(this.context)" in srv
     assert "BridgeLog.log(" in srv
     assert "BridgeLog.logThrottled(" in srv
     assert "BridgeLog.flushThrottled(" in srv
@@ -5977,10 +6084,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the Stage 3 batch 3 build's v2.9.24 / code 77."""
+    kotlin-stdlib.jar. Version is the Stage 3 batch 3 build's v2.9.25 / code 78."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.24"' in build
-    assert "VERSION_CODE=77" in build
+    assert 'VERSION_NAME="2.9.25"' in build
+    assert "VERSION_CODE=78" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -6057,9 +6164,9 @@ def test_kotlin_batch_a_java_callers_unchanged():
     as statics, construct VpnNetwork, and read the Decision
     fields directly, which only compiles because the Kotlin
     members are @JvmStatic / @JvmField / const val."""
-    server = _java_source("HttpBridgeServer.java")
+    server = _kotlin_source("HttpBridgeServer.kt")
     assert "VpnBindSelector.select(vpns)" in server
-    assert "new VpnBindSelector.VpnNetwork(ifName, v4)" in server
+    assert "VpnBindSelector.VpnNetwork(ifName, v4)" in server
     assert "decision.bindIp" in server
     assert "decision.bindInterface" in server
     assert "decision.degradedReason" in server
@@ -6300,3 +6407,532 @@ def test_cons152_p2_02_batch_registry_volatile():
     from HTTP worker threads, so publication must be explicit."""
     svc = _kotlin_source("BridgeAccessibilityService.kt")
     assert "    @Volatile\n    private var batchRegistry: BatchRegistry? = null" in svc
+
+
+# ---------------------------------------------------------------------------
+# Stage 3 batch 4 (final): HttpBridgeServer Java -> Kotlin + C-04
+# (SPEC-FOREGROUND-GUARD-001 v2.1) woven in.
+#
+# The server side is pinned by source inspection (no JVM harness —
+# the CONS-130 P2-02 gap, as in batches 1-3); the VM client side is
+# pinned against the mock server. Live C-04 acceptance (C-04-1..22)
+# needs the installed build + user operation (T-M4, after Stage 3).
+# ---------------------------------------------------------------------------
+
+_STAGE3_HTTP_SERVER_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-14")
+
+
+def test_kotlin_stage3_http_server_is_kotlin():
+    """Stage 3 batch 4: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1."""
+    assert not _java_source_exists("HttpBridgeServer.java")
+    assert _kotlin_source_exists("HttpBridgeServer.kt")
+    first = _kotlin_source("HttpBridgeServer.kt").splitlines()[0]
+    assert first == _STAGE3_HTTP_SERVER_ATTRIBUTION
+
+
+def test_kotlin_stage3_http_server_d4_interop():
+    """Stage 3 batch 4 (D4): the public API the callers use stays
+    put — open class (the Java original was a non-final public
+    class); start/stop/isRunning/boundTailscaleIps stay public
+    and synchronized where Java had them; PORT and
+    INSTALL_RESULT_ACTION stay public consts; loggablePath stays
+    reachable from the companion. The nested helpers
+    (BindTarget, BindResult, ServiceUnavailable, HeaderTooLarge)
+    were private in Java and stay private classes in Kotlin, so
+    the CONS-165 P2-01 `open` rule does not apply to them. There
+    is no Java caller left, so no @JvmStatic is needed."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert "open class HttpBridgeServer(" in src
+    assert "public final class HttpBridgeServer" not in src
+    assert "fun start(): Boolean" in src
+    assert "fun stop()" in src
+    assert "fun stop(reason: StopReason?)" in src
+    assert "fun isRunning(): Boolean" in src
+    assert "@Synchronized" in src
+    assert "fun boundTailscaleIps(): List<String>" in src
+    assert "const val PORT = 8080" in src
+    assert 'const val INSTALL_RESULT_ACTION = "dev.muse.bridge.INSTALL_RESULT"' in src
+    assert "fun loggablePath(path: String): String" in src
+    assert "interface TokenProvider" in src
+    for nested in ("private class BindTarget", "private class BindResult",
+                   "private class ServiceUnavailable",
+                   "private class HeaderTooLarge"):
+        assert nested in src, nested
+    assert "open class BindTarget" not in src
+    assert "open class ServiceUnavailable" not in src
+
+
+def test_kotlin_stage3_http_server_c04_guard():
+    """Stage 3 batch 4 (C-04, SPEC-FOREGROUND-GUARD-001 v2.1):
+    the guard machinery is present in the Kotlin server —
+    OperationContext + parseOperationContext (expected_package
+    required, session bootstrap, generation >= 0) + the launch
+    session reader + the session store + checkGuard +
+    runGuardedOperation, the SPEC error ids, session_id on the
+    guarded responses, and the guard arguments threaded from the
+    /batch handler into runBatch. The session id is a server-issued
+    UUID (noteOperation issues it, endOperationLocked and stop()
+    clear it)."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    svc = _kotlin_source("BridgeAccessibilityService.kt")
+    # The context type and its parsers.
+    assert "private class OperationContext(" in src
+    assert "private fun parseOperationContext(j: JSONObject): OperationContext" in src
+    assert 'throw org.json.JSONException("missing operation_context")' in src
+    assert "missing expected_package in operation_context" in src
+    assert "generation must not be negative" in src
+    assert "private fun parseLaunchSession(j: JSONObject): String?" in src
+    # The session store: issued on note, cleared on end/stop.
+    assert "private var operationSessionId: String? = null" in src
+    assert "operationSessionId = UUID.randomUUID().toString()" in src
+    assert "private fun currentSessionId(): String?" in src
+    assert "private fun isSessionCurrent(suppliedId: String?): Boolean" in src
+    assert "private fun requireSessionCurrent(suppliedId: String?)" in src
+    # The guard itself lives on the service (serialized admission
+    # boundary, SPEC §2.2) and the server calls it from the
+    # guarded handlers.
+    assert "open class OperationGuardException(" in svc
+    assert "fun checkGuard(" in svc
+    assert "fun <T> runGuardedOperation(" in svc
+    for endpoint in ("/click", "/swipe", "/type_text", "/press_key",
+                     "/notification_action"):
+        assert f'"{endpoint}" == path' in src, endpoint
+    assert "runGuardedOperation(" in src
+    assert "parseOperationContext(j)" in src
+    # SPEC error ids.
+    for error_id in ("foreground_mismatch", "tree_hash_mismatch",
+                     "generation_mismatch", "session_mismatch",
+                     "foreground_unverifiable", "snapshot_unavailable"):
+        assert f'"{error_id}"' in src or f'"{error_id}"' in svc, error_id
+    # session_id is returned on the guarded successes.
+    assert '.put("session_id", currentSessionId() ?: JSONObject.NULL)' in src
+    # /batch threads the guard into runBatch (worker-side pre-check
+    # + in-task re-check inside runBatchInternal).
+    assert "guardExpectedPackage" in src
+    assert "guardTreeHash" in src
+    assert "guardGeneration" in src
+    assert "guardSessionValid" in src
+    assert "batchCtx.treeHash" in src
+
+
+def test_kotlin_stage3_batch_registry_discard():
+    """Stage 3 batch 4 (C-04): BatchRegistry.discard removes only
+    an IN_PROGRESS record with a matching payloadHash — the escape
+    hatch runBatch uses when its in-task guard refuses after
+    admission (otherwise a later re-send would wrongly answer
+    "running"). A persist failure is fail-closed (CONS-167 P2-01:
+    the record is marked UNKNOWN in memory, never "running", and
+    the call reports false)."""
+    src = _kotlin_source("BatchRegistry.kt")
+    assert "fun discard(batchId: String, payloadHash: String): Boolean" in src
+    start = src.index("fun discard(")
+    body = src[start:src.index("\n    }", start)]
+    # The record status is a stored string (C-01: the persisted
+    # status is uppercase), compared directly — not the enum.
+    assert 'existing.status != "IN_PROGRESS"' in body
+    assert "existing.payloadHash != payloadHash" in body
+    assert "persistLocked(" in body
+    assert "return false" in body
+
+
+def test_cons167_p1_01_note_operation_validates_session_atomically():
+    """CONS-167 P1-01: noteOperation re-validates the supplied session
+    id in the same operationLock critical section that starts or
+    refreshes the session — so the 10 s auto-end timer cannot end
+    session A between validation and start and silently move the
+    operation into a fresh session B. The check must sit before the
+    session-creation branch, and a mismatch must throw
+    session_mismatch (the handle() catch turns it into a 409)."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert "expectedSessionId: String? = null" in src
+    start = src.index("private fun noteOperation(")
+    creation = src.index("if (!operationActive) {", start)
+    head = src[start:creation]
+    assert "synchronized(operationLock) {" in head
+    assert "expectedSessionId != operationSessionId" in head
+    assert "expectedSessionId != null" in head
+    assert '"session_mismatch"' in head
+    assert "throw BridgeAccessibilityService.OperationGuardException" in head
+
+
+def test_cons167_p1_01_guarded_handlers_pass_session_to_note_operation():
+    """CONS-167 P1-01: every guarded handler that validates a session
+    id passes that same id to noteOperation, so the atomic check
+    inside noteOperation can reject a session that ended after the
+    worker-side / in-task checks. Node operations take no session
+    id (SPEC §2.8, unchanged) and keep the two-argument call."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert 'noteOperation(lifecycleGeneration, "通知を開いています", ctx.sessionId)' in src
+    assert 'noteOperation(lifecycleGeneration, "通知に返信しています", ctx.sessionId)' in src
+    assert 'noteOperation(lifecycleGeneration, "タップ " + x + "/" + y, ctx.sessionId)' in src
+    assert '"スワイプ " + x1 + "/" + y1 + " → " + x2 + "/" + y2, ctx.sessionId)' in src
+    assert 'noteOperation(lifecycleGeneration, "文字を入力中", ctx.sessionId)' in src
+    assert 'noteOperation(lifecycleGeneration, "キー操作中（" + key + "）", ctx.sessionId)' in src
+    assert 'noteOperation(lifecycleGeneration, "アプリを起動中：" + operationAppLabel(pkg), launchSessionId)' in src
+    assert 'noteOperation(lifecycleGeneration, "リンクを開いています", openSessionId)' in src
+    # Node operations: no session concept — the two-argument call stays.
+    assert 'noteOperation(lifecycleGeneration, "タップ中")' in src
+    assert 'noteOperation(lifecycleGeneration, "スクロール中")' in src
+
+
+def test_cons167_p1_02_batch_hook_runs_after_final_guard():
+    """CONS-167 P1-02: /batch no longer calls noteOperation before
+    runBatch — the hook runs only after the final in-task guard
+    passes, via the onFinalGuardPassed callback, inside the same
+    main-thread task as the actions. A guard-refused, replayed, or
+    unknown batch posts no "操作中" and starts no session."""
+    srv = _kotlin_source("HttpBridgeServer.kt")
+    batch = srv.index('"/batch" == path')
+    run = srv.index("svc!!.runBatch(", batch)
+    assert "noteOperation(" not in srv[batch:run]
+    assert "onFinalGuardPassed = {" in srv[run:srv.index("opGeneration = batchOpGeneration", run)]
+    # CONS-168 P1-01: the generation is an AtomicLong now — set in the
+    # callback, copied into opGeneration in the finally around runBatch.
+    assert "batchOpGeneration.set(noteOperation(" in srv
+    svc = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "onFinalGuardPassed: (() -> Unit)? = null" in svc
+    internal = svc.index("private fun runBatchInternal(")
+    guard = svc.index("checkGuard(", internal)
+    hook = svc.index("onFinalGuardPassed?.invoke()", internal)
+    assert guard < hook
+
+
+def test_cons167_p2_01_discard_persist_failure_marks_unknown():
+    """CONS-167 P2-01: when discard cannot persist the removal, the
+    record is marked UNKNOWN in memory (the complete() precedent) —
+    a re-send gets "unknown", never "running" for a batch that never
+    ran. The file still says IN_PROGRESS; the next restart converts
+    it to UNKNOWN the same way. The failure is still reported
+    (false)."""
+    src = _kotlin_source("BatchRegistry.kt")
+    start = src.index("fun discard(")
+    body = src[start:src.index("\n    }", start)]
+    assert "markUnknownInMemoryLocked(existing" in body
+    assert "marked UNKNOWN in memory" in body
+    assert "record kept" not in body
+    assert "return false" in body
+
+
+def test_cons167_p2_01_run_batch_logs_failed_discard():
+    """CONS-167 P2-01: runBatch checks discard's return value — a
+    failed discard is logged instead of silently ignored, while the
+    guard refusal still propagates to the client."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    start = src.index("} catch (e: OperationGuardException) {")
+    body = src[start:src.index("throw e", start)]
+    assert "if (!registry.discard(batchId, payloadHash)) {" in body
+    assert 'BridgeLog.log("batch_registry"' in body
+
+
+def test_c04_build_operation_context():
+    """C-04 (§2.1): build_operation_context validates the context
+    the guarded endpoints send — expected_package is required and
+    non-empty, tree_hash is a Java int, generation is >= 0,
+    session_id is a non-empty string when present. Fields left as
+    None are omitted, never sent as null."""
+    bp = ab.bridge_protocol
+    ctx = bp.build_operation_context("com.example", tree_hash=123456,
+                                     generation=7)
+    assert ctx == {"expected_package": "com.example",
+                   "tree_hash": 123456, "generation": 7}
+    ctx = bp.build_operation_context("com.example",
+                                     session_id="550e8400-e29b-41d4-a716-446655440000")
+    assert ctx == {"expected_package": "com.example",
+                   "session_id": "550e8400-e29b-41d4-a716-446655440000"}
+    assert bp.build_operation_context("com.example") == {
+        "expected_package": "com.example"}
+    with pytest.raises(bp.ProtocolError):
+        bp.build_operation_context("")
+    with pytest.raises(bp.ProtocolError):
+        bp.build_operation_context("com.example", generation=-1)
+    with pytest.raises(bp.ProtocolError):
+        bp.build_operation_context("com.example", tree_hash=2 ** 31)
+    with pytest.raises(bp.ProtocolError):
+        bp.build_operation_context("com.example", session_id="")
+
+
+def test_c04_builders_attach_operation_context():
+    """C-04 (§2.1): the guarded builders attach the context
+    verbatim; a non-dict context is a client bug, not a server
+    rejection. Without a context the bodies are exactly the old
+    ones (the builders stay backward compatible for callers that
+    do not guard)."""
+    bp = ab.bridge_protocol
+    ctx = {"expected_package": "com.example", "tree_hash": 7, "generation": 7}
+    assert bp.build_click(1, 2, operation_context=ctx)["operation_context"] == ctx
+    assert bp.build_swipe(0, 0, 1, 1, operation_context=ctx)["operation_context"] == ctx
+    assert bp.build_type_text("hi", operation_context=ctx)["operation_context"] == ctx
+    assert bp.build_press_key("HOME", operation_context=ctx)["operation_context"] == ctx
+    assert bp.build_batch("b", 7, [{"type": "wait", "wait_ms": 100}],
+                          operation_context=ctx)["operation_context"] == ctx
+    assert bp.build_click(1, 2) == {"x": 1, "y": 2}
+    assert bp.build_press_key("HOME") == {"key": "HOME"}
+    with pytest.raises(bp.ProtocolError):
+        bp.build_click(1, 2, operation_context="not-a-dict")
+
+
+def test_c04_submit_passes_context_without_changing_hash():
+    """C-04 (§2.2, §2.8): the batch registry passes the context
+    through to the body, and the content hash is unchanged by it —
+    the server's canonical payload hashes protocol_version,
+    tree_hash, and actions only, so attaching a context cannot
+    change the hash the registry computed."""
+    bp = ab.bridge_protocol
+    actions = [{"action_id": "a1", "type": "wait", "wait_ms": 100}]
+    ctx = {"expected_package": "com.example", "tree_hash": 7, "generation": 7}
+    reg_plain = bp.BatchRegistry()
+    plain = reg_plain.submit("b-plain", 7, actions)
+    reg_guarded = bp.BatchRegistry()
+    guarded = reg_guarded.submit("b-guarded", 7, actions,
+                                 operation_context=ctx)
+    assert plain["content_hash"] == guarded["content_hash"]
+    assert guarded["body"]["operation_context"] == ctx
+    assert "operation_context" not in plain["body"]
+
+
+def test_c04_click_sends_guard_context_from_fresh_state(mock_app):
+    """C-04 (§2.2): click() fetches a fresh /state first and posts
+    the operation_context of that snapshot (mock: package
+    com.example, tree_hash 123456, revision 7). The first action
+    bootstraps — no session_id in the context — and the GET
+    precedes the POST in request order."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.click(500, 800)["ok"] is True
+    requests = MockAppHandler.requests
+    assert requests[0] == ("GET", "/state", None)
+    assert requests[1][0] == "POST" and requests[1][1] == "/click"
+    ctx = requests[1][2]["operation_context"]
+    assert ctx == {"expected_package": "com.example",
+                   "tree_hash": 123456, "generation": 7}
+
+
+def test_c04_session_id_retained_across_actions(mock_app):
+    """C-04 (§2.4): the mock returns the server-issued session id
+    on guarded successes; the adapter retains it and the next
+    guarded action joins the same session (its context carries the
+    id) instead of bootstrapping a new one."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.click(1, 2)["ok"] is True
+    assert adapter._operation_session_id == "mock-session-1"
+    assert adapter.swipe(0, 0, 10, 10)["ok"] is True
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert posts[1][2]["operation_context"]["session_id"] == "mock-session-1"
+    assert adapter._operation_session_id == "mock-session-1"
+
+
+def test_c04_session_mismatch_clears_retained_id(mock_app):
+    """C-04 (§2.4): a session_mismatch proves the retained id is
+    not the active one (server restarted, or the session auto-ended
+    after 10 s idle). The adapter drops it, so the NEXT guarded
+    action bootstraps a fresh session instead of 409ing again on
+    the same stale id. Without the clear the mismatch is sticky:
+    the server 409s any non-null id that is not active, including
+    when no session is active at all."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.click(1, 2)["ok"] is True
+    assert adapter._operation_session_id == "mock-session-1"
+    MockAppHandler.fail_next[("POST", "/click")] = (409, 1)
+    MockAppHandler.fail_body = {
+        "ok": False, "error": "session_mismatch",
+        "message": "the operation session mock-session-1 is not active"}
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.click(3, 4)
+    assert excinfo.value.error_id == "session_mismatch"
+    assert adapter._operation_session_id is None
+    # The next action bootstraps again — no session_id in its context.
+    assert adapter.click(5, 6)["ok"] is True
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/click"]
+    assert "session_id" not in posts[-1][2]["operation_context"]
+
+
+def test_c04_foreground_mismatch_is_not_retried(mock_app, monkeypatch):
+    """C-04 (§2.2, §2.6): a 409 guard refusal is definitive
+    not-executed — the POST runs exactly once, and the error id is
+    carried structured on the TransportError (no re-parse)."""
+    monkeypatch.setattr(ab, "APP_RETRY_BASE_DELAY_S", 0.01)
+    MockAppHandler.fail_next[("POST", "/click")] = (409, 1)
+    MockAppHandler.fail_body = {
+        "ok": False, "error": "foreground_mismatch",
+        "message": "foreground is com.other, expected com.example",
+        "expected_package": "com.example",
+        "current_package": "com.other"}
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.click(100, 100)
+    assert excinfo.value.error_id == "foreground_mismatch"
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/click"]
+    assert len(posts) == 1
+
+
+def test_c04_operation_end_clears_retained_id(mock_app):
+    """C-04 (§2.4): ending the session invalidates the id
+    server-side, so the adapter drops its retained copy — the next
+    guarded action bootstraps instead of 409ing on a dead id."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.click(1, 2)["ok"] is True
+    assert adapter._operation_session_id == "mock-session-1"
+    assert adapter.operation_end()["ok"] is True
+    assert adapter._operation_session_id is None
+    assert adapter.click(3, 4)["ok"] is True
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/click"]
+    assert "session_id" not in posts[-1][2]["operation_context"]
+
+
+def test_c04_launch_app_joins_session_when_retained(mock_app):
+    """C-04 (§2.5): a launch joins the active session when one is
+    retained (session_id only — expected_package does not apply,
+    the launch itself changes the foreground); with no session
+    retained the client sends no operation_context at all
+    (bootstrap)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.launch_app("com.twitter.android")
+    assert result["status"] == "launched"
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/launch_app"]
+    assert posts[0][2] == {"package": "com.twitter.android"}
+    assert adapter.click(1, 2)["ok"] is True
+    assert adapter._operation_session_id == "mock-session-1"
+    result = adapter.launch_app("com.twitter.android")
+    assert result["status"] == "launched"
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/launch_app"]
+    assert posts[1][2] == {
+        "package": "com.twitter.android",
+        "operation_context": {"session_id": "mock-session-1"}}
+
+
+def test_c04_open_joins_session_when_retained(mock_app):
+    """C-04 (§2.5): /open follows the same launch contract as
+    /launch_app — session_id only, omitted when nothing is
+    retained."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.open("https://example.com")["ok"] is True
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/open"]
+    assert posts[0][2] == {"uri": "https://example.com"}
+    assert adapter.click(1, 2)["ok"] is True
+    assert adapter.open("https://example.com")["ok"] is True
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/open"]
+    assert posts[1][2] == {
+        "uri": "https://example.com",
+        "operation_context": {"session_id": "mock-session-1"}}
+
+
+def test_c04_batch_sends_guard_context(mock_app):
+    """C-04 (§2.2, §2.8): batch() posts the operation_context of
+    the snapshot it acts on (mock: com.example / 123456 / 7,
+    bootstrap on the first action), and retains the session id
+    the batch response carries for the next guarded action."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    actions = [{"action_id": "a1", "type": "tap", "x": 1, "y": 2}]
+    result = adapter.batch("b-c04", 123456, actions)
+    assert result["ok"] is True
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/batch"]
+    assert len(posts) == 1
+    assert posts[0][2]["operation_context"] == {
+        "expected_package": "com.example",
+        "tree_hash": 123456, "generation": 7}
+    assert adapter._operation_session_id == "mock-session-1"
+
+
+def test_c04_notification_action_carries_session_after_click(mock_app):
+    """C-04 (§2.2): notification_action is a guarded ordinary
+    screen operation — after an earlier action bootstrapped the
+    session, its context carries the retained session id."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    assert adapter.click(1, 2)["ok"] is True
+    assert adapter.notification_action(NOTIF_KEY, "open")["ok"] is True
+    posts = [r for r in MockAppHandler.requests
+             if r[0] == "POST" and r[1] == "/notification_action"]
+    assert posts[0][2] == {
+        "key": NOTIF_KEY, "action": "open",
+        "operation_context": {
+            "expected_package": "com.example",
+            "tree_hash": 123456, "generation": 7,
+            "session_id": "mock-session-1"}}
+
+
+def test_c04_guard_context_requires_foreground_package():
+    """C-04 (§2.1): a snapshot with no foreground package cannot
+    produce a context — the adapter fails fast client-side with a
+    clear ProtocolError instead of sending a context the server
+    would 400."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    with pytest.raises(ab.bridge_protocol.ProtocolError,
+                       match="no foreground package"):
+        adapter._guard_context({"package": "", "tree_hash": 7, "revision": 7})
+    with pytest.raises(ab.bridge_protocol.ProtocolError,
+                       match="no foreground package"):
+        adapter._guard_context({"tree_hash": 7, "revision": 7})
+
+
+def test_cons168_p1_01_batch_generation_copied_in_finally():
+    """CONS-168 P1-01: the /batch handler must copy the generation the
+    onFinalGuardPassed hook noted into opGeneration in a finally around
+    runBatch — not only after a normal return. A ServiceTimeoutException
+    from the 20 s main-thread timeout after the hook ran would otherwise
+    skip the copy, leave operationInFlight incremented with opGeneration
+    == -1, and defeat the 10 s auto-end timer until an explicit
+    /operation_end or stop(). The generation is an AtomicLong (the hook
+    writes on the main thread, the worker reads after a timeout — a
+    plain var has no happens-before edge there), and the hook is
+    disarmed in the same finally, so a main-thread task still queued
+    when the worker timed out cannot note an operation after handle()
+    has already exited."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert "import java.util.concurrent.atomic.AtomicLong" in src
+    assert "val batchOpGeneration = AtomicLong(-1L)" in src
+    assert "var batchOpGeneration = -1L" not in src
+    start = src.index("// CONS-168 P1-01")
+    end = src.index("// C-01 (SPEC §2.10)", start)
+    handler = src[start:end]
+    assert "val br = try {" in handler
+    assert "svc!!.runBatch(" in handler
+    assert "} finally {" in handler
+    assert "opGeneration = batchOpGeneration.get()" in handler
+    assert "batchHookArmed = false" in handler
+    assert "if (batchHookArmed)" in handler
+    assert "synchronized(batchHookLock)" in handler
+    assert "batchOpGeneration.set(noteOperation(" in handler
+    # The old shape (plain var + copy after a normal return) is gone.
+    assert "opGeneration = batchOpGeneration\n" not in src
+
+
+def test_cons168_p2_01_notification_reply_comment_matches_behavior():
+    """CONS-168 P2-01: the /notification_action comment must no longer
+    say "reply" does not call noteOperation — since CONS-167 reply notes
+    the operation like open does. A stale comment contradicts the code
+    one screen below it."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert '"reply" does not' not in src
+    assert 'no "操作中" hook' not in src
+    start = src.index("// C-04: an ordinary screen operation")
+    end = src.index("if (!BridgeNotificationListener.isAccessGranted", start)
+    head = src[start:end]
+    assert "CONS-167 P1-01" in head
+    assert '"reply" notes it too' in head
+
+
+def test_cons168_p2_02_no_redundant_null_checks():
+    """CONS-168 P2-02: TokenProvider.currentToken() is declared non-null
+    String (its only implementation delegates to
+    MainActivity.getOrCreateToken, which returns String), so the
+    `expected == null` check in the token gate is dead — drop it.
+    requireBatchRegistry must not use `svc!!` either: the Elvis throws
+    the same fail-closed ServiceUnavailable its callers rely on."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    assert "expected == null" not in src
+    assert "if (expected != token)" in src
+    start = src.index("private fun requireBatchRegistry(")
+    body = src[start:start + 700]
+    # (The KDoc above mentions `svc!!` in prose; assert on the code line.)
+    assert "val registry = svc!!" not in body
+    assert "svc ?: throw ServiceUnavailable" in body

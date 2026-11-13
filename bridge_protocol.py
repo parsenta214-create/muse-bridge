@@ -325,10 +325,14 @@ def validate_headers_size(headers: dict[str, str]) -> dict[str, str]:
     return headers
 
 
-def build_click(x: int, y: int) -> dict[str, Any]:
+def build_click(x: int, y: int,
+                operation_context: dict[str, Any] | None = None) -> dict[str, Any]:
     _require_int(x, "x", min_value=0)
     _require_int(y, "y", min_value=0)
-    return validate_body_size({"x": x, "y": y})
+    body: dict[str, Any] = {"x": x, "y": y}
+    if operation_context is not None:
+        body["operation_context"] = _require_operation_context(operation_context)
+    return validate_body_size(body)
 
 
 def build_swipe(
@@ -337,29 +341,35 @@ def build_swipe(
     x2: int,
     y2: int,
     duration_ms: int = 300,
+    operation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _require_int(x1, "x1", min_value=0)
     _require_int(y1, "y1", min_value=0)
     _require_int(x2, "x2", min_value=0)
     _require_int(y2, "y2", min_value=0)
     _require_int(duration_ms, "duration_ms", min_value=0)
-    return validate_body_size(
-        {
-            "x1": x1,
-            "y1": y1,
-            "x2": x2,
-            "y2": y2,
-            "duration_ms": duration_ms,
-        }
-    )
+    body: dict[str, Any] = {
+        "x1": x1,
+        "y1": y1,
+        "x2": x2,
+        "y2": y2,
+        "duration_ms": duration_ms,
+    }
+    if operation_context is not None:
+        body["operation_context"] = _require_operation_context(operation_context)
+    return validate_body_size(body)
 
 
-def build_type_text(text: str) -> dict[str, Any]:
+def build_type_text(text: str,
+                    operation_context: dict[str, Any] | None = None) -> dict[str, Any]:
     _require_str(text, "text")
-    return validate_body_size({"text": text})
+    body: dict[str, Any] = {"text": text}
+    if operation_context is not None:
+        body["operation_context"] = _require_operation_context(operation_context)
+    return validate_body_size(body)
 
 
-def build_press_key(key: str) -> dict[str, Any]:
+def build_press_key(key: str, operation_context: dict[str, Any] | None = None) -> dict[str, Any]:
     _require_str(key, "key", non_empty=True)
     # Step 3 (P1-01, CONS-019): the server compares keys
     # case-insensitively (equalsIgnoreCase), so normalise to the
@@ -368,7 +378,54 @@ def build_press_key(key: str) -> dict[str, Any]:
     key = key.upper()
     if key not in VALID_KEYS:
         raise ProtocolError(f"invalid key: {key!r}")
-    return validate_body_size({"key": key})
+    body: dict[str, Any] = {"key": key}
+    if operation_context is not None:
+        body["operation_context"] = _require_operation_context(operation_context)
+    return validate_body_size(body)
+
+
+def _require_operation_context(operation_context: Any) -> dict[str, Any]:
+    """C-04 (SPEC-FOREGROUND-GUARD-001 §2.1): an operation_context
+    attached to a guarded body must be a dict (normally built by
+    build_operation_context); anything else is a client bug, not a
+    server rejection."""
+    if not isinstance(operation_context, dict):
+        raise ProtocolError("operation_context must be a dict")
+    return operation_context
+
+
+def build_operation_context(
+    expected_package: str,
+    tree_hash: int | None = None,
+    generation: int | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
+    """C-04 (SPEC-FOREGROUND-GUARD-001 §2.1): the operation_context
+    for a guarded request. expected_package is required (the server
+    400s when it is missing or empty); tree_hash and generation are
+    the snapshot the operator acted on (generation is the /state
+    revision — the server's snapshot_id is the same number by
+    construction, BridgeAccessibilityService sets snapshotId =
+    lastRevision); session_id is the server-issued UUID, omitted on
+    the first operation of a session (bootstrap — the server creates
+    the session and returns its id in the response). Fields left as
+    None are omitted, never sent as null."""
+    _require_str(expected_package, "operation_context.expected_package", non_empty=True)
+    if tree_hash is not None:
+        _require_int(tree_hash, "operation_context.tree_hash",
+                     min_value=INT32_MIN, max_value=INT32_MAX)
+    if generation is not None:
+        _require_int(generation, "operation_context.generation", min_value=0)
+    if session_id is not None:
+        _require_str(session_id, "operation_context.session_id", non_empty=True)
+    ctx: dict[str, Any] = {"expected_package": expected_package}
+    if tree_hash is not None:
+        ctx["tree_hash"] = tree_hash
+    if generation is not None:
+        ctx["generation"] = generation
+    if session_id is not None:
+        ctx["session_id"] = session_id
+    return ctx
 
 
 def build_click_node(node_id: str, tree_hash: int) -> dict[str, Any]:
@@ -490,6 +547,7 @@ def build_batch(
     actions: list[dict[str, Any]],
     protocol_version: int = PROTOCOL_VERSION,
     supersedes: str | None = None,
+    operation_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     _require_str(batch_id, "batch_id", non_empty=True)
     # Step 4 (CONS-020 P1-01): tree_hash is a Java int (signed
@@ -524,6 +582,14 @@ def build_batch(
     }
     if supersedes is not None:
         body["supersedes"] = supersedes
+    # C-04 (SPEC-FOREGROUND-GUARD-001 §2.2, §2.8): the batch's
+    # operation_context is checked once, before the batch executes.
+    # It is NOT part of the content hash (the server's
+    # canonicalBatchPayload hashes protocol_version, tree_hash, and
+    # actions only), so attaching it here cannot change the hash the
+    # registry computed from the same three fields.
+    if operation_context is not None:
+        body["operation_context"] = _require_operation_context(operation_context)
     # Step 2 (v1.0.1, MERGE_PLAN_A item 2): the protocol version is
     # now explicit in the batch body. The server defaults it to 1 and
     # rejects anything else with 400, and the A-5 client rule says the
@@ -1321,6 +1387,7 @@ class BatchRegistry:
         actions: list[dict[str, Any]],
         protocol_version: int = PROTOCOL_VERSION,
         supersedes: str | None = None,
+        operation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Register a batch by its content hash.
 
@@ -1340,7 +1407,8 @@ class BatchRegistry:
         self._purge_expired(now)
         _require_int(protocol_version, "protocol_version", min_value=1, max_value=1)
         validated = build_batch(
-            batch_id, tree_hash, actions, protocol_version, supersedes
+            batch_id, tree_hash, actions, protocol_version, supersedes,
+            operation_context,
         )
         content_hash = self.compute_content_hash(
             validated["protocol_version"],

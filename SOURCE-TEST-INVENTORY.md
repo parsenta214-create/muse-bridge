@@ -4,8 +4,8 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-13、Stage 3 第3バッチ（BridgeAccessibilityService 変換）時。フルスイート: **544 passed、18 subtests**。
-（test_android_app_client.py は 361 件）
+最終確認: 2026-11-14、Stage 3 第4バッチ（最終、HttpBridgeServer 変換＋C-04 織り込み）時。フルスイート: **571 passed、18 subtests**。
+（test_android_app_client.py は 405 collected／387 def test_）
 内訳：C-01完了時点の実績は 502 passed＋3 failed（build.sh のバージョン断言が
 2.9.16/69 のままだった更新漏れ — 「505 passed」の報告は誤り）→ CONS-152修正で断言を
 2.9.18/71 へ更新（3件復帰）＋新規 15 件（test_batch_outbox.py 8 件＋
@@ -54,12 +54,23 @@ SHA-256 b3271bd1703f8ad41aeef76f43788cd6e7e995db7392c4dda44e9f37cc10b8df）、ja
 ビルドは v2.9.24/code 77 で BUILD OK（926,781バイト、SHA-256 64bcbdd9f41ae8fe1a7c822ed655b0c094cdfea514caaecc557e84c07d886b72）。
 javap で open class＋static getInstance／ACTION_A11Y_STATE_CHANGED＋BatchResult・State の全フィールドが実フィールド（@JvmField）＋BatchResult の2コンストラクタを確認。
 変換中の kotlinc エラー2件：(1) TakeScreenshotCallback は interface のため `object : TakeScreenshotCallback()` は「constructor がない」と拒否される（括弧なし `object : TakeScreenshotCallback` が正解。GestureResultCallback は抽象クラスのため括弧ありのまま）。(2) 二次コンストラクタだけのクラスには無引数コンストラクタが生成されない（`constructor(other) : this()` でも解消せず。明示の空プライマリ `class BatchResult()` が必要）。
+→ Stage 3 第4バッチ（最終、HttpBridgeServer 変換＋C-04 織り込み）で断言を 2.9.25/78 へ更新（3件リネーム、件数不変）＋新規テスト関数 18 件
+（Stage 3／C-04 検査 4 件：is_kotlin・D4 interop・C-04 guard ソース検査・BatchRegistry.discard＋C-04 クライアント 13 件：build_operation_context・builders attach・submit hash 不変・click guard context・session 保持・session_mismatch クリア・foreground_mismatch 非再送・operation_end クリア・launch_app／open の session 参加・batch guard context・notification_action session・guard context の package 必須＋回帰 1 件：handler-chain 重複分岐）＋構造化 503 パラメータへ
+/notification_action 1 件を追加。追加ケース合計 19 件（test_android_app_client.py は 378→397 collected、全スイート 544→563 passed）。HttpBridgeServer.java は削除し HttpBridgeServer.kt（4,006行）が正本。既存テスト 28 関数の本文を変更（Kotlin 構文への更新 22 件＋振る舞い更新 6 件：click/swipe/type_text/press_key/batch/notification_action は fresh /state＋operation_context 付きで送信。session_id は初回ブートストラップで省略、2回目以降は保持した mock-session-1 を付与）＋2 関数をリネーム（locale／a11yoff の _24→_25。pilot build の版数更新は本文変更 28 件に含む）。モックの変更：a11y-off 時に /notification_action を 503 へ（C-04 SPEC §2.2 で guarded になったため。旧モックの「a11y-off で利用可」は SPEC と矛盾する古い記述）、guarded 応答に session_id（mock-session-1）を追加、409 SPEC エラー用の fail_body フックを追加。
+変換中の kotlinc エラー3件：(1) HttpBridgeServer.java を残したまま .kt と一緒にコンパイルすると class redeclaration（削除が先）。(2) `import java.util.List` 等の明示 import は Kotlin のコレクション型と衝突する（ArrayList が List へ代入不可になる。import を除き Kotlin 既定の List／ArrayList を使う）。(3) `svc!!.batchRegistry` は private フィールドのため `svc!!.getBatchRegistry()` を使う。/repair_termux ハンドラの else 分岐の重複（構文エラー）も修正。
+ビルドは v2.9.25/code 78 で BUILD OK（971,836バイト、SHA-256 646e818794aab43c5ea308e217b91ff360eaba88d740f0b8da274297547dd56c）。javap で open class＋synchronized start/stop/boundTailscaleIps＋checkGuard／runGuardedOperation＋BatchRegistry.discard＋OperationGuardException を確認。
+**自己発見 P0（レビュー送付前に修正、APK 再ビルド）：** 変換後の handle() 鎖に /click と /launch_app の2ハンドラが「空の else-if 分岐＋同一条件の else-if（実体）」の重複形で書かれていた。空の最初の分岐が常にマッチするため実体は到達不能で、POST /click・/launch_app は無応答になる。kotlinc は通る（構文として有効）。Python スイートはモック相手のため見えず、KNOWN_PATHS テストは集合比較のため重複が潰れる。修正は空の最初の分岐を除去（各2行＋空行）。回帰テスト `test_p1_03_handler_chain_has_no_duplicate_branch` を追加（全29エンドポイントの `"..." == path` 出現回数を断言。/clipboard のみ GET＋POST で2回。修正前形状で発火することを確認済み）。新規テスト関数は 18 件（上記の内訳。回帰 1 件を含む）、フルスイートは 562→563 passed。パラメータケース 1 件を含む追加ケース合計は 19 件。
+C-04 のクライアント側の設計判断（レビューで検証してもらう前提）：(a) guarded 操作は毎回 fresh /state を取ってから送信する（a11y-off 時は /state の 503 で先に失敗する。従来の click 503 と同じ失敗クラス）。(b) session_mismatch を観測したら保持した session_id を捨てる（捨てないと次回以降も同じ stale id で 409 し続ける。サーバーは active でない id は null の場合も含め常に 409 する）。(c) operation_end() 成功後に保持 id を捨てる（サーバー側も無効化する）。(d) error_id の抽出を全エラー status へ拡張（従来は 503 のみ。batch の definitive 判定への影響なし）。
+なお、/notification_action は Java 原文では a11y サービスを一切使わなかった（BridgeNotificationListener 直接呼び出し）が、C-04 SPEC §2.2 の表が guarded ordinary screen operations に明記しているため、Kotlin 変換で requireService＋runGuardedOperation を付けた。これは C-04 による意図的な振る舞い変更（a11y-off では 503 foreground_unverifiable）であり、変換ミスではない。
+**CONS-167 P2-02 訂正（2026-11-14）：** レビューパケット §6 の「New tests (18)」に対し列挙が 17 件（サーバー 4＋クライアント 12＋回帰 1）に見えたのは、クライアント列挙の数え落とし。実数は新規テスト関数 18 件（サーバー 4＋クライアント 13＋回帰 1）＋新規パラメータケース 1 件（test_app_a11y_off_structured_503 へ POST /notification_action を追加）＝追加ケース 19 件で、test_android_app_client.py の collected 378→397、全スイート 544→563 passed と一致する。数え方は collected ID の差分（batch3 ファイル 378 件と batch4 ファイル 397 件の ID 比較）で直接確認済み。既存テストの変更は本文変更 28 関数（Kotlin 構文更新 22＋振る舞い更新 6）＋リネーム 2 関数。
+**CONS-167 修正ラウンド（2026-11-14、琥珀 Tier 1 CONDITIONAL 7.2/10、P0:0/P1:2/P2:2 を受けて）：** P1-01＝noteOperation に expectedSessionId 引数を追加し、セッション検証とセッション開始・更新を同じ operationLock 臨界区で原子化（検証→inFlight 増加の間に auto-end が割り込めなくなった）。guarded ハンドラ（/click・/swipe・/type_text・/press_key・/notification_action open・/launch_app・/open）は検証済み id を渡す。/notification_action reply は noteOperation が無かったため対称化して追加。ノード操作は session 概念なし（SPEC §2.8）のため 2 引数のまま。P1-02＝/batch の noteOperation を runBatchInternal 内の最終ガード通過後に移動（onFinalGuardPassed コールバック。replay／unknown／guard 拒否の batch は通知なし）。P2-01＝discard の永続化失敗時はレコードをメモリ上で UNKNOWN 化（complete() の前例。re-send は "unknown"、再実行なし）＋runBatch 側で戻り値を検査してログ。markUnknownInMemoryLocked のログ文頭の "complete: " を外し、呼び出し元ごとの reason をそのまま出す形に変更（complete() 側のログ文言がわずかに変わる。テストはログ文言を断言していない）。既存テスト 3 件の断言を新形状へ更新（OV-07・OV-09・null_contracts）。新規テスト 5 件（P1-01×2・P1-02×1・P2-01×2）。フルスイート **568 passed、18 subtests**（test_android_app_client.py は 402 collected／384 def test_）。バージョンは据え置き（修正ラウンドの前例：第1・第3バッチと同じく v2.9.25/code 78）。ビルドは BUILD OK（975,932バイト、SHA-256 ec34f03a6401042c4159627bc557f309a5b8394bf1ed94713bab09a0e930afa1。レビュー済み 646e8187… から変わった）。javap で runBatch／runBatchInternal の onFinalGuardPassed 引数（Function0<Unit>）＋discard を確認。単体 kotlinc の R 未解決 168 件は生成 R.java 未投入による既知のもので、実ビルド（aapt2 が R を先に生成）では 0 件。HttpBridgeServer.kt は 4,036行。
+**CONS-168 修正ラウンド（2026-11-14、光月最終 CONDITIONAL 8.5/10、P0:0/P1:1/P2:2 を受けて）：** P1-01＝/batch の operationInFlight 漏れ。CONS-167 P1-02 修正で noteOperation を runBatch 内のコールバックへ移した結果、runBatch が ServiceTimeoutException（20 秒メインスレッドタイムアウト）を投げると opGeneration へのコピーがスキップされ、handle() の finally が operationFinished を呼ばず inFlight が残り続け、10 秒 auto-end が恒久的に敗北した（修正前＝P1-02 修正前は worker 側で noteOperation を先に呼んでいたためこの漏れは存在しなかった。P1-02 修正が作った窓）。修正：generation を AtomicLong 化し、runBatch を try/finally で包んで finally で opGeneration へコピー。同時にフックを finally で武装解除（batchHookArmed＋batchHookLock。worker がタイムアウトした後にキューに残っていたメインスレッドタスクが handle() 終了後に noteOperation するのを防ぐ。check-and-note と disarm-and-copy は同一ロックで相互排他。ロック順序は service monitor → batchHookLock → operationLock）。P2-01＝/notification_action のコメントが reply の noteOperation 追加と矛盾していたため文言を更新。P2-02＝TokenProvider.currentToken() は非 null String 宣言のため `expected == null` チェックを除去（唯一の実装は MainActivity.getOrCreateToken で String を返す）。requireBatchRegistry の `svc!!` を `svc ?: throw ServiceUnavailable` に変更（呼び出し側 5 件は変更なし）。既存テスト 2 件の断言を新形状へ更新（OV-09・CONS-167 P1-02 テスト。旧断言は新コードで不成立になることを grep で確認済み）。新規テスト 3 件（P1-01・P2-01・P2-02）。フルスイート **571 passed、18 subtests**（test_android_app_client.py は 405 collected／387 def test_）。バージョンは据え置き（v2.9.25/code 78）。ビルドは BUILD OK（959,548バイト、SHA-256 8b486014f4d2a30d250be98bca9e03099d3400c052beb0c0c9359f43edfc82c4。レビュー済み ec34f03a… から変わった）。dex 内に batchHookArmed／AtomicLong を確認。HttpBridgeServer.kt は 4,072行。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
 | ファイル | `def test_` 数 | 検査対象 |
 |---|---|---|
-| `test_android_app_client.py` | 353 | 下記の Android ソース検査（`_java_source` / `_kotlin_source`）＋ VM 側クライアントの振る舞い（モックサーバー） |
+| `test_android_app_client.py` | 387 | 下記の Android ソース検査（`_java_source` / `_kotlin_source`）＋ VM 側クライアントの振る舞い（モックサーバー）。Stage 3 第4バッチで 405 collected（パラメータ化分を含む） |
 | `test_bridge_protocol.py` | 88 | VM 側プロトコル検証（`bridge_protocol.py`）。Android ソースは検査しない |
 | `test_android_bridge.py` | 8 | VM 側クライアント（`android_bridge.py`）。Android ソースは検査しない |
 | `test_batch_outbox.py` | 37 | C-01 新規：VM 側 outbox（`bridge_protocol.py` の `BatchOutbox`）の判定表・固定送信順・再利用禁止・永続失敗・容量 purge・UNKNOWN 形状・supersedes・確定/未確定分類。CONS-152修正で耐久ゲート 4 件・並行性 2 件・CLI 2 件を追加。CONS-153修正で 6 件を追加（別プロセス同時 register・別インスタンス同時 register・失敗後のロック解放・`_locked` 全適用・VM側 P1-01 判定 2 件）。CONS-154修正で 1 件を追加（ファイルロック初期化固定テスト） |
@@ -76,7 +87,7 @@ javap で open class＋static getInstance／ACTION_A11Y_STATE_CHANGED＋BatchRes
 
 | Android ソース | 参照数 | 主なテスト（代表） |
 |---|---|---|
-| `HttpBridgeServer.java` | 11 | P1-06 世代チェック、リクエストログ（KNOWN_PATHS ガード：C-01 で管理エンドポイント 5 つを追加）、サーバー設定 |
+| `HttpBridgeServer.kt`（Stage 3 第4バッチで Java から移行） | 14 | P1-06 世代チェック、リクエストログ（KNOWN_PATHS ガード：C-01 で管理エンドポイント 5 つを追加）、サーバー設定、Stage 3 検査 3 件（is_kotlin・D4 interop・C-04 guard）＋C-04 クライアント 13 件（build_operation_context 他）。`_override_server()` 経由の OV 検査も同ファイルを読む |
 | `BridgeWidgetProvider.java` | 4 | ウィジェットボタン／PendingIntent |
 | `MainActivity.kt`（Stage 3 第1バッチで Java から移行） | 14 | Drive 初期化フック、AppVersion 呼び出し、モード切替のウィジェット更新、PingProber／通知／VpnBindSelector の呼び出し側、Stage 3 検査 2 件（is_kotlin・D4 interop） |
 | `BridgeWidgetActionReceiver.java` | 2 | ウィジェットアクション分岐 |
@@ -102,7 +113,7 @@ javap で open class＋static getInstance／ACTION_A11Y_STATE_CHANGED＋BatchRes
 
 | 検査 | テスト |
 |---|---|
-| `VERSION_NAME="2.9.19"` / `VERSION_CODE=72`（CONS-153修正） | `test_locale_tile_version_2_9_19`、`test_a11yoff002_version_2_9_19`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
+| `VERSION_NAME="2.9.25"` / `VERSION_CODE=78`（Stage 3 第4バッチ） | `test_locale_tile_version_2_9_25`、`test_a11yoff002_version_2_9_25`、`test_kotlin_pilot_build_sh_two_compiler_pipeline`（バージョン断言のみ更新） |
 | kotlinc ステップ（`-jvm-target 17`、256m、2 コンパイラ・パイプライン）、javac の `-cp` に `$KOTLIN_STDLIB`、d8 に stdlib を 1 個だけ | `test_kotlin_pilot_build_sh_two_compiler_pipeline` |
 
 ## 運用ルール（D6）

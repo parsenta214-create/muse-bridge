@@ -588,6 +588,52 @@ class BatchRegistry(private val dir: File) {
         }
     }
 
+    /**
+     * C-04 (SPEC-FOREGROUND-GUARD-001 §2.2): remove an IN_PROGRESS
+     * record that was admitted but never executed — the in-task
+     * guard inside runBatchInternal refused the batch after
+     * admission. Only an IN_PROGRESS record with a matching payload
+     * hash is removed; anything else is left alone (a replayed or
+     * terminal record must never be discarded by a guard failure).
+     * On a persist failure the record stays IN_PROGRESS in the file
+     * but is marked UNKNOWN in memory (CONS-167 P2-01: a re-send
+     * gets "unknown", never "running" for work that never ran, and
+     * never a re-execution); the next restart converts the file's
+     * IN_PROGRESS to UNKNOWN the same way. The failure is still
+     * reported (false) so the caller can log it.
+     * @return true when a record was removed.
+     */
+    fun discard(batchId: String, payloadHash: String): Boolean {
+        synchronized(lock) {
+            ensureInitialized()
+            val existing = content.records[batchId] ?: return false
+            if (existing.status != "IN_PROGRESS" || existing.payloadHash != payloadHash) {
+                return false
+            }
+            val nextRecords = LinkedHashMap(content.records)
+            nextRecords.remove(batchId)
+            val next = content.copy(records = nextRecords)
+            if (persistLocked(next, backupPrevious = false)) {
+                content = next
+                BridgeLog.log("batch_registry", "discard: removed IN_PROGRESS record for " + batchId)
+                return true
+            }
+            // CONS-167 P2-01: the file still says IN_PROGRESS, but
+            // the batch never ran — leaving the record IN_PROGRESS in
+            // memory would answer a re-send with "running" for work
+            // that never happened. Mark it UNKNOWN in memory instead
+            // (the complete() persist-failure precedent, SPEC §2.4):
+            // a re-send gets "unknown", never a re-execution, and
+            // the next restart converts the file's IN_PROGRESS to
+            // UNKNOWN the same way. The persist failure itself is
+            // still reported (false) so the caller can log it.
+            markUnknownInMemoryLocked(existing, "discard persist failed")
+            BridgeLog.log("batch_registry",
+                "discard: persist failed for " + batchId + "; marked UNKNOWN in memory")
+            return false
+        }
+    }
+
     /** The result persist failed (SPEC §2.4): keep the record
      * IN_PROGRESS in the file, mark it UNKNOWN in memory so a
      * re-send gets "unknown". On the next restart the file's
@@ -598,7 +644,7 @@ class BatchRegistry(private val dir: File) {
         memRecords[existing.batchId] = unknown
         content = content.copy(records = memRecords)
         BridgeLog.log("batch_registry",
-            "complete: " + reason + " for " + existing.batchId + "; marked UNKNOWN in memory")
+            reason + " for " + existing.batchId + "; marked UNKNOWN in memory")
     }
 
     /**
