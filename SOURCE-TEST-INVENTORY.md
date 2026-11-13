@@ -4,8 +4,8 @@ SPEC-KOTLIN-MIGRATION-001 D6 で作る対応表。Python テストファイル�
 それが検査する Android ソース（Java / Kotlin）・build.sh・Manifest・
 res の対応を記す。バッチごとに更新する。
 
-最終確認: 2026-11-13、Stage 3 第1バッチ（MainActivity 変換、CONS-162 P1-01 修正後）時。フルスイート: **536 passed、18 subtests**。
-（test_android_app_client.py は 353 件）
+最終確認: 2026-11-13、Stage 3 第2バッチ（LogActivity 変換）時。フルスイート: **540 passed、18 subtests**。
+（test_android_app_client.py は 357 件）
 内訳：C-01完了時点の実績は 502 passed＋3 failed（build.sh のバージョン断言が
 2.9.16/69 のままだった更新漏れ — 「505 passed」の報告は誤り）→ CONS-152修正で断言を
 2.9.18/71 へ更新（3件復帰）＋新規 15 件（test_batch_outbox.py 8 件＋
@@ -28,6 +28,21 @@ MainActivity.kt が正本。ビルドは v2.9.22/code 75 で BUILD OK（918,591�
 setPersistedMode を String? 化（Java null 契約の維持）＋open class 化し、回帰テスト 1 件を追加（535 passed）。CONS-162 P1-01 修正で
 refreshAddress() のラベル判定を tokenRevealed → addressRevealed に訂正（Java 原文は addressRevealed。初回変換で兄弟関数から
 写し間違えた D5 回帰。光月が原文の直接照合で発見）＋回帰テスト 1 件を追加（536 passed）。
+→ Stage 3 第2バッチ（LogActivity 変換）で断言を 2.9.23/76 へ更新（3件リネーム、件数不変）＋新規 4 件
+（test_android_app_client.py の Stage 3 検査 4 件：is_kotlin・D4 interop・nullable_views・in_keyword）。LogActivity.java は削除し
+LogActivity.kt が正本。drive001 テスト群（95 件）は _drive_log() を Kotlin ソース読取へ切替え、Java 構文の断言を Kotlin 構文へ
+更新（synchronized(SAVE_LOCK)、`catch (_: Exception)`、プロパティ形式の persistedUriPermissions／isFinishing 等）。
+ビルドは v2.9.23/code 76 で BUILD OK（922,684バイト、SHA-256 40a0cecaf3388a0c0fb0e87da5cb7f07e181fff493807f88639c9af09142981a）。javap で open class＋static ensureDriveInit を確認。
+CONS-163 P2-01（companion の公開 ABI）の対応：`private companion object` 化を試したが、kotlinc が MainActivity.kt:244 の
+LogActivity.ensureDriveInit 呼び出しを「companion が private」で拒否し、ビルドが壊れた。Kotlin 呼び出し側は @JvmStatic を companion 経由で
+解決するため、private 化は Kotlin 呼び出し側と両立しない。companion は public のままに戻し、P2-01 は「採用しない（accepted risk）」として
+CONS-163 再レビューで琥珀に判断を仰ぎ、ADOPT 9.7/10 で同意を得た。琥珀の推奨（「WON'T FIX — Accepted ABI Surface」として
+理由・影響・受容理由・再検討条件を整理する）に従い、コメントをその形に書き直した。Java から見える static API は
+ensureDriveInit 1件のまま。「JVM 上の公開 ABI が1つだけ」という説明は正しくない（Companion の ABI が残る）点もコメントに明記。
+なお、P2-01 対応の試行・復旧・コメント書き直しで APK の SHA-256 が変わった（ba62aa25…→ab508728…→fc583e68…。
+コメント文の変更によるデバッグ情報の差で、動作は同一）。
+CONS-164 P2-02（未使用 import 3件：UriPermission・OutputStream・Map）を除去。grep で未使用を確認してから削除。ビルド・フルスイートは再実行済み（540 passed）。
+CONS-078 P2-02 のテスト（test_override_p202_drive_init_check_failure_fails_closed）は Kotlin の try 式形式に更新。
 
 ## テストファイル一覧（`~/workspace/computer-use-preview/` 直下）
 
@@ -60,7 +75,7 @@ refreshAddress() のラベル判定を tokenRevealed → addressRevealed に訂�
 | `UriPermissionRegistry.kt` | 1 | 権限レジストリ（バッチDで Java から移行） |
 | `PingProber.kt`（バッチEで Java から移行） | 3 | ping 往復測定（※移行前はソース検査ゼロだった） |
 | `BridgeNotificationListener.kt`（バッチFで Java から移行） | 3 | 通知イベント流（※移行前はソース検査ゼロだった） |
-| `LogActivity.java` | 1 | Drive 初期化フック、AppVersion 呼び出し（不変） |
+| `LogActivity.kt`（Stage 3 第2バッチで Java から移行） | 99 | Drive 初期化フック、AppVersion 呼び出し、drive001 検査 95 件＋Stage 3 検査 4 件（is_kotlin・D4 interop・nullable_views・in_keyword） |
 | `LocaleTileService.kt`（バッチBで Java から移行） | 1 | ロケールタイル起動・帰属行 |
 | `BridgeService.kt`（バッチBで Java から移行） | 1 | サービス起動 |
 | `BootReceiver.kt`（バッチAで Java から移行） | 2 | Drive 初期化フック、Kotlin 化確認・帰属行 |

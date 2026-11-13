@@ -3142,7 +3142,7 @@ def test_plain_actions_do_not_send_operation_end(mock_app):
 # ----------------------------------------------------------------------
 
 def _drive_log():
-    return _java_source("LogActivity.java")
+    return _kotlin_source("LogActivity.kt")
 
 
 def _drive_registry():
@@ -3177,7 +3177,7 @@ def test_drive001_t04_failure_classification():
     the persisted-permission check and a two-query parent check."""
     src = _drive_log()
     assert "classifyAutoSaveFailure" in src
-    assert "getPersistedUriPermissions" in src
+    assert "persistedUriPermissions" in src
     assert src.count("COLUMN_DOCUMENT_ID") >= 1
 
 
@@ -3218,7 +3218,7 @@ def test_drive001_t08_granted_flags_checked():
     """T-08: the folder-pick result checks the granted READ,
     WRITE and PERSISTABLE flags from the result intent."""
     src = _drive_log()
-    assert "data.getFlags()" in src
+    assert "data.flags" in src
     assert "FLAG_GRANT_READ_URI_PERMISSION" in src
     assert "FLAG_GRANT_WRITE_URI_PERMISSION" in src
     assert "FLAG_GRANT_PERSISTABLE_URI_PERMISSION" in src
@@ -3236,7 +3236,7 @@ def test_drive001_t10_same_uri_reselect_keeps_permission():
     """T-10: re-picking the same folder never releases its
     permission (same-URI guard before releaseIfUnused)."""
     src = _drive_log()
-    assert "!oldUri.equals(uriString)" in src
+    assert "oldUri != uriString" in src
 
 
 def test_drive001_t11_write_failure_keeps_old_folder():
@@ -3250,7 +3250,7 @@ def test_drive001_t11_write_failure_keeps_old_folder():
     assert "unregister" in region
     # The success path releases the old permission only after
     # atomicWriteText returned true.
-    ok = src.index('atomicWriteText(getFilesDir(), FOLDER_URI_NAME,')
+    ok = src.index('atomicWriteText(filesDir, FOLDER_URI_NAME,')
     after = src[ok:ok + 800]
     assert "releaseIfUnused" in after
 
@@ -3259,9 +3259,9 @@ def test_drive001_t12_ioexception_keeps_folder():
     """T-12: an IOException during the failure classification
     keeps the folder (classify returns false on any exception)."""
     src = _drive_log()
-    start = src.index("private boolean classifyAutoSaveFailure")
+    start = src.index("private fun classifyAutoSaveFailure(treeUri: Uri): Boolean")
     region = src[start:start + 2600]
-    assert "catch (Exception ignored)" in region
+    assert "catch (_: Exception)" in region
     assert "return false" in region
 
 
@@ -3292,7 +3292,7 @@ def test_drive001_t18_persistable_flag_missing_refuses():
     """T-18: a folder pick without the PERSISTABLE grant is
     refused (toast, old folder kept)."""
     src = _drive_log()
-    start = src.index("private void handleFolderPicked")
+    start = src.index("private fun handleFolderPicked(data: Intent, opId: Long)")
     region = src[start:start + 1200]
     assert "persistOk" in region
     assert "toast_log_folder_no_write" in region
@@ -3313,19 +3313,19 @@ def test_drive001_t20_clear_persistence_failure_keeps_permission():
     """T-20: when the clear marker cannot be persisted, the
     clear aborts before deleting anything (permission kept)."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 1200]
     assert "toast_log_folder_clear_failed" in region
-    assert "atomicWriteText(getFilesDir(), CLEAR_PENDING_NAME" in region
+    assert "atomicWriteText(filesDir, CLEAR_PENDING_NAME" in region
 
 
 def test_drive001_t21_security_exception_keeps_folder():
     """T-21: a SecurityException alone never clears the folder
     (the classification catch returns keep)."""
     src = _drive_log()
-    start = src.index("private boolean classifyAutoSaveFailure")
+    start = src.index("private fun classifyAutoSaveFailure(treeUri: Uri): Boolean")
     region = src[start:start + 2600]
-    assert "catch (Exception ignored)" in region
+    assert "catch (_: Exception)" in region
     assert "return false" in region
 
 
@@ -3333,9 +3333,9 @@ def test_drive001_t22_file_not_found_keeps_folder():
     """T-22: a FileNotFoundException alone never clears the
     folder (same classification catch as T-21)."""
     src = _drive_log()
-    start = src.index("private boolean classifyAutoSaveFailure")
+    start = src.index("private fun classifyAutoSaveFailure(treeUri: Uri): Boolean")
     region = src[start:start + 2600]
-    assert "catch (Exception ignored)" in region
+    assert "catch (_: Exception)" in region
     assert "return false" in region
 
 
@@ -3353,7 +3353,7 @@ def test_drive001_t24_save_possible_after_failure():
     """T-24: after a failure the operation is always released
     (endOperation in finally), so the next save can start."""
     src = _drive_log()
-    start = src.index("private void writeLogToUriInBackground")
+    start = src.index("private fun writeLogToUriInBackground(")
     region = src[start:start + 2600]
     assert "finally" in region
     assert "endOperation(opId)" in region
@@ -3363,9 +3363,9 @@ def test_drive001_t25_no_stale_view_ops_after_destroy():
     """T-25: completion notifications check isFinishing /
     isDestroyed and go through a WeakReference."""
     src = _drive_log()
-    assert "WeakReference<LogActivity> resumedActivity" in src
-    assert "isFinishing()" in src
-    assert "isDestroyed()" in src
+    assert "private var resumedActivity: WeakReference<LogActivity>?" in src
+    assert "isFinishing" in src
+    assert "isDestroyed" in src
 
 
 def test_drive001_t26_delete_attempted_on_null_stream():
@@ -3373,7 +3373,7 @@ def test_drive001_t26_delete_attempted_on_null_stream():
     document is still deleted (the outer catch runs
     deleteCreatedBestEffort)."""
     src = _drive_log()
-    start = src.index("private void writeLogToUriInBackground")
+    start = src.index("private fun writeLogToUriInBackground(")
     region = src[start:start + 2600]
     assert "deleteCreatedBestEffort" in region
     assert "openOutputStream returned null" in region
@@ -3384,9 +3384,9 @@ def test_drive001_t27_parent_absence_vs_transient_failure():
     queries (with a pause between them); a single failure
     keeps the folder."""
     src = _drive_log()
-    start = src.index("private boolean classifyAutoSaveFailure")
+    start = src.index("private fun classifyAutoSaveFailure(treeUri: Uri): Boolean")
     region = src[start:start + 2600]
-    assert "for (int i = 0; i < 2; i++)" in region
+    assert "for (i in 0 until 2)" in region
     assert "Thread.sleep(500)" in region
     assert "emptyCount == 2" in region
 
@@ -3396,14 +3396,14 @@ def test_drive001_t28_memory_and_disk_uri_agree():
     (readFolderUri), never trusted from a stale in-memory copy."""
     src = _drive_log()
     assert "readFolderUri()" in src
-    assert "private String readFolderUriString()" in src
+    assert "private fun readFolderUriString(): String?" in src
 
 
 def test_drive001_t29_fallback_cancel_releases_state():
     """T-29: cancelling the fallback picker releases the
     operation (endOperation + UI sync)."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
     assert "User cancelled" in region
     assert "endOperation(req.opId)" in region
@@ -3413,9 +3413,9 @@ def test_drive001_t30_state_is_static_and_shared():
     """T-30: the operation state is static, so a recreated
     activity sees the same state."""
     src = _drive_log()
-    assert "private static OpState state" in src
-    assert "private static long currentOpId" in src
-    assert "private static final Map<Integer, PickerRequest>" in src
+    assert "private var state = OpState.IDLE" in src
+    assert "private var currentOpId = 0L" in src
+    assert "private val requestCodeToOpId: MutableMap<Int, PickerRequest>" in src
 
 
 def test_drive001_t31_change_clear_save_share_exclusion():
@@ -3433,7 +3433,7 @@ def test_drive001_t32_same_uri_save_failure_keeps_permission():
     src = _drive_log()
     start = src.index("handleFolderWriteFailed")
     region = src[start:start + 1800]
-    assert "if (!newUri.equals(oldUri))" in region
+    assert "if (newUri != oldUri) {" in region
 
 
 def test_drive001_t33_atomic_write_pattern():
@@ -3454,7 +3454,7 @@ def test_drive001_t34_three_way_folder_read():
     """T-34: the saved-folder read distinguishes OK / MISSING /
     ERROR (FolderKind)."""
     src = _drive_log()
-    assert "enum FolderKind" in src
+    assert "private enum class FolderKind" in src
     assert "OK, MISSING, ERROR" in src
 
 
@@ -3483,8 +3483,8 @@ def test_drive001_t37_state_machine_with_op_id():
     """T-37: the state machine carries an op id; a stale
     callback cannot clear a newer operation."""
     src = _drive_log()
-    assert "req.opId != currentOpId" in src
-    assert "private static boolean transition" in src
+    assert "r.opId != currentOpId" in src
+    assert "private fun transition(expected: OpState, opId: Long," in src
 
 
 def test_drive001_t38_lock_not_held_during_async_work():
@@ -3492,9 +3492,9 @@ def test_drive001_t38_lock_not_held_during_async_work():
     write — the write thread only calls endOperation /
     notifySaveFinished (which take the lock briefly)."""
     src = _drive_log()
-    start = src.index("new Thread(new Runnable()")
+    start = src.index("Thread {")
     region = src[start:start + 2600]
-    assert "synchronized (SAVE_LOCK)" not in region
+    assert "synchronized(SAVE_LOCK)" not in region
     assert "synchronized(SAVE_LOCK)" not in region
 
 
@@ -3502,7 +3502,7 @@ def test_drive001_t39_strict_absence_check():
     """T-39: absence is decided by Os.stat + ENOENT, never by
     File.exists() alone."""
     src = _drive_log()
-    assert "Os.stat(f.getAbsolutePath())" in src
+    assert "Os.stat(f.absolutePath)" in src
     assert "OsConstants.ENOENT" in src
     # No File.exists() decision for the folder/counter/marker
     # (the phrase appears in one explanatory comment, stripped
@@ -3525,7 +3525,7 @@ def test_drive001_t40_ui_sync_on_create_and_resume():
     onCreate and onResume."""
     src = _drive_log()
     assert "syncUiFromState()" in src
-    assert src.count("syncUiFromState();") >= 3
+    assert src.count("syncUiFromState()") >= 3
 
 
 def test_drive001_t41_rename_ok_dir_fsync_fail_rereads():
@@ -3535,7 +3535,7 @@ def test_drive001_t41_rename_ok_dir_fsync_fail_rereads():
     start = src.index("handleFolderWriteFailed")
     region = src[start:start + 1800]
     assert "readFolderUriString()" in region
-    assert "stored.equals(oldUri)" in region
+    assert "stored == oldUri" in region
 
 
 def test_drive001_t42_fsync_failure_keeps_both_permissions():
@@ -3552,9 +3552,9 @@ def test_drive001_t43_late_result_no_effect():
     """T-43: a late picker result cannot affect a newer
     operation (op id + map checks first)."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
-    assert "req.opId != currentOpId" in region
+    assert "r.opId != currentOpId" in region
     assert "requestCodeToOpId.remove(requestCode)" in region
 
 
@@ -3562,18 +3562,18 @@ def test_drive001_t44_mapping_survives_recreation():
     """T-44: the requestCode -> op id map is static, so it
     survives activity recreation."""
     src = _drive_log()
-    assert "private static final Map<Integer, PickerRequest>" in src
-    assert "private static int currentPickerRequestCode" in src
+    assert "private val requestCodeToOpId: MutableMap<Int, PickerRequest>" in src
+    assert "private var currentPickerRequestCode = -1" in src
 
 
 def test_drive001_t45_transition_under_exclusion():
     """T-45: the PICKER_PENDING -> WRITING transition runs
     inside the same SAVE_LOCK section as the checks."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
-    assert "synchronized (SAVE_LOCK)" in region
-    assert "transition(OpState.PICKER_PENDING, req.opId," in region
+    assert "synchronized(SAVE_LOCK)" in region
+    assert "transition(OpState.PICKER_PENDING, r.opId," in region
     assert "OpState.WRITING" in region
 
 
@@ -3581,7 +3581,7 @@ def test_drive001_t46_absence_vs_io_error():
     """T-46: file absence (ENOENT) and I/O errors (EACCES/EIO)
     are distinct FileState values."""
     src = _drive_log()
-    assert "enum FileState" in src
+    assert "private enum class FileState" in src
     assert "EXISTS, NOT_EXISTS, UNKNOWN" in src
 
 
@@ -3589,7 +3589,7 @@ def test_drive001_t47_recreated_activity_syncs_on_finish():
     """T-47: the completion notification resyncs the resumed
     activity from the static state (not from the notification)."""
     src = _drive_log()
-    start = src.index("private void notifySaveFinished")
+    start = src.index("private fun notifySaveFinished(ok: Boolean)")
     region = src[start:start + 1200]
     assert "syncUiFromState()" in region
     assert "resumedActivity" in region
@@ -3599,9 +3599,9 @@ def test_drive001_t48_process_death_no_stale_state():
     """T-48: after a process death the static state is fresh,
     so an unknown requestCode is ignored in onActivityResult."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 1200]
-    assert "req == null" in region
+    assert "?: return // unknown or already invalidated" in region
     assert "unknown or already invalidated" in region
 
 
@@ -3609,7 +3609,7 @@ def test_drive001_t49_clear_order_marker_then_delete_then_release():
     """T-49: clear writes the marker, deletes the settings
     file, syncs the dir, then releases (doClearFolder order)."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
     marker = region.index("CLEAR_PENDING_NAME")
     delete = region.index("settings.delete()")
@@ -3622,10 +3622,10 @@ def test_drive001_t50_result_handling_one_lock_section():
     one SAVE_LOCK section (map lookup, op id, state, deadline,
     removal, transition)."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
-    assert region.count("synchronized (SAVE_LOCK)") == 1
-    assert "requestCodeToOpId.get(requestCode)" in region
+    assert region.count("synchronized(SAVE_LOCK)") == 1
+    assert "requestCodeToOpId[requestCode]" in region
     assert "transition(OpState.PICKER_PENDING" in region
 
 
@@ -3641,9 +3641,9 @@ def test_drive001_t52_begin_transition_separation():
     """T-52: beginOperation (new op) and transition (existing
     op) are separate methods with distinct roles."""
     src = _drive_log()
-    assert "private static long beginOperation" in src
-    assert "private static boolean transition" in src
-    assert "private static void endOperation" in src
+    assert "private fun beginOperation(expected: OpState, initial: OpState): Long" in src
+    assert "private fun transition(expected: OpState, opId: Long," in src
+    assert "private fun endOperation(opId: Long)" in src
 
 
 def test_drive001_t53_picker_timeout_ten_minutes():
@@ -3658,7 +3658,7 @@ def test_drive001_t54_late_result_refused_idle():
     """T-54: a result arriving after the 10-minute deadline is
     refused and the state returns to IDLE."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
     assert "PICKER_TIMEOUT_MS" in region
     assert "endOperation(req.opId)" in region
@@ -3668,21 +3668,21 @@ def test_drive001_t55_timeout_vs_callback_single_winner():
     """T-55: the timeout path and the result callback share one
     SAVE_LOCK section, so only one of them wins."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
-    assert region.count("synchronized (SAVE_LOCK)") == 1
-    start2 = src.index("private void checkPickerTimeout")
+    assert region.count("synchronized(SAVE_LOCK)") == 1
+    start2 = src.index("private fun checkPickerTimeout()")
     region2 = src[start2:start2 + 1200]
-    assert "synchronized (SAVE_LOCK)" in region2
+    assert "synchronized(SAVE_LOCK)" in region2
 
 
 def test_drive001_t56_op_id_mismatch_keeps_current_op():
     """T-56: on an op id mismatch only that map entry is
     removed; the current operation is untouched."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 1200]
-    assert "req.opId != currentOpId" in region
+    assert "r.opId != currentOpId" in region
     assert "Stale result" in region
 
 
@@ -3693,7 +3693,7 @@ def test_drive001_t57_request_code_exhaustion_refuses():
     start = src.index("allocateRequestCode")
     region = src[start:start + 1400]
     assert "REQUEST_CODE_MAX" in region
-    assert "return -1" in region
+    assert "return@synchronized -1" in region
 
 
 def test_drive001_t58_next_launch_releases_only_orphans():
@@ -3703,7 +3703,7 @@ def test_drive001_t58_next_launch_releases_only_orphans():
     src = _drive_log()
     assert "startupConsistencyCheck" in src
     assert "UriPermissionRegistry.reconcile" in src
-    assert "getPersistedUriPermissions" in src
+    assert "persistedUriPermissions" in src
     reg = _drive_registry()
     assert "fun reconcile(" in reg
 
@@ -3713,8 +3713,8 @@ def test_drive001_t59_allowed_transition_combinations():
     PICKER_PENDING -> WRITING; endOperation only to IDLE."""
     src = _drive_log()
     assert "if (state != expected)" in src
-    assert "transition(OpState.PICKER_PENDING, req.opId," in src
-    start = src.index("private static void endOperation")
+    assert "transition(OpState.PICKER_PENDING, r.opId," in src
+    start = src.index("private fun endOperation(opId: Long)")
     region = src[start:start + 400]
     assert "state = OpState.IDLE" in region
 
@@ -3724,7 +3724,7 @@ def test_drive001_t60_old_process_code_no_effect():
     effect after a restart (unknown code ignored; the
     persistent counter never reuses a code)."""
     src = _drive_log()
-    assert "req == null" in src
+    assert "?: return // unknown or already invalidated" in src
     assert 'COUNTER_NAME = "request_code_counter"' in src
 
 
@@ -3745,9 +3745,9 @@ def test_drive001_t62_mismatch_checked_before_deadline():
     check, so a mismatched result cannot time out the current
     operation."""
     src = _drive_log()
-    start = src.index("protected void onActivityResult")
+    start = src.index("override fun onActivityResult(")
     region = src[start:start + 2600]
-    mismatch = region.index("req.opId != currentOpId")
+    mismatch = region.index("r.opId != currentOpId")
     deadline = region.index("PICKER_TIMEOUT_MS")
     assert mismatch < deadline
 
@@ -3756,7 +3756,7 @@ def test_drive001_t63_marker_before_settings_delete():
     """T-63: the clear marker is created (and synced) before
     the settings file is deleted."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
     marker = region.index("CLEAR_PENDING_NAME")
     delete = region.index("settings.delete()")
@@ -3767,7 +3767,7 @@ def test_drive001_t64_eacces_not_mistaken_for_absence():
     """T-64: EACCES/EIO is never mistaken for absence (statFile
     returns UNKNOWN, never NOT_EXISTS, for other errnos)."""
     src = _drive_log()
-    start = src.index("private static FileState statFile")
+    start = src.index("private fun statFile(f: File): FileState")
     region = src[start:start + 600]
     assert "OsConstants.ENOENT" in region
     assert "UNKNOWN" in region
@@ -3786,7 +3786,7 @@ def test_drive001_t66_counter_missing_with_state_refuses():
     """T-66: a missing counter while a folder/marker exists
     refuses the picker (abnormal state, no auto-reset)."""
     src = _drive_log()
-    start = src.index("public static void ensureDriveInit")
+    start = src.index("fun ensureDriveInit(ctx: Context)")
     region = src[start:start + 3600]
     assert "never auto-resets to 1000" in region
     assert "checkDriveInitOk" in src
@@ -3798,7 +3798,7 @@ def test_drive001_t67_first_init_random_epoch():
     src = _drive_log()
     assert "SecureRandom" in src
     assert "EPOCH_MAX" in src
-    assert "REQUEST_CODE_MIN + new SecureRandom()" in src
+    assert "REQUEST_CODE_MIN + SecureRandom()" in src
 
 
 def test_drive001_t68_persist_first_then_register_then_launch():
@@ -3820,7 +3820,7 @@ def test_drive001_t69_marker_failure_aborts_clear():
     """T-69: when the clear marker cannot be persisted, the
     clear aborts before deleting anything (permission kept)."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 1200]
     assert "toast_log_folder_clear_failed" in region
 
@@ -3829,7 +3829,7 @@ def test_drive001_t70_release_failure_keeps_marker():
     """T-70: when the release fails at the startup check, the
     marker is kept and retried at the next launch."""
     src = _drive_log()
-    start = src.index("private void startupConsistencyCheck")
+    start = src.index("private fun startupConsistencyCheck()")
     region = src[start:start + 2400]
     assert "if (released)" in region
     assert "deleteClearMarker()" in region
@@ -3839,7 +3839,7 @@ def test_drive001_t71_marker_present_counter_missing_refuses():
     """T-71: marker present + counter missing is abnormal and
     refuses the picker (the marker alone is not proof)."""
     src = _drive_log()
-    start = src.index("public static void ensureDriveInit")
+    start = src.index("fun ensureDriveInit(ctx: Context)")
     region = src[start:start + 3600]
     assert "marker.kind == ReadKind.MISSING" in region
     assert "counter.kind == ReadKind.OK" in region
@@ -3859,7 +3859,7 @@ def test_drive001_t73_clear_release_failure_keeps_marker():
     """T-73: when the release fails on the clear path, the
     marker is kept for the next-launch reconciliation."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
     assert "if (released)" in region
     assert "keep the marker for next-launch reconciliation" in region
@@ -3883,7 +3883,7 @@ def test_drive001_t75_both_files_lost_no_fixed_restart():
     still be able to initialise."""
     src = _drive_log()
     assert "SecureRandom" in src
-    assert "REQUEST_CODE_MIN + new SecureRandom()" in src
+    assert "REQUEST_CODE_MIN + SecureRandom()" in src
 
 
 def test_drive001_t76_folder_absent_history_lost_refuses():
@@ -3892,7 +3892,7 @@ def test_drive001_t76_folder_absent_history_lost_refuses():
     gate requires a readable counter)."""
     src = _drive_log()
     assert "checkDriveInitOk" in src
-    start = src.index("private static boolean checkDriveInitOk")
+    start = src.index("private fun checkDriveInitOk(ctx: Context): Boolean")
     region = src[start:start + 800]
     assert "counter.kind == ReadKind.OK" in region
 
@@ -3901,7 +3901,7 @@ def test_drive001_t77_marker_absent_counter_corrupt_refuses():
     """T-77: marker absent + counter corrupt refuses the
     picker (both must be OK)."""
     src = _drive_log()
-    start = src.index("private static boolean checkDriveInitOk")
+    start = src.index("private fun checkDriveInitOk(ctx: Context): Boolean")
     region = src[start:start + 800]
     assert "marker.kind == ReadKind.OK" in region
     assert "counter.kind == ReadKind.OK" in region
@@ -3912,7 +3912,7 @@ def test_drive001_t78_registry_write_failure_disables_feature():
     the feature is not enabled for that URI (the permission
     is kept)."""
     src = _drive_log()
-    start = src.index("private void handleFolderPicked")
+    start = src.index("private fun handleFolderPicked(data: Intent, opId: Long)")
     region = src[start:start + 2600]
     assert "UriPermissionRegistry.register" in region
     assert "toast_log_folder_unreadable" in region
@@ -3951,16 +3951,16 @@ def test_drive001_t82_kind_a_marker_deletable():
     """T-82: Kind A (file present + old URI readable) may
     delete the marker."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
     assert "kind A" in region
-    assert "deleteClearMarker(); // kind A" in region
+    assert "deleteClearMarker() // kind A" in region
 
 
 def test_drive001_t83_kind_b_marker_kept():
     """T-83: Kind B (state unconfirmable) keeps the marker."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
     assert "kind B" in region
     assert "keep the permission and the marker" in region
@@ -3970,7 +3970,7 @@ def test_drive001_t84_kind_c_release_then_marker():
     """T-84: Kind C (ENOENT confirmed) proceeds to release,
     and the marker stays until the release succeeds."""
     src = _drive_log()
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
     assert "kind C" in region
     assert "if (released)" in region
@@ -3981,7 +3981,7 @@ def test_drive001_t85_first_init_random_start_recorded():
     1000..60000 and records it in the counter file."""
     src = _drive_log()
     assert "EPOCH_MAX = 60000" in src
-    assert "atomicWriteText(ctx.getFilesDir(), COUNTER_NAME," in src
+    assert "atomicWriteText(ctx.filesDir, COUNTER_NAME," in src
 
 
 def test_drive001_t86_reinit_collision_bound_documented():
@@ -4010,9 +4010,9 @@ def test_drive001_t88_classification_is_final():
     marker, and Kind A's condition is explicit."""
     src = _drive_log()
     assert "classification (A/B/C) is the FINAL determination" in src
-    start = src.index("private void doClearFolder")
+    start = src.index("private fun doClearFolder()")
     region = src[start:start + 2400]
-    assert "stored.trim().equals(uriString)" in region
+    assert "stored.trim() == uriString" in region
 
 
 def test_drive001_t89_registry_lock_private_and_single_entry():
@@ -4046,7 +4046,7 @@ def test_drive001_t91_verification_unavailable_only_on_io_error():
     src = _drive_log()
     assert "ReadKind.UNREADABLE" in src
     assert "return null" in src  # firstInstallTimes: NameNotFound
-    start = src.index("public static void ensureDriveInit")
+    start = src.index("fun ensureDriveInit(ctx: Context)")
     region = src[start:start + 400]
     assert "verification impossible" in region
 
@@ -4071,7 +4071,7 @@ def test_drive001_t93_update_install_can_initialise():
     defect 2026-11-08). The init must not compare the two
     install times."""
     src = _drive_log()
-    start = src.index("public static void ensureDriveInit")
+    start = src.index("fun ensureDriveInit(ctx: Context)")
     region = src[start:start + 3200]
     assert "neverUpdated" not in region
     assert "times[0] == times[1]" not in region
@@ -4085,13 +4085,13 @@ def test_drive001_t94_run_meta_does_not_block_init():
     state (folder file, clear marker, registry, persisted
     URI permission) may block init."""
     src = _drive_log()
-    start = src.index("public static void ensureDriveInit")
+    start = src.index("fun ensureDriveInit(ctx: Context)")
     region = src[start:start + 3200]
     assert "runMetaFile" not in region
     assert "FOLDER_URI_NAME" in region
     assert "CLEAR_PENDING_NAME" in region
     assert "registryFile" in region
-    assert "getPersistedUriPermissions" in region
+    assert "persistedUriPermissions" in region
 
 
 def test_drive001_layout_has_folder_controls():
@@ -4120,15 +4120,15 @@ def test_drive001_strings_present():
         assert f'name="{name}"' in src
 
 
-def test_locale_tile_version_2_9_22():
+def test_locale_tile_version_2_9_23():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.22 / code 75 (was v2.9.21 / code 74 at C-01-4 P0 fix)."""
+    carries v2.9.23 / code 76 (was v2.9.22 / code 75 at Stage 3 batch 1)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.22"' in build
-    assert "VERSION_CODE=75" in build
+    assert 'VERSION_NAME="2.9.23"' in build
+    assert "VERSION_CODE=76" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -4314,9 +4314,16 @@ def test_override_15_throttle_boundary_constants():
 
 def test_override_p202_drive_init_check_failure_fails_closed():
     """CONS-078 P2-02: a failed persisted-URI-permission check in
-    ensureDriveInit is NOT "absent" — init is refused."""
+    ensureDriveInit is NOT "absent" — init is refused. Kotlin form
+    (Stage 3 batch 2): the check is a try expression whose catch
+    branch yields false, so a failed check never counts as
+    "no persisted permissions"."""
     log = _drive_log()
-    assert "noPersistedPermissions = false;" in log
+    start = log.index("fun ensureDriveInit(ctx: Context)")
+    region = log[start:start + 2500]
+    assert "val noPersistedPermissions = try {" in region
+    assert "persistedUriPermissions.isEmpty()" in region
+    assert "} catch (_: Exception) {" in region
     assert "noPersistedPermissions" in log
 
 
@@ -4325,11 +4332,11 @@ def test_override_p202_classify_failure_keeps_folder():
     classifyAutoSaveFailure keeps the folder (failure is not
     "permission absent")."""
     log = _drive_log()
-    start = log.index("private boolean classifyAutoSaveFailure")
+    start = log.index("private fun classifyAutoSaveFailure(treeUri: Uri): Boolean")
     seg = log[start:start + 2000]
-    assert "getPersistedUriPermissions" in seg
-    assert "catch (Exception ignored)" in seg
-    assert "return false;" in seg
+    assert "persistedUriPermissions" in seg
+    assert "catch (_: Exception)" in seg
+    assert "return false" in seg
 
 
 
@@ -4905,15 +4912,15 @@ def test_a11yoff002_d11_logs():
     assert '(if (success) "success" else "timeout") + " via $trigger"' in ex
 
 
-def test_a11yoff002_version_2_9_22():
-    """The build now carries v2.9.22 / code 75 (was v2.9.21 / code 74
-    at C-01-4 P0 fix)."""
+def test_a11yoff002_version_2_9_23():
+    """The build now carries v2.9.23 / code 76 (was v2.9.22 / code 75
+    at Stage 3 batch 1)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.22"' in build
-    assert "VERSION_CODE=75" in build
+    assert 'VERSION_NAME="2.9.23"' in build
+    assert "VERSION_CODE=76" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -5251,14 +5258,15 @@ def test_kotlin_pilot_appversion_java_callers_unchanged():
     AppVersion.name(ctx) / AppVersion.code(ctx) as statics, which
     only compiles because the Kotlin members are @JvmStatic.
     (Stage 3 batch 1: MainActivity is Kotlin now and calls them
-    the same way.)"""
-    for name in ("HttpBridgeServer.java", "LogActivity.java"):
+    the same way. Stage 3 batch 2: LogActivity is Kotlin now too.)"""
+    for name in ("HttpBridgeServer.java",):
         src = _java_source(name)
         assert "AppVersion.name(" in src, name
         assert "AppVersion.code(" in src, name
-    src = _kotlin_source("MainActivity.kt")
-    assert "AppVersion.name(" in src
-    assert "AppVersion.code(" in src
+    for name in ("MainActivity.kt", "LogActivity.kt"):
+        src = _kotlin_source(name)
+        assert "AppVersion.name(" in src, name
+        assert "AppVersion.code(" in src, name
 
 
 def test_kotlin_pilot_interop_fixture_bidirectional():
@@ -5435,15 +5443,16 @@ def test_kotlin_batch_d_registry_split_equivalence():
 
 
 def test_kotlin_batch_d_java_callers_unchanged():
-    """Batch D: the Java caller was NOT modified — LogActivity
-    still calls the registry the same way, which only compiles
-    because the Kotlin members are @JvmStatic (registryFile is
-    public @JvmStatic: Kotlin has no package-private)."""
-    src = _java_source("LogActivity.java")
+    """Batch D: the caller was NOT modified in behaviour — LogActivity
+    (Kotlin since Stage 3 batch 2) still calls the registry the
+    same way, which only compiles because the Kotlin members are
+    @JvmStatic (registryFile is public @JvmStatic: Kotlin has no
+    package-private)."""
+    src = _kotlin_source("LogActivity.kt")
     assert "UriPermissionRegistry.registryFile(ctx)" in src
     assert "UriPermissionRegistry.register(this," in src
     assert "UriPermissionRegistry.releaseIfUnused(this," in src
-    assert "UriPermissionRegistry.reconcile(this);" in src
+    assert "UriPermissionRegistry.reconcile(this)" in src
     assert "UriPermissionRegistry.FEATURE_LOG_FOLDER" in src
 
 
@@ -5627,6 +5636,11 @@ _STAGE3_MAIN_ACTIVITY_ATTRIBUTION = (
     "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-13")
 
 
+_STAGE3_LOG_ACTIVITY_ATTRIBUTION = (
+    "// Implemented by MUSE-Koyuki (Muse Spark) "
+    "\u2014 SPEC-KOTLIN-MIGRATION-001 v2.2, 2026-11-13")
+
+
 def test_kotlin_stage3_main_activity_is_kotlin():
     """Stage 3 batch 1: the .java file is gone, the .kt file is the
     source, and it carries the migration attribution as line 1."""
@@ -5688,13 +5702,71 @@ def test_kotlin_stage3_main_activity_refreshaddress_label():
     assert "tokenRevealed" not in body
 
 
+def test_kotlin_stage3_log_activity_is_kotlin():
+    """Stage 3 batch 2: the .java file is gone, the .kt file is the
+    source, and it carries the migration attribution as line 1."""
+    assert not _java_source_exists("LogActivity.java")
+    assert _kotlin_source_exists("LogActivity.kt")
+    first = _kotlin_source("LogActivity.kt").splitlines()[0]
+    assert first == _STAGE3_LOG_ACTIVITY_ATTRIBUTION
+
+
+def test_kotlin_stage3_log_activity_d4_interop():
+    """Stage 3 batch 2 (D4 checklist): the one public static
+    (ensureDriveInit) stays Java-visible via @JvmStatic so the
+    Java caller (HttpBridgeServer) and the Kotlin callers
+    (MainActivity, BootReceiver) keep compiling; the class stays
+    open because the Java original was a non-final public class
+    (CONS-161 P2-02 precedent); the SAVE_LOCK stays a private
+    Any() guarded by synchronized blocks (eight, as in the
+    Java); the operation state machine stays static in the
+    companion object."""
+    src = _kotlin_source("LogActivity.kt")
+    assert "open class LogActivity : Activity()" in src
+    assert "    companion object {" in src
+    assert "        @JvmStatic\n        fun ensureDriveInit(ctx: Context)" in src
+    assert "private val SAVE_LOCK = Any()" in src
+    assert src.count("synchronized(SAVE_LOCK)") >= 8
+    assert "private var state = OpState.IDLE" in src
+    assert "private enum class OpState" in src
+    assert "private var resumedActivity: WeakReference<LogActivity>?" in src
+
+
+def test_kotlin_stage3_log_activity_nullable_views():
+    """Stage 3 batch 2 (D4): the Java view fields start null and
+    setButtonsEnabled / refreshFolderDisplay guard against null,
+    so the Kotlin fields are nullable vars — not lateinit, whose
+    null checks would be dead. The guards stay meaningful."""
+    src = _kotlin_source("LogActivity.kt")
+    for name in ("logText", "scrollView", "refreshButton", "exportButton",
+                 "folderButton", "folderClearButton", "folderText"):
+        assert "private var " + name + ":" in src, name
+    assert "lateinit var" not in src
+    assert "refreshButton?.isEnabled = enabled" in src
+    assert "if (folderText == null) {" in src
+
+
+def test_kotlin_stage3_log_activity_in_keyword():
+    """Stage 3 batch 2: `in` is a Kotlin keyword, so the Java
+    FileInputStream local `in` is renamed `input` in readSmallFile
+    (same close-in-finally behaviour)."""
+    src = _kotlin_source("LogActivity.kt")
+    start = src.index("private fun readSmallFile(")
+    end = src.index("private fun readDecimalFile(", start)
+    body = src[start:end]
+    assert "var input: FileInputStream? = null" in body
+    assert "input = FileInputStream(f)" in body
+    assert "input.close()" in body
+    assert "    var in:" not in body
+
+
 def test_kotlin_batch_g_bridge_log_interop():
     """Batch G (D4 checklist): an object (all-static Java
     class); @JvmStatic on the ten public methods so the Java
     callers keep compiling; one explicit LOG_LOCK for the six
     former static-synchronized methods (no @Synchronized — the
     batch E lesson); atomicWriteText/fsyncDirectory are public
-    @JvmStatic because LogActivity.java calls them and Kotlin
+    @JvmStatic because LogActivity.kt calls them and Kotlin
     internal would mangle the name (batch D precedent);
     runMetaFile has no callers, so it stays internal; the
     private field is renamed runMeta because a property and a
@@ -5743,14 +5815,15 @@ def test_kotlin_batch_g_bridge_log_interop():
 
 
 def test_kotlin_batch_g_bridge_log_java_callers_unchanged():
-    """Batch G: the Java/Kotlin callers were NOT modified —
+    """Batch G: the callers were NOT modified in behaviour —
     HttpBridgeServer still drives the log the same way (init,
     log, logThrottled, flushThrottled, maskIp, snapshot,
-    previousSnapshot), LogActivity still uses atomicWriteText /
-    fsyncDirectory / renderText, UriPermissionRegistry still
-    uses atomicWriteText, and BootReceiver still inits and logs.
-    That only compiles because the Kotlin members are
-    @JvmStatic (and atomicWriteText/fsyncDirectory public)."""
+    previousSnapshot), LogActivity (Kotlin since Stage 3 batch 2)
+    still uses atomicWriteText / fsyncDirectory / renderText,
+    UriPermissionRegistry still uses atomicWriteText, and
+    BootReceiver still inits and logs. That only compiles because
+    the Kotlin members are @JvmStatic (and atomicWriteText /
+    fsyncDirectory public)."""
     srv = _java_source("HttpBridgeServer.java")
     assert "BridgeLog.init(this.context);" in srv
     assert "BridgeLog.log(" in srv
@@ -5759,7 +5832,7 @@ def test_kotlin_batch_g_bridge_log_java_callers_unchanged():
     assert "BridgeLog.maskIp(" in srv
     assert "BridgeLog.snapshot()" in srv
     assert "BridgeLog.previousSnapshot()" in srv
-    log = _java_source("LogActivity.java")
+    log = _kotlin_source("LogActivity.kt")
     assert "BridgeLog.atomicWriteText(" in log
     assert "BridgeLog.fsyncDirectory(" in log
     assert "BridgeLog.renderText(" in log
@@ -5775,10 +5848,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the Stage 3 batch 1 build's v2.9.22 / code 75."""
+    kotlin-stdlib.jar. Version is the Stage 3 batch 2 build's v2.9.23 / code 76."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.22"' in build
-    assert "VERSION_CODE=75" in build
+    assert 'VERSION_NAME="2.9.23"' in build
+    assert "VERSION_CODE=76" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
