@@ -4272,13 +4272,13 @@ def test_drive001_strings_present():
 
 def test_locale_tile_version_2_9_25():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.28 / code 81 (was v2.9.27 / code 80 at the F1 fix round)."""
+    carries v2.9.29 / code 82 (was v2.9.28 / code 81 at the F1 fix round)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.28"' in build
-    assert "VERSION_CODE=81" in build
+    assert 'VERSION_NAME="2.9.29"' in build
+    assert "VERSION_CODE=82" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -5072,14 +5072,14 @@ def test_a11yoff002_d11_logs():
 
 
 def test_a11yoff002_version_2_9_25():
-    """The build now carries v2.9.28 / code 81 (was v2.9.27 / code 80
-    at the T-M4 P0 gesture fix)."""
+    """The build now carries v2.9.29 / code 82 (was v2.9.28 / code 81
+    at the F1 fix round)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.28"' in build
-    assert "VERSION_CODE=81" in build
+    assert 'VERSION_NAME="2.9.29"' in build
+    assert "VERSION_CODE=82" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -6149,10 +6149,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the v2.9.28 / code 81 F1 fix-round build's."""
+    kotlin-stdlib.jar. Version is the v2.9.29 / code 82 gesture P0 redesign's."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.28"' in build
-    assert "VERSION_CODE=81" in build
+    assert 'VERSION_NAME="2.9.29"' in build
+    assert "VERSION_CODE=82" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -7029,27 +7029,30 @@ def test_v2925_smoke_header_split_drops_trailing_empties():
 
 
 def test_tm4_p0_gesture_callback_not_on_main_thread():
-    """T-M4 P0 (v2.9.27): every /click and /swipe 500d with
-    "gesture timed out" while /press_key worked. Root cause is a
-    main-thread deadlock: runGuardedOperation runs validation +
-    tap() on the service main thread, and runGesture called
-    dispatchGesture(desc, callback, null) then blocked that same
-    thread on CountDownLatch.await(5s). A null Handler delivers
-    the GestureResultCallback on the main thread, which was
-    blocked, so the callback never fired — even though the
-    gesture itself had executed (a calculator tap 500d while its
-    display still showed the tapped digit). Fix: a dedicated
-    "bridge-gesture" HandlerThread whose Handler is passed to
-    dispatchGesture, so the callback fires while the main thread
-    waits. Source-level guards: (1) dispatchGesture is passed
+    """T-M4 P0 (v2.9.27, SUPERSEDED by the v2.9.29 gesture redesign):
+    every /click and /swipe 500d with "gesture timed out" while
+    /press_key worked. Root cause is a main-thread deadlock: the
+    operation ran on the service main thread and blocked it on a
+    latch while the GestureResultCallback was delivered to that
+    same thread, so the callback never fired — even though the
+    gesture itself had executed. The v2.9.27 fix (a dedicated
+    "bridge-gesture" HandlerThread for the callback) did NOT work
+    live on v2.9.28 (2026-11-14 retest: the tap lands, the 500
+    stays). The v2.9.29 redesign removes the main-thread wait
+    entirely: dispatch on the main thread, await on the HTTP
+    worker. Source-level guards: (1) dispatchGesture is passed
     gestureHandler, never the null literal; (2) the thread is
     created in onServiceConnected and quit in onDestroy; (3)
-    runGuardedOperation still runs the operation on the main
-    thread (C-04 admission serialization unchanged)."""
+    dispatchGestureAsync returns a GestureDispatch WITHOUT
+    awaiting (no latch.await in its body); (4) the only 5 s latch
+    await lives in GestureDispatch.await(), which refuses the main
+    thread; (5) runGuardedOperation still runs non-gesture
+    operations on the main thread (C-04 admission serialization
+    unchanged)."""
     src = _kotlin_source("BridgeAccessibilityService.kt")
     # (1) the callback goes to the gesture thread, never null.
-    assert "}, gestureHandler)" in src
-    body = src[src.index("private fun runGesture("):]
+    assert "}, handler)" in src
+    body = src[src.index("private fun dispatchGestureAsync("):]
     body = body[:body.index("\n    }\n")]
     assert "}, null)" not in body
     assert "dispatchGesture(desc, object : GestureResultCallback() {" in body
@@ -7065,7 +7068,18 @@ def test_tm4_p0_gesture_callback_not_on_main_thread():
     assert "gestureThread?.quitSafely()" in destroyed
     assert "gestureThread = null" in destroyed
     assert "gestureHandler = null" in destroyed
-    # (3) runGuardedOperation still serializes on the main thread.
+    # (3) the dispatch returns WITHOUT awaiting.
+    assert "latch.await" not in body
+    assert "return GestureDispatch(latch, ok)" in body
+    # (4) the 5 s await lives only in GestureDispatch.await(), which
+    # refuses the main thread.
+    assert "GESTURE_LATCH_MS = 5000L" in src
+    dispatch_cls = src[src.index("class GestureDispatch("):]
+    dispatch_cls = dispatch_cls[:dispatch_cls.index("\n    }\n")]
+    assert "fun await(timeoutMs: Long): Boolean {" in dispatch_cls
+    assert "Looper.myLooper() == Looper.getMainLooper()" in dispatch_cls
+    assert "IllegalStateException" in dispatch_cls
+    # (5) runGuardedOperation still serializes on the main thread.
     guard = src[src.index("fun <T> runGuardedOperation("):]
     guard = guard[:guard.index("\n    }\n")]
     assert "runOnMainThread(Callable {" in guard
@@ -7392,3 +7406,187 @@ def test_f1_fg_01_open_unresolvable_uri(mock_app):
     assert adapter.last_call is not None
     assert adapter.last_call["attempts"] == 1
     assert adapter.last_call["status"] == 422
+
+
+# ---------------------------------------------------------------------------
+# Gesture P0 redesign (v2.9.29 / code 82, 2026-11-14)
+# ---------------------------------------------------------------------------
+# The v2.9.27 HandlerThread fix did NOT work live (v2.9.28 retest:
+# the tap lands, the server still 500s "gesture timed out"). The
+# redesign removes the main-thread wait entirely: dispatch on the
+# main thread, await on the HTTP worker. D-G1: full two-phase for
+# single actions; dispatch-accepted + settle for batch gestures
+# (the batch loop runs on the main thread and cannot await the
+# callback there). D-G2: the 5 s latch is kept (GESTURE_LATCH_MS).
+
+
+def test_gesture_p0_click_swipe_use_guarded_gesture():
+    """/click and /swipe must use runGuardedGesture (guard + dispatch
+    on the main thread, await on the HTTP worker) with dispatchTap /
+    dispatchSwipe — never runGuardedOperation with a tap()/swipe()
+    that awaits on the main thread. runGesture, tap() and swipe()
+    must not exist anymore. P1-01: the handlers send
+    gesture_confirmed (true only when the completion callback fired)
+    alongside ok."""
+    svc = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "private fun runGesture(" not in svc
+    assert "fun tap(" not in svc
+    assert "fun swipe(" not in svc
+    assert "fun dispatchTap(x: Int, y: Int): GestureDispatch" in svc
+    assert "fun dispatchSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): GestureDispatch" in svc
+    assert "fun runGuardedGesture(" in svc
+    # runGuardedGesture returns the outcome (ok + confirmed).
+    gesture = svc[svc.index("fun runGuardedGesture("):]
+    gesture = gesture[:gesture.index("\n    }\n")]
+    assert "): ExecutionOutcome {" in gesture
+    assert "return ExecutionOutcome(ok, dispatch.callbackFired())" in gesture
+    server = _kotlin_source("HttpBridgeServer.kt")
+    # /click uses runGuardedGesture + dispatchTap, sends gesture_confirmed.
+    click = server[server.index('"/click" == path'):]
+    click = click[:click.index('"/swipe" == path')]
+    assert "runGuardedGesture(" in click
+    assert "dispatchTap(x, y)" in click
+    assert "runGuardedOperation(" not in click
+    assert ".tap(x, y)" not in click
+    assert '"gesture_confirmed", outcome.confirmed' in click
+    # /swipe uses runGuardedGesture + dispatchSwipe, sends gesture_confirmed.
+    swipe = server[server.index('"/swipe" == path'):]
+    swipe = swipe[:swipe.index('"/type_text" == path')]
+    assert "runGuardedGesture(" in swipe
+    assert "dispatchSwipe(x1, y1, x2, y2, durationMs)" in swipe
+    assert "runGuardedOperation(" not in swipe
+    assert ".swipe(x1, y1, x2, y2, durationMs)" not in swipe
+    assert '"gesture_confirmed", outcome.confirmed' in swipe
+
+
+def test_gesture_p0_batch_gesture_dispatch_settle():
+    """Batch gesture actions (executeAction "tap"/"swipe") must
+    dispatch and settle for at most the gesture's own duration —
+    never await the 5 s latch on the main thread (the batch loop
+    runs there). settle() returns dispatch-accepted (true) when the
+    callback does not fire. P1-02: executeAction returns an
+    ExecutionOutcome (ok + confirmed), and runBatchInternal records
+    confirmed on the ActionResult — an unconfirmed gesture is
+    executed but NOT confirmed."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "private fun executeAction(a: BatchAction, treeHash: Int): ExecutionOutcome {" in src
+    action = src[src.index("private fun executeAction("):]
+    action = action[:action.index("\n    }\n")]
+    assert '"tap" -> {' in action
+    assert "dispatchTap(a.x, a.y)" in action
+    assert "ExecutionOutcome(d.settle(100), d.callbackFired())" in action
+    assert '"swipe" -> {' in action
+    assert "dispatchSwipe(a.x1, a.y1, a.x2, a.y2, clampedDurationMs)" in action
+    # CONS-185 P1-01: the SAME clamped duration goes to both
+    # dispatchSwipe and settle — the raw a.durationMs must not
+    # reach settle() (it could wait 30 s on the main thread).
+    assert "val clampedDurationMs = a.durationMs.coerceIn(0L, GESTURE_LATCH_MS)" in action
+    assert "ExecutionOutcome(d.settle(clampedDurationMs), d.callbackFired())" in action
+    assert "d.settle(a.durationMs)" not in action
+    assert "runGesture" not in action
+    # Non-gesture actions are always confirmed (synchronous).
+    assert 'ExecutionOutcome(clickNodeInternal(a.nodeId, treeHash).ok, true)' in action
+    assert 'ExecutionOutcome(typeText(a.text), true)' in action
+    assert 'ExecutionOutcome(pressKey(a.key), true)' in action
+    # runBatchInternal records the confirmed flag on the result.
+    # (Asserted against the whole source: the strings are unique
+    # to runBatchInternal's action loop.)
+    assert "r.confirmed = outcome.confirmed" in src
+    assert 'r.status = if (outcome.ok) "executed" else "failed"' in src
+    # ActionResult carries the confirmed field. CONS-185 P2-01: the
+    # default is false (unconfirmed unless proven) — a failed action
+    # must never read confirmed=true just because the outcome never
+    # landed.
+    assert "@JvmField var confirmed: Boolean = false" in src
+    # The catch path sets confirmed=false explicitly (belt and
+    # suspenders with the false default).
+    assert "r.confirmed = false" in src
+    # settle() never throws on timeout: it returns true (dispatch-accepted).
+    cls = src[src.index("class GestureDispatch("):]
+    cls = cls[:cls.index("\n    }\n")]
+    assert "fun settle(settleMs: Long): Boolean {" in cls
+    assert "return if (fired) ok[0] else true" in cls
+
+
+def test_gesture_p0_await_returns_dispatch_accepted_on_timeout():
+    """P1-01: await() must NOT throw "gesture timed out" when the
+    callback never arrives — the gesture was dispatched and accepted
+    and the tap lands, so a 500 would be a false failure. It returns
+    true (dispatch-accepted) and logs the unconfirmed state; the
+    caller reads callbackFired() to report confirmation."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    cls = src[src.index("class GestureDispatch("):]
+    cls = cls[:cls.index("\n    }\n")]
+    assert "fun await(timeoutMs: Long): Boolean {" in cls
+    assert 'throw Exception("gesture timed out")' not in cls
+    assert '"await timed out — dispatch-accepted, completion unconfirmed"' in cls
+    assert "return if (fired) ok[0] else true" in cls
+    # The main-thread refusal is kept (await must stay off it).
+    assert "Looper.myLooper() == Looper.getMainLooper()" in cls
+    assert "IllegalStateException" in cls
+
+
+def test_gesture_p0_batch_confirmed_in_json_and_registry():
+    """P1-02: the "confirmed" flag must reach the batch HTTP response
+    AND the persisted registry record, so a replay shows the same
+    distinction. Reading an old record (no "confirmed") defaults to
+    true (pre-v2.9.29 actions were all synchronous)."""
+    server = _kotlin_source("HttpBridgeServer.kt")
+    assert '.put("confirmed", r.confirmed)' in server
+    registry = _kotlin_source("BatchRegistry.kt")
+    assert 'rObj.put("confirmed", r.confirmed)' in registry
+    assert 'r.confirmed = rObj.optBoolean("confirmed", true)' in registry
+
+
+def test_gesture_p0_swipe_duration_clamped():
+    """P2-01: dispatchSwipe clamps durationMs to the gesture latch
+    (GESTURE_LATCH_MS = 5000). A longer stroke would outlive the 5 s
+    await (single actions) and exceed the batch's 5 s per-action
+    reservation (batches) — and the server never validated
+    durationMs before. The clamp is the single choke point for both
+    the /swipe handler and batch swipe actions."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    swipe = src[src.index("fun dispatchSwipe("):]
+    swipe = swipe[:swipe.index("\n    }\n")]
+    assert "durationMs.coerceIn(0L, GESTURE_LATCH_MS)" in swipe
+
+
+def test_gesture_p0_guard_shared_by_both_shapes():
+    """The guard validation is one shared helper
+    (validateGuardOnMainThread), used by both runGuardedOperation
+    (sync actions) and runGuardedGesture (gestures) — so the
+    admission boundary cannot drift between the two shapes."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "private fun validateGuardOnMainThread(" in src
+    op = src[src.index("fun <T> runGuardedOperation("):]
+    op = op[:op.index("\n    }\n")]
+    assert "validateGuardOnMainThread(expectedPackage, treeHash, generation, isSessionValid)" in op
+    gesture = src[src.index("fun runGuardedGesture("):]
+    gesture = gesture[:gesture.index("\n    }\n")]
+    assert "validateGuardOnMainThread(expectedPackage, treeHash, generation, isSessionValid)" in gesture
+    assert "runOnMainThread(Callable {" in gesture
+    assert "val ok = dispatch.await(GESTURE_LATCH_MS)" in gesture
+    assert "return ExecutionOutcome(ok, dispatch.callbackFired())" in gesture
+
+
+def test_gesture_p0_dispatch_logs_diagnostics():
+    """dispatchGestureAsync logs the dispatch-time state (whether
+    gestureHandler is null, whether the gesture thread is alive)
+    so the next live test records WHY the callback did or did not
+    fire — the v2.9.28 failure was undiagnosable from the client."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    body = src[src.index("private fun dispatchGestureAsync("):]
+    body = body[:body.index("\n    }\n")]
+    assert 'BridgeLog.log("gesture", "dispatch handler="' in body
+    assert "gestureHandler" in body
+    assert "gestureThread?.isAlive" in body
+    assert "threadAlive=" in body
+
+
+def test_gesture_p0_click_still_returns_200(mock_app):
+    """The redesign must not change the client contract: a /click
+    still returns 200 with ok=true through the mock (the mock's
+    canned response models a dispatched-and-completed gesture)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.click(159, 1429)
+    assert result["ok"] is True

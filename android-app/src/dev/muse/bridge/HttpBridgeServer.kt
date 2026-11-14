@@ -2236,6 +2236,10 @@ open class HttpBridgeServer(
                             .put("action_id", r.actionId)
                             .put("status", r.status)
                             .put("error", if (r.error.isEmpty()) JSONObject.NULL else r.error)
+                            // P1-02: whether the action's completion
+                            // was verified (a gesture whose callback
+                            // never fired is executed but unconfirmed).
+                            .put("confirmed", r.confirmed)
                             .put("hash_before", r.hashBefore)
                             .put("hash_after", r.hashAfter))
                     }
@@ -2486,14 +2490,24 @@ open class HttpBridgeServer(
                 // operation's own metadata (getInt() guarantees an
                 // integer, not an in-screen range — out-of-range
                 // values are posted as-is).
-                val ok = svc!!.runGuardedOperation(
+                // Gesture P0 (v2.9.29): runGuardedGesture — the guard
+                // + dispatch run on the main thread, and the result
+                // wait runs on this HTTP worker thread (via
+                // GestureDispatch.await). The main thread never blocks
+                // on the gesture latch, so the callback can fire.
+                // P1-01: the response carries gesture_confirmed —
+                // true only when the completion callback fired. A
+                // callback timeout is dispatch-accepted (ok=true),
+                // not a 500, and the client can tell it apart.
+                val outcome = svc!!.runGuardedGesture(
                     ctx.expectedPackage, ctx.treeHash, ctx.generation,
                     { isSessionCurrent(ctx.sessionId) }) {
                     opGeneration = noteOperation(lifecycleGeneration, "タップ " + x + "/" + y, ctx.sessionId)
-                    svc!!.tap(x, y)
+                    svc!!.dispatchTap(x, y)
                 }
                 status = 200
-                sendJson(out, status, JSONObject().put("ok", ok)
+                sendJson(out, status, JSONObject().put("ok", outcome.ok)
+                    .put("gesture_confirmed", outcome.confirmed)
                     .put("session_id", currentSessionId() ?: JSONObject.NULL))
             } else if ("/swipe" == path && "POST" == method) {
                 // C-04: guarded (same shape as /click).
@@ -2508,15 +2522,17 @@ open class HttpBridgeServer(
                 val durationMs = j.optLong("duration_ms", 300)
                 // SPEC-OVERRIDE-001 §2: coordinates are the
                 // operation's own metadata (see /click).
-                val ok = svc!!.runGuardedOperation(
+                // Gesture P0 (v2.9.29): runGuardedGesture (see /click).
+                val outcome = svc!!.runGuardedGesture(
                     ctx.expectedPackage, ctx.treeHash, ctx.generation,
                     { isSessionCurrent(ctx.sessionId) }) {
                     opGeneration = noteOperation(lifecycleGeneration,
                         "スワイプ " + x1 + "/" + y1 + " → " + x2 + "/" + y2, ctx.sessionId)
-                    svc!!.swipe(x1, y1, x2, y2, durationMs)
+                    svc!!.dispatchSwipe(x1, y1, x2, y2, durationMs)
                 }
                 status = 200
-                sendJson(out, status, JSONObject().put("ok", ok)
+                sendJson(out, status, JSONObject().put("ok", outcome.ok)
+                    .put("gesture_confirmed", outcome.confirmed)
                     .put("session_id", currentSessionId() ?: JSONObject.NULL))
             } else if ("/type_text" == path && "POST" == method) {
                 // C-04: guarded (same shape as /click).

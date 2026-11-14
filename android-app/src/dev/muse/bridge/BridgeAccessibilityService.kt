@@ -80,7 +80,7 @@ open class BridgeAccessibilityService : AccessibilityService() {
          * action's worst-case time plus the post-processing margin
          * (BATCH_POST_PROCESS_MS) — otherwise the batch stops as
          * PARTIAL without starting it. A gesture action can take up
-         * to the 5 s latch in runGesture (BATCH_ACTION_MAX_MS) plus
+         * to the 5 s gesture await (GESTURE_LATCH_MS, BATCH_ACTION_MAX_MS) plus
          * the 2 s expectChange wait (BATCH_EXPECT_CHANGE_MS); a wait
          * action's duration is its waitMs. Reserving these keeps the
          * batch inside the 20 s A-3 timeout instead of only stopping
@@ -89,6 +89,9 @@ open class BridgeAccessibilityService : AccessibilityService() {
         private const val BATCH_ACTION_MAX_MS = 5000L
         private const val BATCH_EXPECT_CHANGE_MS = 2000L
         private const val BATCH_POST_PROCESS_MS = 2000L
+
+        /** How long a single-action gesture wait may take (the old 5 s latch). */
+        private const val GESTURE_LATCH_MS = 5000L
 
         /** Caps for the node tree (Phase 1): keeps one /state small and fast. */
         private const val MAX_NODES = 500
@@ -374,14 +377,15 @@ open class BridgeAccessibilityService : AccessibilityService() {
     /**
      * T-M4 P0 (v2.9.27): the gesture-callback thread. dispatchGesture
      * delivers its GestureResultCallback on the Handler given as its
-     * 3rd argument — null means the main thread. runGuardedOperation
-     * runs tap()/swipe() on the main thread and blocks it on a latch
-     * inside runGesture, so a null Handler starved the callback and
-     * every gesture timed out (HTTP 500) even though the gesture
-     * itself had executed. A dedicated background thread lets the
-     * callback fire while the main thread waits; the latch is the
-     * happens-before edge for the ok[] flag. Created in
-     * onServiceConnected, quit in onDestroy.
+     * 3rd argument — null means the main thread. The v2.9.27 fix gave
+     * it this dedicated thread because the old runGesture blocked
+     * the main thread on the latch, starving a main-thread callback.
+     * The v2.9.28 live retest (2026-11-14) proved the callback still
+     * does not fire on this device, so v2.9.29 no longer blocks the
+     * main thread at all (dispatch on main, await on the HTTP worker)
+     * — the callback can land on either thread. This thread stays as
+     * the preferred callback target. Created in onServiceConnected,
+     * quit in onDestroy.
      */
     private var gestureThread: HandlerThread? = null
     private var gestureHandler: Handler? = null
@@ -746,13 +750,100 @@ open class BridgeAccessibilityService : AccessibilityService() {
         return bytes
     }
 
-    @Throws(Exception::class)
-    private fun runGesture(path: Path, durationMs: Long): Boolean {
+    /**
+     * Outcome of an action: ok = it ran (or was dispatched),
+     * confirmed = its completion was verified. Non-gesture actions
+     * complete synchronously, so confirmed is always true for them.
+     * A gesture whose callback never fired is ok=true,
+     * confirmed=false (dispatch-accepted, P1-01/P1-02) — the tap
+     * lands (live evidence), but completion was not
+     * callback-confirmed, and the caller must say so.
+     */
+    class ExecutionOutcome(@JvmField val ok: Boolean, @JvmField val confirmed: Boolean)
+
+    /**
+     * A dispatched gesture that has not been awaited yet. The dispatch
+     * happens on the main thread; the wait happens on the CALLER's
+     * thread, never on the main thread. The main thread must stay
+     * free so the result callback can run — on this device the
+     * callback is delivered to the main thread (or nowhere), so the
+     * old runGesture (which blocked the main thread on the latch)
+     * starved it and every gesture timed out (v2.9.28 live retest,
+     * 2026-11-14). The latch is the happens-before edge for ok[].
+     */
+    class GestureDispatch(private val latch: CountDownLatch, private val ok: BooleanArray) {
+        /** True when the result callback fired (onCompleted/onCancelled). */
+        fun callbackFired(): Boolean = latch.count == 0L
+
+        /**
+         * Waits for the result. MUST be called off the main thread
+         * (the HTTP worker for single actions) — waiting on the main
+         * thread would starve the callback. Returns ok[0] when the
+         * callback fired. When it does NOT fire within timeoutMs,
+         * returns true (dispatch-accepted) instead of throwing —
+         * the gesture was dispatched and accepted, and the tap lands
+         * (live evidence); a 500 here would be a false failure
+         * (P1-01). The caller reads callbackFired() to report
+         * whether completion was confirmed.
+         */
+        fun await(timeoutMs: Long): Boolean {
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                throw IllegalStateException(
+                    "gesture await must not run on the main thread — it would starve the callback")
+            }
+            val fired = latch.await(timeoutMs, TimeUnit.MILLISECONDS)
+            if (!fired) {
+                BridgeLog.log("gesture",
+                    "await timed out — dispatch-accepted, completion unconfirmed")
+            }
+            return if (fired) ok[0] else true
+        }
+
+        /**
+         * Batch-path settle: waits up to settleMs for the result
+         * callback, then returns. Unlike await() it never throws on
+         * timeout — a batch gesture that was dispatched is recorded
+         * as executed (the tap lands; the callback is unreliable on
+         * this device), and the batch's budget + the next action's
+         * guard are the safety net. Returns ok[0] when the callback
+         * fired, true when it did not (dispatch-accepted). Runs on
+         * the main thread (the batch loop) by design: the wait is
+         * bounded by the gesture's own duration, not the 5 s latch,
+         * and the result does not depend on the callback.
+         */
+        fun settle(settleMs: Long): Boolean {
+            val fired = latch.await(maxOf(0L, settleMs), TimeUnit.MILLISECONDS)
+            BridgeLog.log("gesture", "settle callbackFired=" + fired)
+            return if (fired) ok[0] else true
+        }
+    }
+
+    /**
+     * Dispatches a gesture and returns immediately with the pending
+     * result — it does NOT wait. Must be called on the main thread
+     * (dispatchGesture is a main-thread operation). The caller awaits
+     * the result with GestureDispatch.await() (single actions, off
+     * the main thread) or .settle() (batches). Logs the dispatch-time
+     * diagnostics: whether gestureHandler is null and whether the
+     * gesture thread is alive — so the next live test records WHY
+     * the callback did or did not fire.
+     */
+    private fun dispatchGestureAsync(path: Path, durationMs: Long): GestureDispatch {
         val desc = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs))
             .build()
         val latch = CountDownLatch(1)
         val ok = booleanArrayOf(false)
+        // Gesture P0 (v2.9.29): record the dispatch-time state. If
+        // gestureHandler is null (or the thread is dead), the callback
+        // falls back to the main thread — which the old runGesture
+        // blocked, starving it. The redesign no longer blocks the
+        // main thread, so the callback can fire either way; this log
+        // pins down which it was.
+        val handler = gestureHandler
+        val threadAlive = gestureThread?.isAlive ?: false
+        BridgeLog.log("gesture", "dispatch handler=" + (if (handler == null) "null" else "set")
+            + " threadAlive=" + threadAlive)
         val dispatched = dispatchGesture(desc, object : GestureResultCallback() {
             override fun onCompleted(g: GestureDescription) {
                 ok[0] = true
@@ -762,39 +853,37 @@ open class BridgeAccessibilityService : AccessibilityService() {
             override fun onCancelled(g: GestureDescription) {
                 latch.countDown()
             }
-            // T-M4 P0 (v2.9.27): the callback MUST NOT go to the
-            // main thread — runGesture blocks it on the latch, so
-            // a null Handler starved the callback and every
-            // gesture timed out. gestureHandler runs on the
-            // dedicated "bridge-gesture" thread.
-        }, gestureHandler)
+        }, handler)
         if (!dispatched) {
             throw Exception("gesture rejected by the system "
                 + "(dispatchGesture returned false — is canPerformGestures set?)")
         }
-        if (!latch.await(5, TimeUnit.SECONDS)) {
-            throw Exception("gesture timed out")
-        }
-        return ok[0]
+        return GestureDispatch(latch, ok)
     }
 
     @Throws(Exception::class)
-    fun tap(x: Int, y: Int): Boolean {
+    fun dispatchTap(x: Int, y: Int): GestureDispatch {
         val path = Path()
         path.moveTo(x.toFloat(), y.toFloat())
         // A moveTo-only path is degenerate: the gesture system may drop
         // it without ever calling the callback. A 1px line makes it a
         // real stroke.
         path.lineTo((x + 1).toFloat(), y.toFloat())
-        return runGesture(path, 100)
+        return dispatchGestureAsync(path, 100)
     }
 
     @Throws(Exception::class)
-    fun swipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): Boolean {
+    fun dispatchSwipe(x1: Int, y1: Int, x2: Int, y2: Int, durationMs: Long): GestureDispatch {
         val path = Path()
         path.moveTo(x1.toFloat(), y1.toFloat())
         path.lineTo(x2.toFloat(), y2.toFloat())
-        return runGesture(path, durationMs)
+        // P2-01: clamp the duration to the gesture latch. A longer
+        // stroke would outlive the 5 s await (single actions) and
+        // exceed the batch's 5 s per-action reservation (batches) —
+        // and the server never validated durationMs before. The
+        // clamp is the single choke point for both the /swipe
+        // handler and batch swipe actions.
+        return dispatchGestureAsync(path, durationMs.coerceIn(0L, GESTURE_LATCH_MS))
     }
 
     /**
@@ -1125,6 +1214,42 @@ open class BridgeAccessibilityService : AccessibilityService() {
      * @throws OperationGuardException (nothing dispatched).
      */
     @Throws(Exception::class)
+    /**
+     * The guard validation + revision re-check, run on the main
+     * thread. Extracted from runGuardedOperation so runGuardedGesture
+     * shares it (one boundary, two shapes: sync actions vs
+     * gestures). Throws OperationGuardException on a guard refusal
+     * or a revision move between validation and dispatch.
+     */
+    private fun validateGuardOnMainThread(
+        expectedPackage: String,
+        treeHash: Int?,
+        generation: Int?,
+        isSessionValid: () -> Boolean
+    ) {
+        val root = rootInActiveWindow
+        val currentPackage: String?
+        try {
+            currentPackage = root?.packageName?.toString()
+        } finally {
+            root?.recycle()
+        }
+        val validatedRevision = checkGuard(
+            currentPackage, expectedPackage, treeHash, generation, isSessionValid)
+        // Re-check: the SPEC's invalidation point. No snapshot
+        // can be produced inside this main-thread task (snapshots
+        // are taken on the main thread only), so this read cannot
+        // differ — it documents the boundary.
+        val revisionAfter: Int
+        synchronized(this) {
+            revisionAfter = lastRevision
+        }
+        if (revisionAfter != validatedRevision) {
+            throw OperationGuardException("generation_mismatch",
+                "a new snapshot appeared between validation and dispatch")
+        }
+    }
+
     fun <T> runGuardedOperation(
         expectedPackage: String,
         treeHash: Int?,
@@ -1133,29 +1258,37 @@ open class BridgeAccessibilityService : AccessibilityService() {
         action: () -> T
     ): T {
         return runOnMainThread(Callable {
-            val root = rootInActiveWindow
-            val currentPackage: String?
-            try {
-                currentPackage = root?.packageName?.toString()
-            } finally {
-                root?.recycle()
-            }
-            val validatedRevision = checkGuard(
-                currentPackage, expectedPackage, treeHash, generation, isSessionValid)
-            // Re-check: the SPEC's invalidation point. No snapshot
-            // can be produced inside this main-thread task (snapshots
-            // are taken on the main thread only), so this read cannot
-            // differ — it documents the boundary.
-            val revisionAfter: Int
-            synchronized(this) {
-                revisionAfter = lastRevision
-            }
-            if (revisionAfter != validatedRevision) {
-                throw OperationGuardException("generation_mismatch",
-                    "a new snapshot appeared between validation and dispatch")
-            }
+            validateGuardOnMainThread(expectedPackage, treeHash, generation, isSessionValid)
             action()
         })
+    }
+
+    /**
+     * Guarded gesture (v2.9.29 gesture P0): the guard + dispatch run
+     * on the main thread (the serialized admission boundary, same as
+     * runGuardedOperation), and the result wait runs on the CALLER's
+     * thread (the HTTP worker) via GestureDispatch.await(). The main
+     * thread never blocks on the gesture latch — blocking it starved
+     * the callback on this device (v2.9.28 live retest). The action
+     * returns the pending dispatch; noteOperation (inside the action,
+     * as in runGuardedOperation) still runs on the main thread after
+     * the guard passes. Returns the outcome (P1-01): ok=true when
+     * the gesture ran or was dispatched, confirmed=true only when
+     * the completion callback fired.
+     */
+    fun runGuardedGesture(
+        expectedPackage: String,
+        treeHash: Int?,
+        generation: Int?,
+        isSessionValid: () -> Boolean,
+        action: () -> GestureDispatch
+    ): ExecutionOutcome {
+        val dispatch = runOnMainThread(Callable {
+            validateGuardOnMainThread(expectedPackage, treeHash, generation, isSessionValid)
+            action()
+        })
+        val ok = dispatch.await(GESTURE_LATCH_MS)
+        return ExecutionOutcome(ok, dispatch.callbackFired())
     }
 
     // ---------------------------------------------------------------
@@ -1308,6 +1441,15 @@ open class BridgeAccessibilityService : AccessibilityService() {
         @JvmField var error: String = ""
         @JvmField var hashBefore: Int = 0
         @JvmField var hashAfter: Int = 0
+        /** P1-02: true when the action's completion was verified.
+         * Non-gesture actions always confirm (they complete
+         * synchronously). A gesture whose callback never fired is
+         * executed but unconfirmed (dispatch-accepted) — the record
+         * must say so, not absorb it into a plain "executed".
+         * CONS-185 P2-01: the default is false (unconfirmed unless
+         * proven) — a failed action must never read confirmed=true
+         * just because the outcome never landed. */
+        @JvmField var confirmed: Boolean = false
     }
 
     // The explicit empty primary constructor matters: a class
@@ -1630,14 +1772,23 @@ open class BridgeAccessibilityService : AccessibilityService() {
             r.actionId = a.actionId
             r.hashBefore = lastTreeHash
             try {
-                val ok = executeAction(a, treeHash)
-                r.status = if (ok) "executed" else "failed"
-                if (!ok) {
+                val outcome = executeAction(a, treeHash)
+                r.status = if (outcome.ok) "executed" else "failed"
+                // P1-02: record whether the action's completion was
+                // verified. A gesture whose callback never fired is
+                // executed but unconfirmed (dispatch-accepted).
+                r.confirmed = outcome.confirmed
+                if (!outcome.ok) {
                     r.error = "action returned false"
                 }
             } catch (e: Exception) {
                 r.status = "failed"
                 r.error = e.message ?: e.toString()
+                // CONS-185 P2-01: a failed action is never confirmed
+                // (dispatch rejected, or an exception before the
+                // outcome landed). Without this, the confirmed
+                // default would leave "failed but confirmed=true".
+                r.confirmed = false
             }
             r.hashAfter = lastTreeHash
             result.results.add(r)
@@ -1710,17 +1861,43 @@ open class BridgeAccessibilityService : AccessibilityService() {
     }
 
     @Throws(Exception::class)
-    private fun executeAction(a: BatchAction, treeHash: Int): Boolean {
+    private fun executeAction(a: BatchAction, treeHash: Int): ExecutionOutcome {
         return when (a.type) {
-            "click_node" -> clickNodeInternal(a.nodeId, treeHash).ok
-            "tap" -> tap(a.x, a.y)
-            "type_node" -> typeNodeInternal(a.nodeId, treeHash, a.text).ok
-            "type" -> typeText(a.text)
-            "key" -> pressKey(a.key)
-            "swipe" -> swipe(a.x1, a.y1, a.x2, a.y2, a.durationMs)
+            "click_node" -> ExecutionOutcome(clickNodeInternal(a.nodeId, treeHash).ok, true)
+            // Gesture P0 (v2.9.29, D-G1 option B): the batch loop runs
+            // on the main thread, so a batch gesture cannot await the
+            // callback there (that starved it — v2.9.28 live retest).
+            // Dispatch, then settle for at most the gesture's own
+            // duration (so the next action runs after the gesture
+            // completes, preserving the sequencing). A dispatched
+            // gesture is recorded as executed. P1-02: the outcome
+            // carries whether the callback fired — an unconfirmed
+            // gesture is executed but NOT confirmed, and the record
+            // says so. A full two-phase batch restructure (await on
+            // the HTTP worker) is a future round — it would move the
+            // loop off the main thread and break the M2-02
+            // record-close.
+            "tap" -> {
+                val d = dispatchTap(a.x, a.y)
+                ExecutionOutcome(d.settle(100), d.callbackFired())
+            }
+            "type_node" -> ExecutionOutcome(typeNodeInternal(a.nodeId, treeHash, a.text).ok, true)
+            "type" -> ExecutionOutcome(typeText(a.text), true)
+            "key" -> ExecutionOutcome(pressKey(a.key), true)
+            "swipe" -> {
+                // CONS-185 P1-01: the SAME clamped duration goes to
+                // both dispatchSwipe and settle. dispatchSwipe clamps
+                // internally, but settle(a.durationMs) would still
+                // wait the raw (possibly 30 s) value on the main
+                // thread — the clamp must be shared, not applied
+                // twice in different places.
+                val clampedDurationMs = a.durationMs.coerceIn(0L, GESTURE_LATCH_MS)
+                val d = dispatchSwipe(a.x1, a.y1, a.x2, a.y2, clampedDurationMs)
+                ExecutionOutcome(d.settle(clampedDurationMs), d.callbackFired())
+            }
             "wait" -> {
                 Thread.sleep(maxOf(0L, a.waitMs))
-                true
+                ExecutionOutcome(true, true)
             }
             else -> throw IllegalArgumentException("unknown action type: " + a.type)
         }

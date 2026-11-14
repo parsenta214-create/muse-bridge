@@ -1132,6 +1132,11 @@ class BatchRegistry(private val dir: File) {
             rObj.put("action_id", r.actionId)
             rObj.put("status", r.status)
             if (r.error.isEmpty()) rObj.put("error", JSONObject.NULL) else rObj.put("error", r.error)
+            // P1-02: whether the action's completion was verified
+            // (a gesture whose callback never fired is executed but
+            // unconfirmed). Persisted with the record so a replay
+            // shows the same distinction.
+            rObj.put("confirmed", r.confirmed)
             rObj.put("hash_before", r.hashBefore)
             rObj.put("hash_after", r.hashAfter)
             results.put(rObj)
@@ -1188,6 +1193,10 @@ class BatchRegistry(private val dir: File) {
             r.actionId = requireString(rObj, "action_id")
             r.status = requireString(rObj, "status")
             r.error = if (rObj.isNull("error")) "" else requireString(rObj, "error")
+            // P1-02: "confirmed" is optional on read — records
+            // persisted before v2.9.29 lack it, and those actions
+            // were all synchronous (confirmed by construction).
+            r.confirmed = rObj.optBoolean("confirmed", true)
             r.hashBefore = requireInt(rObj, "hash_before")
             r.hashAfter = requireInt(rObj, "hash_after")
             result.results.add(r)
