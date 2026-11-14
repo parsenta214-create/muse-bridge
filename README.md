@@ -2375,6 +2375,29 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     live persist time of registry.complete() on the phone (to be
     measured at install/smoke); the "android" resolver-package case
     in /open (Mitsuki P2-01).
+106. Gesture P0 redesign — two-phase gesture dispatch + confirmed
+    contract, v2.9.29 (2026-11-14, System Development Lead decision).
+    Kohaku Tier 1 ADOPTABLE 9.5/10 (CONS-20261114-186, P0=0/P1=0/P2=0);
+    Mitsuki final review ADOPTABLE 9.5/10 (P0=0/P1=0/P2=0). Tests 594
+    passed, 18 subtests passed. (a) Gesture dispatch is two-phase:
+    dispatch on the main thread, await on the HTTP worker thread
+    (GestureDispatch + dispatchGestureAsync, runGuardedGesture with
+    shared validateGuardOnMainThread); the main-thread latch wait
+    (the deadlock cause) is removed. (b) A callback timeout is NOT
+    a 500: await returns dispatch-accepted, and /click and /swipe
+    send gesture_confirmed (true only when the completion callback
+    fired); a dispatch rejection still throws and still 500s. (c)
+    Batch ActionResult.confirmed (default false; the runBatchInternal
+    catch sets false explicitly) reaches the batch HTTP response and
+    the persisted registry record; optBoolean("confirmed", true) on
+    read is only for pre-v2.9.29 records (all synchronous). (d)
+    Swipe durationMs is clamped to 5 s (GESTURE_LATCH_MS) and the
+    same clamped value is shared by dispatchSwipe and batch settle,
+    so the raw value never reaches settle(). Carried forward: the
+    live C-04-7 retest after install (callback-not-arrived
+    gesture_confirmed=false and registry behaviour; a duration_ms=
+    30000 batch swipe settling within 5 s); the live persist time of
+    registry.complete() on the phone (to be measured at install/smoke).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are
