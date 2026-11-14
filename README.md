@@ -2350,6 +2350,31 @@ the phone (raw `ServerSocket`, zero dependencies, pure Java).
     implementation: session-start bootstrap contract; /batch node ops
     and /notification_action scope; generation acceptance tests as an
     extension of C-04-5.
+105. F1 fix round — whole-repo review M1–M7 P0/P1 corrections,
+    v2.9.28 (2026-11-14, System Development Lead decision). Kohaku
+    Tier 1 ADOPTABLE 9.0/10 (CONS-20261114-183, P0=0/P1=0/P2=2);
+    Mitsuki final review ADOPTABLE 9.2/10 (P0=0/P1=0/P2=2). Tests 586
+    passed, 18 subtests passed. (a) A main-thread timeout 503 carries
+    error_id "main_thread_timeout" and dispatched "unknown": it
+    carves out SPEC-FOREGROUND-GUARD-001 L186 — the "all 409/503/400
+    mean the operation did not run" rule does not apply to timeout
+    503s, whose outcome is unknown. (b) The main-thread batch task
+    itself closes the record via registry.complete()/discard(), so no
+    record stays IN_PROGRESS after the HTTP worker times out. (c) A
+    wall-clock batch budget (15 s absolute deadline, captured before
+    runOnMainThread; per-action worst-case reservation + 2 s
+    post-processing margin; stop as PARTIAL) keeps batches inside the
+    20 s A-3 timeout. (d) /open follows the §2.5 launch contract:
+    resolve the target package before noteOperation (422 when no app
+    can open the link), apply LAUNCH_DENY_LIST (403), restore the
+    openUri false → 422 path, verify the launch foreground and return
+    the five-outcome launch result. (e) VM client: an explicit
+    operation_context is posted verbatim with no fresh /state fetch;
+    retry classification prefers TransportError.http_status and uses
+    the anchored `^app returned HTTP` regex. Carried forward: the
+    live persist time of registry.complete() on the phone (to be
+    measured at install/smoke); the "android" resolver-package case
+    in /open (Mitsuki P2-01).
 ### What the user must do on the phone (bridge app route, current)
 
 The bridge app is the current route (wireless debugging and USB are

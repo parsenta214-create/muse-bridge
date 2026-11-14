@@ -21,7 +21,13 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 NON_RETRYABLE_STATUS = {400, 401, 403, 404}
 _DELAY_RANGES_S = [(1, 2), (2, 4), (4, 8), (8, 16), (16, 32)]
 
-_STATUS_RE = re.compile(r"\b(400|401|403|404|408|409|410|413|422|429|431|500|502|503|504)\b")
+# F1 (M4 P0-02, CONS-180 P2-02): the regex that reads a status out of
+# a message must only match the client's own formatted form
+# ("app returned HTTP 503 ...") — a bare number, or "HTTP 503" in an
+# arbitrary message, is not a status (IncompleteRead(409 bytes read)
+# is a byte count, not a 409).
+_HTTP_STATUS_RE = re.compile(
+    r"^app returned HTTP\s+(400|401|403|404|408|409|410|413|422|429|431|500|502|503|504)\b")
 _RETRY_AFTER_RE = re.compile(r"retry-after[:=]\s*(\d+)", re.IGNORECASE)
 _TRANSIENT_NETWORK_TYPES = {
     "ConnectError",
@@ -43,7 +49,17 @@ def extract_status(error):
         status = getattr(response, "status", None)
     if isinstance(status, int):
         return status
-    match = _STATUS_RE.search(str(error))
+    # F1 (M4 P0-02): a TransportError's http_status is authoritative
+    # when it is an int. When it is None the failure was not an HTTP
+    # response at all, so only the client's own formatted form
+    # ("app returned HTTP 503 ...") may supply a status from the
+    # message — a bare number (IncompleteRead(409 bytes read) is a
+    # byte count, not a 409) must never be misclassified.
+    if hasattr(error, "http_status"):
+        http_status = error.http_status
+        if isinstance(http_status, int):
+            return http_status
+    match = _HTTP_STATUS_RE.search(str(error))
     return int(match.group(1)) if match else None
 
 

@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -56,6 +57,38 @@ open class BridgeAccessibilityService : AccessibilityService() {
         fun getInstance(): BridgeAccessibilityService? = instance
 
         private const val MAIN_THREAD_TIMEOUT_MS = 20000L
+
+        /**
+         * F1 (M7-07, D3案A): the wall-clock budget for one batch
+         * inside runBatchInternal. A batch must finish well inside
+         * the 20 s A-3 main-thread timeout (MAIN_THREAD_TIMEOUT_MS)
+         * so the result persist and the HTTP response still fit.
+         * The budget is an absolute deadline set by runBatch()
+         * BEFORE runOnMainThread (the queue wait is inside it), and
+         * each action reserves its worst-case time before starting
+         * (CONS-182 P1-01). When the budget is exhausted the batch
+         * stops gracefully (PARTIAL/failed with stopReason "batch
+         * budget exhausted") instead of hitting the 20 s timeout
+         * and orphaning its IN_PROGRESS record (M2-02). Uses the
+         * monotonic clock (elapsedRealtime), not wall time.
+         */
+        private const val BATCH_BUDGET_MS = 15000L
+
+        /**
+         * CONS-182 P1-01: the per-action time reservation. Before
+         * starting an action, the remaining budget must cover the
+         * action's worst-case time plus the post-processing margin
+         * (BATCH_POST_PROCESS_MS) — otherwise the batch stops as
+         * PARTIAL without starting it. A gesture action can take up
+         * to the 5 s latch in runGesture (BATCH_ACTION_MAX_MS) plus
+         * the 2 s expectChange wait (BATCH_EXPECT_CHANGE_MS); a wait
+         * action's duration is its waitMs. Reserving these keeps the
+         * batch inside the 20 s A-3 timeout instead of only stopping
+         * after the budget is already spent.
+         */
+        private const val BATCH_ACTION_MAX_MS = 5000L
+        private const val BATCH_EXPECT_CHANGE_MS = 2000L
+        private const val BATCH_POST_PROCESS_MS = 2000L
 
         /** Caps for the node tree (Phase 1): keeps one /state small and fast. */
         private const val MAX_NODES = 500
@@ -1427,30 +1460,80 @@ open class BridgeAccessibilityService : AccessibilityService() {
             else -> throw IllegalStateException("unknown admission decision: ${decision.kind}")
         }
         val snapshotId = entrySnapshotId
+        // F1 (M2-02, D2案A): the record is closed inside the
+        // main-thread task itself, not by the HTTP worker after
+        // runOnMainThread returns. The worker may time out
+        // (ServiceTimeoutException) and abandon the wait while the
+        // main-thread task keeps running — if the record were
+        // closed only below, it would stay IN_PROGRESS forever and
+        // a re-send would answer "running" for a finished batch.
+        // Closing it in the task means a late completion lands
+        // (the record becomes COMPLETED/PARTIAL/FAILED) and a
+        // re-send gets the result. complete()/discard() are no-ops
+        // when the record is not IN_PROGRESS, so the outer paths
+        // below stay as a safety net. The persist is a single
+        // small atomic file write; doing it on the main thread is
+        // the price of closing the record when the worker is gone.
+        // CONS-182 P1-01: the batch deadline is captured HERE,
+        // before runOnMainThread, so the queue wait between
+        // submitting the task and the main thread starting it is
+        // inside the 15 s budget (a batchStartMs inside
+        // runBatchInternal would exclude it). The deadline is an
+        // absolute monotonic time; runBatchInternal measures the
+        // remaining budget against it.
+        val batchDeadlineMs = SystemClock.elapsedRealtime() + BATCH_BUDGET_MS
         val result = try {
             runOnMainThread(Callable {
-                runBatchInternal(batchId, treeHash, actions, snapshotId,
-                    guardExpectedPackage, guardTreeHash, guardGeneration, guardSessionValid,
-                    onFinalGuardPassed)
+                try {
+                    val r = runBatchInternal(batchId, treeHash, actions, snapshotId,
+                        guardExpectedPackage, guardTreeHash, guardGeneration, guardSessionValid,
+                        onFinalGuardPassed, batchDeadlineMs)
+                    r.payloadHash = payloadHash
+                    // Step 4: persist the result. If that persist
+                    // fails, the Registry marks the record UNKNOWN
+                    // in memory (a re-send gets "unknown", never a
+                    // re-execution); the result is still returned
+                    // to this caller (SPEC §2.4).
+                    registry.complete(batchId, payloadHash, r)
+                    r
+                } catch (e: OperationGuardException) {
+                    // C-04: the in-task guard refused the batch after
+                    // admission — remove the IN_PROGRESS record so a
+                    // re-send does not answer "running" for a batch
+                    // that never ran. CONS-167 P2-01: a failed
+                    // discard is logged, not silent — the record is
+                    // UNKNOWN in memory then (see discard()), never
+                    // "running".
+                    if (!registry.discard(batchId, payloadHash)) {
+                        BridgeLog.log("batch_registry",
+                            "discard did not remove the record for " + batchId + "; see registry log")
+                    }
+                    throw e
+                } catch (e: Exception) {
+                    // The task failed unexpectedly (not a guard
+                    // refusal and not a completed batch): close the
+                    // record as FAILED so it never pins IN_PROGRESS.
+                    val failed = BatchResult()
+                    failed.batchId = batchId
+                    failed.payloadHash = payloadHash
+                    failed.snapshotId = snapshotId
+                    failed.status = "failed"
+                    failed.stopReason = e.message ?: e.toString()
+                    registry.complete(batchId, payloadHash, failed)
+                    throw e
+                }
             })
         } catch (e: OperationGuardException) {
-            // C-04: the in-task guard refused the batch after
-            // admission — remove the IN_PROGRESS record so a re-send
-            // does not answer "running" for a batch that never ran.
-            // CONS-167 P2-01: a failed discard is logged, not silent
-            // — the record is UNKNOWN in memory then (see
-            // discard()), never "running".
-            if (!registry.discard(batchId, payloadHash)) {
-                BridgeLog.log("batch_registry",
-                    "discard did not remove the record for " + batchId + "; see registry log")
-            }
+            // The in-task discard already ran (see above); this is
+            // only a safety net for a guard failure that escaped
+            // the task. discard() is a no-op when the record is
+            // already gone.
+            registry.discard(batchId, payloadHash)
             throw e
         }
         result.payloadHash = payloadHash
-        // Step 4: persist the result. If that persist fails, the
-        // Registry marks the record UNKNOWN in memory (a re-send
-        // gets "unknown", never a re-execution); the result is
-        // still returned to this caller (SPEC §2.4).
+        // Safety net: complete() is a no-op when the record is no
+        // longer IN_PROGRESS (already closed inside the task).
         registry.complete(batchId, payloadHash, result)
         return result
     }
@@ -1466,8 +1549,12 @@ open class BridgeAccessibilityService : AccessibilityService() {
         guardTreeHash: Int? = null,
         guardGeneration: Int? = null,
         guardSessionValid: (() -> Boolean)? = null,
-        onFinalGuardPassed: (() -> Unit)? = null
+        onFinalGuardPassed: (() -> Unit)? = null,
+        batchDeadlineMs: Long
     ): BatchResult {
+        // CONS-182 P1-01: the budget is the absolute deadline set
+        // by runBatch() before runOnMainThread — the queue wait is
+        // inside it. The guard below runs inside the budget.
         // C-04: the in-task guard — the true admission boundary.
         // This runs inside the same main-thread task as the actions
         // below, so no other Bridge operation can change the context
@@ -1499,6 +1586,46 @@ open class BridgeAccessibilityService : AccessibilityService() {
         result.snapshotId = entrySnapshotId
         for (i in actions.indices) {
             val a = actions[i]
+            // CONS-182 P1-01: stop gracefully when the batch budget
+            // is exhausted, instead of running into the 20 s
+            // main-thread timeout (which would orphan the record,
+            // M2-02). Before starting an action, RESERVE its
+            // worst-case time plus the post-processing margin — an
+            // action started just before the budget ends can take up
+            // to 5 s (gesture latch) + 2 s (expectChange wait), and
+            // without the reservation it would finish at ~20 s with
+            // no margin for the persist + response. A wait action's
+            // duration is its waitMs (M2-09: the wait no longer
+            // blocks the main thread unbounded). If the remaining
+            // budget cannot cover the action and the margin, stop as
+            // PARTIAL without starting it. The post-loop status logic
+            // marks this PARTIAL (or failed when nothing completed) —
+            // no new status needed.
+            val remainingMs = batchDeadlineMs - SystemClock.elapsedRealtime()
+            if (remainingMs <= 0) {
+                result.stoppedAt = i
+                result.stopReason = "batch budget exhausted"
+                break
+            }
+            // CONS-183 P2-01: the expectChange wait is reserved for
+            // EVERY action type, including a wait — a wait action
+            // can carry expectChange == true (no validation rejects
+            // the combination), and the waitForChange after it costs
+            // up to 2 s. A wait's own duration is its waitMs.
+            val actionMaxMs = (if (a.type == "wait") {
+                maxOf(0L, a.waitMs)
+            } else {
+                BATCH_ACTION_MAX_MS
+            }) + if (a.expectChange) BATCH_EXPECT_CHANGE_MS else 0L
+            if (remainingMs < actionMaxMs + BATCH_POST_PROCESS_MS) {
+                result.stoppedAt = i
+                result.stopReason = if (a.type == "wait") {
+                    "batch budget exhausted before wait"
+                } else {
+                    "batch budget exhausted"
+                }
+                break
+            }
             val r = ActionResult()
             r.actionId = a.actionId
             r.hashBefore = lastTreeHash
@@ -1524,10 +1651,29 @@ open class BridgeAccessibilityService : AccessibilityService() {
                 result.stopReason = r.error
                 break
             }
+            // CONS-181 P2-01: the budget check is common to every
+            // action, not only expectChange ones — it runs right
+            // after the result is recorded, so the last action
+            // (expectChange == false) is covered too. The action is
+            // already recorded, so this stops as PARTIAL. (Against
+            // the absolute deadline now, CONS-182 P1-01.)
+            if (SystemClock.elapsedRealtime() >= batchDeadlineMs) {
+                result.stoppedAt = i
+                result.stopReason = "batch budget exhausted"
+                break
+            }
             if (a.expectChange) {
+                // CONS-181 P2-01: only wait when the remaining
+                // budget covers the 2 s wait; otherwise stop — the
+                // action is already recorded, so this is PARTIAL.
+                if (batchDeadlineMs - SystemClock.elapsedRealtime() < BATCH_EXPECT_CHANGE_MS) {
+                    result.stoppedAt = i
+                    result.stopReason = "batch budget exhausted"
+                    break
+                }
                 val changed: Boolean
                 try {
-                    changed = waitForChange(r.hashBefore, 2000)
+                    changed = waitForChange(r.hashBefore, BATCH_EXPECT_CHANGE_MS)
                 } catch (e: Exception) {
                     r.status = "failed"
                     r.error = e.message ?: e.toString()

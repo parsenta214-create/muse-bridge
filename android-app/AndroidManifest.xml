@@ -36,6 +36,13 @@
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
+        <!-- F1 (M6 FG-01): /open resolves its URI to a target package
+             (ACTION_VIEW) for the §2.5 launch contract — without a
+             VIEW query, PackageManager.resolveActivity() returns null
+             for every handler and /open would always answer 422. -->
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+        </intent>
     </queries>
 
     <application

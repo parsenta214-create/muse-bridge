@@ -213,6 +213,14 @@ class MockAppHandler(BaseHTTPRequestHandler):
     # mock always answers VERIFICATION_UNAVAILABLE, like the
     # real server. Reset by the fixture.
     launch_outcome = "launched"
+    # F1 (CONS-180 P1-01): the package /open resolves its URI to.
+    # Tests set it to a deny-listed package to exercise the /open
+    # deny-list check. Reset by the fixture.
+    open_target_package = "com.example.browser"
+    # F1 (CONS-181 P1-01): when False, /open fails the launch
+    # (openUri() false) and answers 422 "could not open uri".
+    # Reset by the fixture.
+    open_succeeds = True
     # P0-4 deny list (System Development Lead decision 2026-11-06 20:16,
     # README decision 91): mirrors the Java LAUNCH_DENY_LIST —
     # the mock refuses these packages with 403 before any launch
@@ -693,12 +701,58 @@ class MockAppHandler(BaseHTTPRequestHandler):
             if err is not None:
                 return self._send_json(400, {"ok": False, "error": err})
             return self._send_json(200, {"ok": True, "snapshot_id": 7})
+        if self.path == "/open":
+            # F1 (M6 FG-01): /open now runs the same §2.5 launch
+            # contract as /launch_app, so the mock answers the
+            # 5-outcome launch-result shape (validated by
+            # parse_launch_app), with the resolved target package.
+            # The mock's fixed target is open_target_package; with
+            # a11y off the launch is unconfirmed /
+            # VERIFICATION_UNAVAILABLE, as in /launch_app.
+            # F1 (CONS-180 P1-01): /open applies the launch deny
+            # list, as /launch_app does — a deny-listed target is
+            # refused with 403 before any launch attempt and before
+            # the operation notification.
+            target = MockAppHandler.open_target_package
+            # Mitsuki P2-02 (final review): no app handles the URI
+            # (resolveOpenTargetPackage returns null) — 422 "no app
+            # can open this link", as in the real server.
+            if target is None:
+                return self._send_json(422, {
+                    "ok": False, "error": "no app can open this link",
+                    "session_id": MockAppHandler.mock_session_id})
+            if target in MockAppHandler.LAUNCH_DENY_LIST:
+                return self._send_json(403, {
+                    "ok": False,
+                    "error": f"launch denied: {target} is on the deny list"})
+            # F1 (CONS-181 P1-01): a failed launch (openUri() false)
+            # is 422 "could not open uri" — the old path — not a 200
+            # verification. A failed launch is a different state from
+            # "launch succeeded but foreground unverified".
+            if not MockAppHandler.open_succeeds:
+                return self._send_json(422, {
+                    "ok": False, "error": "could not open uri",
+                    "session_id": MockAppHandler.mock_session_id})
+            if not MockAppHandler.accessibility:
+                return self._send_json(200, {
+                    "ok": False, "status": "unconfirmed",
+                    "reason": "VERIFICATION_UNAVAILABLE",
+                    "accepted": True, "package": target,
+                    "launch_requested": True,
+                    "foreground_confirmed": None, "verification": "none",
+                    "session_id": MockAppHandler.mock_session_id})
+            return self._send_json(200, {
+                "ok": True, "status": "launched", "accepted": True,
+                "package": target,
+                "launch_requested": True,
+                "foreground_confirmed": True,
+                "verification": "accessibility",
+                "session_id": MockAppHandler.mock_session_id})
         # C-04: the guarded endpoints return the server-issued
         # session id on success (the mock's fixed id); the unguarded
         # ones (/notify, /install_apk, /clipboard) do not.
         if self.path.split("?")[0] in ("/click", "/swipe", "/type_text",
-                                       "/press_key", "/notification_action",
-                                       "/open"):
+                                       "/press_key", "/notification_action"):
             return self._send_json(200, {
                 "ok": True, "echo": payload,
                 "session_id": MockAppHandler.mock_session_id})
@@ -720,6 +774,8 @@ def mock_app(monkeypatch, tmp_path):
     MockAppHandler.tailscale_stale = False
     MockAppHandler.launch_outcome = "launched"
     MockAppHandler.launch_outcomes = {}
+    MockAppHandler.open_target_package = "com.example.browser"
+    MockAppHandler.open_succeeds = True
     MockAppHandler.launch_attempts = 0
     MockAppHandler.operation_notifications = 0
     MockAppHandler.disconnect_during_launch = False
@@ -2747,16 +2803,25 @@ def test_app_a11y_off_available_endpoints(mock_app):
     """P0-1: with a11y off, the endpoints that do not need the
     service still answer 200 — /health, /logs, /notifications,
     /open, /install_apk, GET/POST /clipboard, /launch_app,
-    /notify. C-04 (SPEC §2.2): /notification_action is NOT in
-    this list anymore — it is a guarded ordinary screen operation
-    and needs the service (see test_app_a11y_off_structured_503,
-    which now covers it)."""
+    /notify. F1 (M6 FG-01): /open and /launch_app are processed
+    with a11y off (HTTP 200), but their reports are unconfirmed,
+    never a success claim. C-04 (SPEC §2.2): /notification_action
+    is NOT in this list anymore — it is a guarded ordinary screen
+    operation and needs the service (see
+    test_app_a11y_off_structured_503, which now covers it)."""
     MockAppHandler.accessibility = False
     adapter = ab.AndroidAdapter(actions_enabled=True)
     assert ab.check_app()["ok"] is None  # reachable, a11y off
     assert adapter.logs()["ok"] is True
     assert adapter.notifications()["ok"] is True
-    assert adapter.open("https://example.com")["ok"] is True
+    # F1 (M6 FG-01): /open runs the same §2.5 launch contract as
+    # /launch_app now — with a11y off it is processed (HTTP 200)
+    # but the report is unconfirmed, never a success claim.
+    opened = adapter.open("https://example.com")
+    assert opened["ok"] is False
+    assert opened["status"] == "unconfirmed"
+    assert opened["reason"] == "VERIFICATION_UNAVAILABLE"
+    assert opened["package"] == "com.example.browser"
     assert adapter.install_apk(url="https://example.com/app.apk")["ok"] is True
     assert adapter.get_clipboard()["ok"] is True
     assert adapter.set_clipboard("MUSEテスト")["ok"] is True
@@ -4207,13 +4272,13 @@ def test_drive001_strings_present():
 
 def test_locale_tile_version_2_9_25():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.27 / code 80 (was v2.9.26 / code 79 at the T-M4 P0 gesture fix)."""
+    carries v2.9.28 / code 81 (was v2.9.27 / code 80 at the F1 fix round)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.27"' in build
-    assert "VERSION_CODE=80" in build
+    assert 'VERSION_NAME="2.9.28"' in build
+    assert "VERSION_CODE=81" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -5007,14 +5072,14 @@ def test_a11yoff002_d11_logs():
 
 
 def test_a11yoff002_version_2_9_25():
-    """The build now carries v2.9.27 / code 80 (was v2.9.26 / code 79
+    """The build now carries v2.9.28 / code 81 (was v2.9.27 / code 80
     at the T-M4 P0 gesture fix)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.27"' in build
-    assert "VERSION_CODE=80" in build
+    assert 'VERSION_NAME="2.9.28"' in build
+    assert "VERSION_CODE=81" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -6084,10 +6149,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the v2.9.27 / code 80 T-M4 P0 gesture-fix build's."""
+    kotlin-stdlib.jar. Version is the v2.9.28 / code 81 F1 fix-round build's."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.27"' in build
-    assert "VERSION_CODE=80" in build
+    assert 'VERSION_NAME="2.9.28"' in build
+    assert "VERSION_CODE=81" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -7004,3 +7069,326 @@ def test_tm4_p0_gesture_callback_not_on_main_thread():
     guard = src[src.index("fun <T> runGuardedOperation("):]
     guard = guard[:guard.index("\n    }\n")]
     assert "runOnMainThread(Callable {" in guard
+
+
+# ---------------------------------------------------------------------------
+# F1 fix round (whole-repo review M2-M7, 2026-11-14, v2.9.28 / code 81)
+# ---------------------------------------------------------------------------
+
+
+def test_f1_p0_02_extract_status_trusts_http_status(mock_app):
+    """F1 (M4 P0-02): retry.extract_status must trust a TransportError's
+    http_status when it is an int, and only the client's own formatted
+    form ("app returned HTTP 503 ...") may supply a status from the
+    message — a bare number in an arbitrary message is never a status.
+    IncompleteRead(409 bytes read) is a truncated response, not a 409
+    pre-execution refusal; a bare 503 TransportError is not a 503
+    response."""
+    import retry
+    # A truncated response is not a 409.
+    err = ab.TransportError("IncompleteRead(409 bytes read)")
+    assert err.http_status is None
+    assert retry.extract_status(err) is None
+    # A truncated 500-byte response is not a 500.
+    err = ab.TransportError("IncompleteRead(500 bytes read)")
+    assert retry.extract_status(err) is None
+    # An explicit http_status is authoritative.
+    err = ab.TransportError("app returned HTTP 503", http_status=503)
+    assert retry.extract_status(err) == 503
+    err = ab.TransportError("app returned HTTP 409", http_status=409)
+    assert retry.extract_status(err) == 409
+    # The client's own formatted message still reads (the retry
+    # classifier relies on it): only the "app returned HTTP <status>"
+    # form, never a bare number and never "HTTP <status>" in an
+    # arbitrary message (CONS-180 P2-02).
+    err = ab.TransportError(
+        "app returned HTTP 503 for GET /health: {} (overloaded)")
+    assert retry.extract_status(err) == 503
+    assert retry.extract_status(
+        RuntimeError("something failed with HTTP 409")) is None
+    assert retry.extract_status(
+        RuntimeError("prefix app returned HTTP 503")) is None
+    assert retry.extract_status(RuntimeError("boom 503")) is None
+    assert retry.extract_status(RuntimeError("boom")) is None
+    # ... and the batch classifier now treats the truncated response
+    # as undetermined (outcome_unknown), never not-executed.
+    assert ab._is_definitive_not_executed(
+        ab.TransportError("IncompleteRead(409 bytes read)")) is False
+
+
+def test_f1_p0_01_click_uses_supplied_operation_context(mock_app):
+    """F1 (M4 P0-01): click() accepts the operation_context of the
+    snapshot the action was decided on, and then sends NO fresh
+    /state fetch — the passed context is posted verbatim. Without it
+    the client re-fetches /state and stamps the NEW foreground onto
+    an action decided on an earlier screen (SPEC §2.6)."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    ctx = ab.bridge_protocol.build_operation_context(
+        "com.other.app", tree_hash=999, generation=3)
+    assert adapter.click(500, 800, operation_context=ctx)["ok"] is True
+    assert MockAppHandler.state_calls == 0
+    assert not [r for r in MockAppHandler.requests if r[0] == "GET"]
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert posts[0][1] == "/click"
+    assert posts[0][2]["operation_context"] == ctx
+
+
+def test_f1_p0_01_swipe_type_press_key_accept_context(mock_app):
+    """F1 (M4 P0-01): the same supplied-context path exists on swipe,
+    type_text, press_key, and notification_action — each posts the
+    passed context without a fresh /state fetch."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    ctx = ab.bridge_protocol.build_operation_context(
+        "com.other.app", tree_hash=999, generation=3)
+    assert adapter.swipe(0, 0, 10, 10, operation_context=ctx)["ok"] is True
+    assert adapter.type_text("hi", operation_context=ctx)["ok"] is True
+    assert adapter.press_key("BACK", operation_context=ctx)["ok"] is True
+    assert adapter.notification_action(
+        "k1", "open", operation_context=ctx)["ok"] is True
+    assert MockAppHandler.state_calls == 0
+    posts = [r for r in MockAppHandler.requests if r[0] == "POST"]
+    assert [p[1] for p in posts] == [
+        "/swipe", "/type_text", "/press_key", "/notification_action"]
+    for p in posts:
+        assert p[2]["operation_context"] == ctx
+
+
+def test_f1_fg_01_open_parses_launch_result(mock_app):
+    """F1 (M6 FG-01): open() now runs the §2.5 launch contract, so its
+    answer is the 5-outcome launch-result shape validated by
+    parse_launch_app — status / foreground_confirmed / package, not
+    the old bare {ok, error, session_id}."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    result = adapter.open("https://example.com")
+    assert result["status"] == "launched"
+    assert result["foreground_confirmed"] is True
+    assert result["package"] == "com.example.browser"
+
+
+def test_f1_m2_01_timeout_503_has_error_id():
+    """F1 (M2-01, D1案A): a main-thread timeout 503 carries the
+    machine-readable id "main_thread_timeout" in "error" (the
+    guard-refusal convention — the client reads body["error"] as
+    error_id), the human message in "message", and
+    "dispatched": "unknown", so it is distinguishable from a guard
+    refusal where nothing was dispatched. Source-level guard: the
+    ServiceTimeoutException catch no longer sends the raw message
+    through errorJson."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    start = src.index(
+        "catch (e: BridgeAccessibilityService.ServiceTimeoutException)")
+    end = src.index("catch (e: Exception)", start)
+    region = src[start:end]
+    assert '"main_thread_timeout"' in region
+    assert '"dispatched", "unknown"' in region
+    assert 'errorJson(e.message' not in region
+    assert 'put("error", "main_thread_timeout")' in region
+    assert 'put("message", e.message' in region
+
+
+def test_f1_m2_02_batch_record_closed_inside_task():
+    """F1 (M2-02, D2案A): runBatch closes the registry record inside
+    the main-thread task itself — complete() on the completed result,
+    discard() on an OperationGuardException, and a FAILED complete()
+    on any other task failure — so a late completion lands even when
+    the HTTP worker timed out and abandoned the wait. Source-level
+    guard: the complete/discard calls sit inside the Callable passed
+    to runOnMainThread, not only after it returns."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    start = src.index("fun runBatch(")
+    end = src.index("private fun runBatchInternal(", start)
+    region = src[start:end]
+    task = region[region.index("runOnMainThread(Callable {"):]
+    assert "registry.complete(batchId, payloadHash, r)" in task
+    assert "registry.discard(batchId, payloadHash)" in task
+    assert 'failed.status = "failed"' in task
+    assert "registry.complete(batchId, payloadHash, failed)" in task
+
+
+def test_f1_m7_07_batch_budget():
+    """F1 (M7-07, D3案A) + CONS-182 P1-01: a batch self-limits to
+    15 s of main-thread work (BATCH_BUDGET_MS) inside the 20 s A-3
+    timeout. Source-level guard: (1) the constants exist and the
+    budget is below MAIN_THREAD_TIMEOUT_MS; (2) the deadline is an
+    absolute monotonic time captured in runBatch() BEFORE
+    runOnMainThread (the queue wait is inside it) and passed to
+    runBatchInternal; (3) before each action the remaining budget
+    must cover the action's worst-case time plus the post-processing
+    margin, or the batch stops as PARTIAL without starting it; (4)
+    the post-action budget check is common to every action; (5) the
+    2 s expectChange wait runs only when the remaining budget covers
+    it; (6) the old "20 x 2 s" rationale is gone from the /batch
+    handler."""
+    svc = _kotlin_source("BridgeAccessibilityService.kt")
+    assert "private const val BATCH_BUDGET_MS = 15000L" in svc
+    assert "private const val MAIN_THREAD_TIMEOUT_MS = 20000L" in svc
+    assert "private const val BATCH_ACTION_MAX_MS = 5000L" in svc
+    assert "private const val BATCH_EXPECT_CHANGE_MS = 2000L" in svc
+    assert "private const val BATCH_POST_PROCESS_MS = 2000L" in svc
+    # (2) the deadline is set in runBatch() before runOnMainThread
+    # and passed to runBatchInternal.
+    run_batch = svc[svc.index("    fun runBatch("):]
+    run_batch = run_batch[:run_batch.index("    private fun runBatchInternal(")]
+    assert ("val batchDeadlineMs = SystemClock.elapsedRealtime()"
+            " + BATCH_BUDGET_MS") in run_batch
+    deadline_set = run_batch.index("val batchDeadlineMs")
+    submit = run_batch.index("runOnMainThread(Callable {")
+    assert deadline_set < submit
+    body = svc[svc.index("private fun runBatchInternal("):]
+    body = body[:body.index("\n    @Throws(Exception::class)\n    private fun executeAction")]
+    assert "batchDeadlineMs: Long" in body
+    assert "batchStartMs" not in body
+    # (3) the pre-action reservation: the remaining budget must
+    # cover the action's worst-case time + the post-processing
+    # margin, or the batch stops without starting the action.
+    assert ("val remainingMs = batchDeadlineMs"
+            " - SystemClock.elapsedRealtime()") in body
+    assert "if (remainingMs < actionMaxMs + BATCH_POST_PROCESS_MS)" in body
+    # CONS-183 P2-01: the expectChange wait is reserved for EVERY
+    # action type, including a wait — the + BATCH_EXPECT_CHANGE_MS
+    # sits outside the wait/gesture branch, not inside the gesture
+    # branch only.
+    assert ("}) + if (a.expectChange) BATCH_EXPECT_CHANGE_MS else 0L"
+            in body)
+    assert 'result.stopReason = "batch budget exhausted"' in body
+    assert '"batch budget exhausted before wait"' in body
+    # (4) the post-action budget check is common to every action —
+    # it runs right after the result is recorded, before the
+    # expectChange block.
+    failed_break = body.index('result.stopReason = r.error')
+    common = body.index("if (SystemClock.elapsedRealtime() >= batchDeadlineMs)")
+    expect_start = body.index("if (a.expectChange) {")
+    assert failed_break < common < expect_start
+    # (5) inside the expectChange block, the 2 s wait runs only when
+    # the remaining budget covers it; otherwise the batch stops.
+    expect = body[expect_start:]
+    assert ("if (batchDeadlineMs - SystemClock.elapsedRealtime()"
+            " < BATCH_EXPECT_CHANGE_MS") in expect
+    assert "waitForChange(r.hashBefore, BATCH_EXPECT_CHANGE_MS)" in expect
+    # (6) the old rationale is gone.
+    assert "import android.os.SystemClock" in svc
+    srv = _kotlin_source("HttpBridgeServer.kt")
+    assert "20 x 2 s + action time" not in srv
+
+
+def test_f1_fg_01_open_runs_launch_contract():
+    """F1 (M6 FG-01): the /open handler resolves the URI to its target
+    package and runs the §2.5 launch contract — verifyLaunchForeground
+    against the exact package, 5-outcome launchResultJson shape +
+    session_id. Source-level guard: (1) the handler calls
+    resolveOpenTargetPackage before noteOperation (a refused open
+    does not refresh the idle timer); (2) it calls
+    verifyLaunchForeground with the resolved package; (3) the
+    resolver uses PackageManager.resolveActivity with
+    MATCH_DEFAULT_ONLY; (4) the manifest declares VIEW in <queries>
+    so the resolution works under package-visibility rules."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    start = src.index('"/open" == path')
+    end = src.index('} else if ("/clipboard" == path', start)
+    region = src[start:end]
+    resolve = region.index("resolveOpenTargetPackage(uri)")
+    note = region.index("noteOperation(")
+    assert resolve < note, (resolve, note)
+    assert "verifyLaunchForeground(" in region
+    assert "targetPkg, svc, requestTimeMs, wasForeground" in region
+    assert '"no app can open this link"' in region
+    helper = src[src.index("private fun resolveOpenTargetPackage("):]
+    helper = helper[:helper.index("\n    }\n")]
+    assert "resolveActivity(" in helper
+    assert "PackageManager.MATCH_DEFAULT_ONLY" in helper
+    assert "activityInfo?.packageName" in helper
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parent
+    manifest = (root / "android-app" / "AndroidManifest.xml").read_text(
+        encoding="utf-8")
+    assert "android.intent.action.VIEW" in manifest
+
+
+def test_f1_p1_01_open_deny_list(mock_app):
+    """F1 (CONS-180 P1-01): /open applies the launch deny list, as
+    /launch_app does — a URI resolving to a deny-listed package is
+    refused with HTTP 403 before any launch attempt and before the
+    operation notification. The 403 surfaces as a TransportError,
+    is never retried (last_call attempts == 1), and a non-denied
+    target is processed normally afterwards."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    MockAppHandler.open_target_package = "com.kasikorn.retail.mbanking.wap"
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.open("https://example.com/deeplink")
+    assert "403" in str(excinfo.value)
+    assert "deny list" in str(excinfo.value)
+    assert adapter.last_call is not None
+    assert adapter.last_call["attempts"] == 1
+    assert adapter.last_call["status"] == 403
+    # A non-denied target is processed normally.
+    MockAppHandler.open_target_package = "com.example.browser"
+    result = adapter.open("https://example.com")
+    assert result["status"] == "launched"
+
+
+def test_f1_p1_01_open_deny_list_source():
+    """F1 (CONS-180 P1-01): the /open handler checks the resolved
+    target against LAUNCH_DENY_LIST before noteOperation/dispatch,
+    and refuses with 403 in the old error format (a policy refusal,
+    not a launch outcome). Source-level guard."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    start = src.index('"/open" == path')
+    end = src.index('} else if ("/clipboard" == path', start)
+    region = src[start:end]
+    deny = region.index("LAUNCH_DENY_LIST.contains(targetPkg)")
+    note = region.index("noteOperation(")
+    assert deny < note, (deny, note)
+    assert "launch denied: " in region
+    assert "status = 403" in region
+
+
+def test_f1_p1_01_open_launch_failure(mock_app):
+    """CONS-181 P1-01: a failed launch (openUri() false) is HTTP 422
+    "could not open uri" — the old path — not a 200 verification. A
+    failed launch is a different state from "launch succeeded but
+    foreground unverified". The 422 surfaces as a TransportError and
+    is never retried; a successful open works normally afterwards."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    MockAppHandler.open_succeeds = False
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.open("https://example.com")
+    assert "422" in str(excinfo.value)
+    assert "could not open uri" in str(excinfo.value)
+    assert adapter.last_call is not None
+    assert adapter.last_call["attempts"] == 1
+    assert adapter.last_call["status"] == 422
+    # A successful open works normally afterwards.
+    MockAppHandler.open_succeeds = True
+    result = adapter.open("https://example.com")
+    assert result["status"] == "launched"
+
+
+def test_f1_p1_01_open_launch_failure_source():
+    """CONS-181 P1-01: the /open handler takes openUri()'s return
+    value — on false it answers 422 "could not open uri" with the
+    session id, before any verification. Source-level guard."""
+    src = _kotlin_source("HttpBridgeServer.kt")
+    start = src.index('"/open" == path')
+    end = src.index('} else if ("/clipboard" == path', start)
+    region = src[start:end]
+    check = region.index("if (!openUri(uri))")
+    verify = region.index("verifyLaunchForeground(")
+    assert check < verify, (check, verify)
+    assert '"could not open uri"' in region
+
+
+def test_f1_fg_01_open_unresolvable_uri(mock_app):
+    """Mitsuki P2-02 (final review): when no app handles the URI
+    (resolveOpenTargetPackage returns null — a bad URI or an
+    unsupported scheme), /open answers 422 "no app can open this
+    link". The mock models this with open_target_package = None.
+    The 422 surfaces as a TransportError and is never retried."""
+    adapter = ab.AndroidAdapter(actions_enabled=True)
+    MockAppHandler.open_target_package = None
+    with pytest.raises(ab.TransportError) as excinfo:
+        adapter.open("unknownscheme://example")
+    assert "422" in str(excinfo.value)
+    assert "no app can open this link" in str(excinfo.value)
+    assert adapter.last_call is not None
+    assert adapter.last_call["attempts"] == 1
+    assert adapter.last_call["status"] == 422

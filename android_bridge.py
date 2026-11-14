@@ -716,33 +716,51 @@ class AndroidAdapter:
                 "user-approved action; this bridge defaults to read-only"
             )
 
-    def click(self, x: int, y: int) -> dict:
+    def click(self, x: int, y: int, operation_context: dict | None = None) -> dict:
         self._require_actions(f"click({x}, {y})")
         # C-04 (§2.2): a guarded action carries the operation_context
         # of a fresh snapshot — the server refuses (409/503) when the
         # screen moved or the foreground cannot be verified. The
         # /state fetch is a GET (retried on transient failure, like
         # any read); the POST itself still runs exactly once.
-        state = self.get_current_state()
+        # F1 (M4 P0-01): the caller may pass the operation_context of
+        # the snapshot the action was decided on (SPEC §2.6: a new
+        # operation requires a new decision, not merely a new HTTP
+        # request). Without it, the fresh /state fetch below stamps
+        # the NEW foreground onto an action decided on an earlier
+        # screen — the server can only check the fresh snapshot's
+        # self-consistency, so the tap could land on the wrong app.
+        # The fresh-fetch default is kept for callers that decide
+        # and act in one step.
+        if operation_context is None:
+            state = self.get_current_state()
+            operation_context = self._guard_context(state)
         return self._app_post("/click", bridge_protocol.build_click(
-            x, y, operation_context=self._guard_context(state)))
+            x, y, operation_context=operation_context))
 
-    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300) -> dict:
+    def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300,
+              operation_context: dict | None = None) -> dict:
         self._require_actions(f"swipe({x1}, {y1} -> {x2}, {y2})")
         # C-04 (§2.2): fresh snapshot + operation_context, as in click().
-        state = self.get_current_state()
+        # F1 (M4 P0-01): an operation_context may be passed, as in click().
+        if operation_context is None:
+            state = self.get_current_state()
+            operation_context = self._guard_context(state)
         return self._app_post("/swipe", bridge_protocol.build_swipe(
             x1, y1, x2, y2, duration_ms,
-            operation_context=self._guard_context(state)))
+            operation_context=operation_context))
 
-    def type_text(self, text: str) -> dict:
+    def type_text(self, text: str, operation_context: dict | None = None) -> dict:
         self._require_actions(f"type_text({text!r})")
         # C-04 (§2.2): fresh snapshot + operation_context, as in click().
-        state = self.get_current_state()
+        # F1 (M4 P0-01): an operation_context may be passed, as in click().
+        if operation_context is None:
+            state = self.get_current_state()
+            operation_context = self._guard_context(state)
         return self._app_post("/type_text", bridge_protocol.build_type_text(
-            text, operation_context=self._guard_context(state)))
+            text, operation_context=operation_context))
 
-    def press_key(self, key: str) -> dict:
+    def press_key(self, key: str, operation_context: dict | None = None) -> dict:
         """key is a keyevent name or code, e.g. 'BACK', 'HOME', '4', '3',
         or a DPAD key ('DPAD_UP', 'DPAD_DOWN', 'DPAD_LEFT', 'DPAD_RIGHT',
         'DPAD_CENTER', decision 66, v1.9.9). DPAD keys move focus, not
@@ -753,9 +771,12 @@ class AndroidAdapter:
         # C-04 (§2.2): fresh snapshot + operation_context, as in click().
         # Step 3: validated by the protocol module (VALID_KEYS now
         # includes the DPAD keys, matching the server's pressKey).
-        state = self.get_current_state()
+        # F1 (M4 P0-01): an operation_context may be passed, as in click().
+        if operation_context is None:
+            state = self.get_current_state()
+            operation_context = self._guard_context(state)
         return self._app_post("/press_key", bridge_protocol.build_press_key(
-            app_key, operation_context=self._guard_context(state)))
+            app_key, operation_context=operation_context))
 
     def click_node(self, node_id: str, tree_hash: int) -> dict:
         """Click a node by id (Phase 2)."""
@@ -974,10 +995,17 @@ class AndroidAdapter:
         self._require_actions(f"open({uri})")
         # C-04 (§2.5): as in launch_app — session_id only, omitted
         # when no session is retained (bootstrap).
+        # F1 (M6 FG-01): the server now runs the same §2.5 launch
+        # contract as /launch_app for /open (target package resolved
+        # from the URI, verified against the exact package, 5-outcome
+        # response), so the answer is validated by
+        # bridge_protocol.parse_launch_app, as in launch_app().
+        # Callers must read status / foreground_confirmed, not ok alone.
         body: dict = {"uri": uri}
         if self._operation_session_id is not None:
             body["operation_context"] = {"session_id": self._operation_session_id}
-        return self._app_post("/open", body)
+        return bridge_protocol.parse_launch_app(
+            self._app_post("/open", body))
 
     def install_apk(self, url=None, path=None) -> dict:
         """Install an APK (decision 75, v1.9.16): POST
@@ -1025,7 +1053,8 @@ class AndroidAdapter:
         self._require_actions("set_clipboard(...)")
         return self._app_post("/clipboard", {"text": text})
 
-    def notification_action(self, key: str, action: str, text=None) -> dict:
+    def notification_action(self, key: str, action: str, text=None,
+                            operation_context: dict | None = None) -> dict:
         """Act on a live notification (decision 77, v1.9.18):
         POST /notification_action. action "open" fires the
         notification's contentIntent (brings the app forward);
@@ -1047,9 +1076,12 @@ class AndroidAdapter:
         # like click(). (The pre-C-04 mock listed it as
         # a11y-off-available; that was stale — the SPEC fail-closes
         # it with 503 foreground_unverifiable when a11y is off.)
-        state = self.get_current_state()
+        # F1 (M4 P0-01): an operation_context may be passed, as in click().
+        if operation_context is None:
+            state = self.get_current_state()
+            operation_context = self._guard_context(state)
         body = {"key": key, "action": action,
-                "operation_context": self._guard_context(state)}
+                "operation_context": operation_context}
         if text is not None:
             body["text"] = text
         return self._app_post("/notification_action", body)

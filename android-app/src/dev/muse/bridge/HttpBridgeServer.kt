@@ -18,6 +18,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.LinkAddress
 import android.net.LinkProperties
@@ -1872,22 +1873,74 @@ open class HttpBridgeServer(
                 // /launch_app today — see P1-05). 422 when no app
                 // handles the URI; 503 when Android refuses the
                 // start.
-                // C-04 (§2.5): same launch contract as /launch_app
-                // — the session is validated before the open, and
-                // the response carries the session id.
+                // F1 (M6 FG-01): /open now runs the same §2.5 launch
+                // contract as /launch_app — the URI is resolved to its
+                // target package and validated, the launch is verified
+                // against the exact package, and the response carries
+                // the 5-outcome shape (launchResultJson) + session_id.
+                // A URI that resolves to no app is 422 (as before).
+                // The target is resolved BEFORE noteOperation, so a
+                // refused open does not refresh the idle timer
+                // (SPEC L100; the /open half of M6 FG-02).
                 val j = JSONObject(String(body, StandardCharsets.UTF_8))
                 val openSessionId = parseLaunchSession(j)
                 requireSessionCurrent(openSessionId)
                 val uri = j.getString("uri")
+                val targetPkg = resolveOpenTargetPackage(uri)
+                if (targetPkg == null) {
+                    status = 422
+                    sendJson(out, status, JSONObject().put("ok", false)
+                        .put("error", "no app can open this link")
+                        .put("session_id", currentSessionId() ?: JSONObject.NULL))
+                    return status
+                }
+                // F1 (CONS-180 P1-01): /open applies the launch deny
+                // list, as /launch_app does — a deep link into a
+                // banking app must not bypass it. Checked after the
+                // target is resolved and before noteOperation/dispatch,
+                // so a refused open posts no notification and never
+                // refreshes the idle timer. HTTP 403, old error format
+                // (a policy refusal, not a launch outcome).
+                if (LAUNCH_DENY_LIST.contains(targetPkg)) {
+                    // P1-03 (CONS-014): the package name is not
+                    // logged — the 403 answer to the VM already
+                    // names it. The log records the denial only.
+                    BridgeLog.log("launch_denied", "")
+                    status = 403
+                    sendJson(out, status, JSONObject().put("ok", false)
+                        .put("error", "launch denied: " + targetPkg + " is on the deny list"))
+                    return status
+                }
                 // v2.1: the operation is accepted — show "操作中".
                 // The URI itself never goes into the notification
                 // (it can carry tokens).
                 opGeneration = noteOperation(lifecycleGeneration, "リンクを開いています", openSessionId)
                 try {
-                    val ok = openUri(uri)
-                    status = if (ok) 200 else 422
-                    sendJson(out, status, JSONObject().put("ok", ok)
-                        .put("error", if (ok) JSONObject.NULL else "could not open uri")
+                    // P0-4: note whether the target is already in
+                    // front — the verification below only counts
+                    // observations after this request.
+                    val wasForeground = svc != null &&
+                        targetPkg == foregroundPackageSafe(svc,
+                            LAUNCH_PRE_READ_TIMEOUT_MS)
+                    val requestTimeMs = SystemClock.elapsedRealtime()
+                    // CONS-181 P1-01: openUri() returns false when
+                    // the start fails — the old 422 path ("could not
+                    // open uri"), not a 200 verification. A failed
+                    // launch is a different state from "launch
+                    // succeeded but foreground unverified". (openUri()
+                    // today throws instead of returning false, so
+                    // this is defensive; the catch blocks below cover
+                    // the live failure paths.)
+                    if (!openUri(uri)) {
+                        status = 422
+                        sendJson(out, status, JSONObject().put("ok", false)
+                            .put("error", "could not open uri")
+                            .put("session_id", currentSessionId() ?: JSONObject.NULL))
+                        return status
+                    }
+                    status = 200
+                    sendJson(out, status, verifyLaunchForeground(
+                        targetPkg, svc, requestTimeMs, wasForeground)
                         .put("session_id", currentSessionId() ?: JSONObject.NULL))
                 } catch (e: IllegalArgumentException) {
                     status = 422
@@ -2063,9 +2116,13 @@ open class HttpBridgeServer(
                     }
                     val actions = ArrayList<BridgeAccessibilityService.BatchAction>()
                     val arr = j.getJSONArray("actions")
-                    // A-5: a batch is capped at 20 actions (Codex Phase A)
-                    // so even all-expect_change batches stay inside the
-                    // 45 s request deadline (20 x 2 s + action time).
+                    // A-5: a batch is capped at 20 actions (Codex Phase A).
+                    // F1 (M7-07): the old "20 x 2 s" rationale was wrong
+                    // — expect_change always breaks on its first step,
+                    // so 20 x 2 s can never occur. A batch self-limits
+                    // to 15 s of main-thread work (BATCH_BUDGET_MS)
+                    // inside the 20 s A-3 timeout, which is inside the
+                    // 45 s request deadline.
                     if (arr.length() > 20) {
                         throw org.json.JSONException(
                             "batch has too many actions (max 20): " + arr.length())
@@ -2603,11 +2660,28 @@ open class HttpBridgeServer(
             } catch (ignored: Exception) {
             }
         } catch (e: BridgeAccessibilityService.ServiceTimeoutException) {
-            // A-3: accessibility work timed out on the main thread.
+            // F1 (M2-01, D1案A): a main-thread timeout is NOT proof of
+            // non-execution — the main-thread task may still run and
+            // dispatch after this response. The 503 keeps the status,
+            // but the body follows the guard-refusal convention: the
+            // machine-readable id in "error", the human message in
+            // "message", and "dispatched": "unknown" so the client
+            // can tell it apart from a guard refusal (where nothing
+            // was dispatched). SPEC-FOREGROUND-GUARD-001 L186 ("all
+            // 409/503/400 mean the operation did not run") is amended
+            // by the F1 decision record to carve out timeout 503s.
+            // The client reads body["error"] as error_id, and
+            // "main_thread_timeout" is not in its
+            // _BATCH_NOT_EXECUTED_ERROR_IDS, so a timeout 503 is
+            // recorded outcome_unknown, never not-executed.
             status = 503
             try {
-                sendJson(conn.getOutputStream(), status,
-                    errorJson(e.message ?: "accessibility work timed out on the main thread"))
+                sendJson(conn.getOutputStream(), status, JSONObject()
+                    .put("ok", false)
+                    .put("error", "main_thread_timeout")
+                    .put("message", e.message
+                        ?: "accessibility work timed out on the main thread")
+                    .put("dispatched", "unknown"))
             } catch (ignored: Exception) {
             }
         } catch (e: Exception) {
@@ -3630,6 +3704,24 @@ open class HttpBridgeServer(
      * ActivityNotFoundException when no app handles the URI,
      * SecurityException when Android refuses the start.
      */
+    /**
+     * F1 (M6 FG-01): resolve a URI to the package that would handle
+     * it (ACTION_VIEW, default handler), for the §2.5 launch
+     * contract on /open. Returns null when no installed app handles
+     * the URI. A URI that cannot be parsed throws
+     * IllegalArgumentException (the caller's 422 path, as in
+     * openUri). The manifest <queries> must declare VIEW (see
+     * AndroidManifest.xml) or resolveActivity() returns null for
+     * every handler under package-visibility rules.
+     */
+    private fun resolveOpenTargetPackage(uriString: String): String? {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(uriString))
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        val info = context.packageManager.resolveActivity(
+            intent, PackageManager.MATCH_DEFAULT_ONLY) ?: return null
+        return info.activityInfo?.packageName
+    }
+
     private fun openUri(uriString: String?): Boolean {
         if (uriString == null || uriString.isEmpty()) {
             throw IllegalArgumentException("uri must not be empty")
