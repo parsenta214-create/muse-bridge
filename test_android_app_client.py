@@ -4207,13 +4207,13 @@ def test_drive001_strings_present():
 
 def test_locale_tile_version_2_9_25():
     """AX-12 (superseded by SPEC-A11Y-OFF-002): the build now
-    carries v2.9.26 / code 79 (was v2.9.25 / code 78 at Stage 3 batch 4)."""
+    carries v2.9.27 / code 80 (was v2.9.26 / code 79 at the T-M4 P0 gesture fix)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.26"' in build
-    assert "VERSION_CODE=79" in build
+    assert 'VERSION_NAME="2.9.27"' in build
+    assert "VERSION_CODE=80" in build
 
 
 def test_drive001_main_activity_calls_ensure_init():
@@ -5007,14 +5007,14 @@ def test_a11yoff002_d11_logs():
 
 
 def test_a11yoff002_version_2_9_25():
-    """The build now carries v2.9.26 / code 79 (was v2.9.25 / code 78
-    at Stage 3 batch 2)."""
+    """The build now carries v2.9.27 / code 80 (was v2.9.26 / code 79
+    at the T-M4 P0 gesture fix)."""
     import pathlib
     root = pathlib.Path(__file__).resolve().parent
     build = (root / "android-app" / "build.sh").read_text(
         encoding="utf-8")
-    assert 'VERSION_NAME="2.9.26"' in build
-    assert "VERSION_CODE=79" in build
+    assert 'VERSION_NAME="2.9.27"' in build
+    assert "VERSION_CODE=80" in build
 
 
 def test_a11yoff002_attribution_first_line():
@@ -6084,10 +6084,10 @@ def test_kotlin_pilot_build_sh_two_compiler_pipeline():
     kotlinc first (-jvm-target 17, 256m heap, no auto-escalation),
     then javac as a normal mandatory step with the Kotlin output
     and kotlin-stdlib on the classpath, then d8 with exactly one
-    kotlin-stdlib.jar. Version is the v2.9.26 / code 79 smoke-fix build's."""
+    kotlin-stdlib.jar. Version is the v2.9.27 / code 80 T-M4 P0 gesture-fix build's."""
     build = _build_sh()
-    assert 'VERSION_NAME="2.9.26"' in build
-    assert "VERSION_CODE=79" in build
+    assert 'VERSION_NAME="2.9.27"' in build
+    assert "VERSION_CODE=80" in build
     assert "kotlinc" in build
     assert '"$KOTLINC" -J-Xmx256m -jvm-target 17' in build
     assert '"-cp" "$ANDROID_JAR:$BUILD/classes:$KOTLIN_STDLIB"' not in build
@@ -6961,3 +6961,46 @@ def test_v2925_smoke_header_split_drops_trailing_empties():
         lines.pop()
     for line in lines[1:]:
         assert ":" in line and line.index(":") > 0, line
+
+
+def test_tm4_p0_gesture_callback_not_on_main_thread():
+    """T-M4 P0 (v2.9.27): every /click and /swipe 500d with
+    "gesture timed out" while /press_key worked. Root cause is a
+    main-thread deadlock: runGuardedOperation runs validation +
+    tap() on the service main thread, and runGesture called
+    dispatchGesture(desc, callback, null) then blocked that same
+    thread on CountDownLatch.await(5s). A null Handler delivers
+    the GestureResultCallback on the main thread, which was
+    blocked, so the callback never fired — even though the
+    gesture itself had executed (a calculator tap 500d while its
+    display still showed the tapped digit). Fix: a dedicated
+    "bridge-gesture" HandlerThread whose Handler is passed to
+    dispatchGesture, so the callback fires while the main thread
+    waits. Source-level guards: (1) dispatchGesture is passed
+    gestureHandler, never the null literal; (2) the thread is
+    created in onServiceConnected and quit in onDestroy; (3)
+    runGuardedOperation still runs the operation on the main
+    thread (C-04 admission serialization unchanged)."""
+    src = _kotlin_source("BridgeAccessibilityService.kt")
+    # (1) the callback goes to the gesture thread, never null.
+    assert "}, gestureHandler)" in src
+    body = src[src.index("private fun runGesture("):]
+    body = body[:body.index("\n    }\n")]
+    assert "}, null)" not in body
+    assert "dispatchGesture(desc, object : GestureResultCallback() {" in body
+    # (2) HandlerThread lifecycle: created on connect, quit on destroy.
+    assert 'HandlerThread("bridge-gesture")' in src
+    assert "gestureHandler = Handler(thread.looper)" in src
+    connected = src[src.index("override fun onServiceConnected()"):]
+    connected = connected[:connected.index("\n    }\n")]
+    assert 'HandlerThread("bridge-gesture")' in connected
+    assert "thread.start()" in connected
+    destroyed = src[src.index("override fun onDestroy()"):]
+    destroyed = destroyed[:destroyed.index("\n    }\n")]
+    assert "gestureThread?.quitSafely()" in destroyed
+    assert "gestureThread = null" in destroyed
+    assert "gestureHandler = null" in destroyed
+    # (3) runGuardedOperation still serializes on the main thread.
+    guard = src[src.index("fun <T> runGuardedOperation("):]
+    guard = guard[:guard.index("\n    }\n")]
+    assert "runOnMainThread(Callable {" in guard

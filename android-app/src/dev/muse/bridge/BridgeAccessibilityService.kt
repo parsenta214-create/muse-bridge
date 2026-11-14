@@ -9,6 +9,7 @@ import android.graphics.Path
 import android.graphics.Rect
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.view.Display
 import android.view.accessibility.AccessibilityEvent
@@ -337,6 +338,21 @@ open class BridgeAccessibilityService : AccessibilityService() {
      */
     private var mainHandler: Handler? = null
 
+    /**
+     * T-M4 P0 (v2.9.27): the gesture-callback thread. dispatchGesture
+     * delivers its GestureResultCallback on the Handler given as its
+     * 3rd argument — null means the main thread. runGuardedOperation
+     * runs tap()/swipe() on the main thread and blocks it on a latch
+     * inside runGesture, so a null Handler starved the callback and
+     * every gesture timed out (HTTP 500) even though the gesture
+     * itself had executed. A dedicated background thread lets the
+     * callback fire while the main thread waits; the latch is the
+     * happens-before edge for the ok[] flag. Created in
+     * onServiceConnected, quit in onDestroy.
+     */
+    private var gestureThread: HandlerThread? = null
+    private var gestureHandler: Handler? = null
+
     /** Accessibility work timed out waiting for the main thread (-> 503). */
     open class ServiceTimeoutException(message: String) : Exception(message)
 
@@ -444,6 +460,12 @@ open class BridgeAccessibilityService : AccessibilityService() {
         // A-3: the main-thread handler is the single execution
         // context for accessibility work.
         mainHandler = Handler(Looper.getMainLooper())
+        // T-M4 P0 (v2.9.27): start the gesture-callback thread
+        // (see the gestureThread field KDoc).
+        val thread = HandlerThread("bridge-gesture")
+        thread.start()
+        gestureThread = thread
+        gestureHandler = Handler(thread.looper)
         // C-01 (SPEC-BATCH-PERSIST-001 §2.1): the BatchRegistry is
         // the sole authority for batch records. Created once; a
         // reconnect reuses it (init() is idempotent and the
@@ -461,6 +483,13 @@ open class BridgeAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         executor.shutdownNow()
+        // T-M4 P0 (v2.9.27): stop the gesture-callback thread.
+        // quitSafely() drains already-queued callbacks; a gesture
+        // in flight when the service dies times out on the latch
+        // instead of hanging (same fail-safe as before).
+        gestureThread?.quitSafely()
+        gestureThread = null
+        gestureHandler = null
         broadcastA11yStateChanged()
         super.onDestroy()
     }
@@ -700,7 +729,12 @@ open class BridgeAccessibilityService : AccessibilityService() {
             override fun onCancelled(g: GestureDescription) {
                 latch.countDown()
             }
-        }, null)
+            // T-M4 P0 (v2.9.27): the callback MUST NOT go to the
+            // main thread — runGesture blocks it on the latch, so
+            // a null Handler starved the callback and every
+            // gesture timed out. gestureHandler runs on the
+            // dedicated "bridge-gesture" thread.
+        }, gestureHandler)
         if (!dispatched) {
             throw Exception("gesture rejected by the system "
                 + "(dispatchGesture returned false — is canPerformGestures set?)")
